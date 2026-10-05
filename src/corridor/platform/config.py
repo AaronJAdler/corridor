@@ -4,6 +4,7 @@ Everything comes from environment variables prefixed ``CORRIDOR_``. Values that 
 have no default: the process refuses to start without them rather than run with a guess.
 """
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, SecretStr
@@ -49,6 +50,44 @@ class Settings(BaseSettings):
     redis_url: SecretStr
     redis_key_prefix: str = "corridor:"
     redis_timeout_seconds: float = Field(default=0.25, gt=0)
+
+    # Passwords are hashed with Argon2id. None means the library's RFC 9106 parameters;
+    # the test suite lowers them so a login does not cost a tenth of a second.
+    argon2_time_cost: int | None = Field(default=None, ge=1)
+    argon2_memory_cost_kib: int | None = Field(default=None, ge=8)
+    argon2_parallelism: int | None = Field(default=None, ge=1)
+
+    # Access tokens are ES256 JWTs. The private key is given inline (as it arrives from a
+    # secret store) or as a file (as `corridor keys generate` writes it). The key id is
+    # derived from the key, so there is nothing to keep in step. Public keys of retired
+    # signing keys are listed so their tokens verify until they expire.
+    jwt_issuer: str = "corridor"
+    jwt_audience: str = "corridor-api"
+    jwt_signing_key: SecretStr | None = None
+    jwt_signing_key_file: Path | None = None
+    jwt_additional_public_keys: list[str] = Field(default_factory=list)
+    access_token_ttl_seconds: int = Field(default=900, ge=30)
+    refresh_token_ttl_seconds: int = Field(default=30 * 24 * 3600, ge=60)
+
+    # After this many consecutive failed logins an account is locked, for a period that
+    # doubles with each further failure up to the maximum.
+    login_lockout_threshold: int = Field(default=5, ge=1)
+    login_lockout_base_seconds: int = Field(default=60, ge=1)
+    login_lockout_max_seconds: int = Field(default=3600, ge=1)
+
+    # Rate limits, per client address. They fail open when Redis is unavailable.
+    rate_limit_enabled: bool = True
+    rate_limit_per_minute: int = Field(default=600, ge=1)
+    rate_limit_auth_per_minute: int = Field(default=10, ge=1)
+
+    # The outbox dispatcher and the worker that runs it.
+    outbox_batch_size: int = Field(default=20, ge=1, le=500)
+    outbox_concurrency: int = Field(default=10, ge=1, le=100)
+    outbox_claim_seconds: int = Field(default=60, ge=1)
+    outbox_max_attempts: int = Field(default=8, ge=1)
+    outbox_poll_seconds: float = Field(default=5.0, gt=0)
+    outbox_retention_days: int = Field(default=7, ge=1)
+    worker_metrics_port: int = Field(default=0, ge=0, le=65535)
 
 
 class MigrationSettings(BaseSettings):

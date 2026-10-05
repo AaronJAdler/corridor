@@ -51,6 +51,10 @@ def settings(database: postgres.TestDatabase) -> Settings:
         db_max_overflow=40,
         redis_url=redis_support.redis_url(),
         redis_key_prefix=redis_support.unique_prefix(),
+        # The cheapest parameters the library accepts. The algorithm is the same.
+        argon2_time_cost=1,
+        argon2_memory_cost_kib=8,
+        argon2_parallelism=1,
     )
 
 

@@ -68,6 +68,12 @@ def _is_sensitive_key(key: object) -> bool:
     return isinstance(key, str) and _SENSITIVE_KEY.search(key) is not None
 
 
+def scrub(value: Any) -> Any:
+    """A copy of ``value`` with secrets removed. For data that is stored rather than logged,
+    such as audit details and recorded error messages."""
+    return _scrub(value)
+
+
 def redact(_logger: WrappedLogger, _method: str, event: EventDict) -> EventDict:
     """Remove secrets from a log event, by key name and by the shape of the value."""
     for key in list(event):
