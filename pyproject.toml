@@ -72,7 +72,6 @@ check = { sequence = ["lint", "typecheck", "contracts", "test"], help = "Every g
 line-length = 100
 target-version = "py314"
 src = ["src", "tests"]
-extend-exclude = ["migrations/versions"]
 
 [tool.ruff.lint]
 select = [
@@ -94,6 +93,7 @@ select = [
 ]
 ignore = [
     "E501",  # the formatter owns line length
+    "N818",  # domain errors are named for the refusal: InsufficientFunds, NotFound
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -101,8 +101,12 @@ ignore = [
     "S101",  # assert is the point of a test
     "S105",  # fixture passwords
     "S106",
+    "PT012", # a transaction block that must fail is one action, though several statements
 ]
 "scripts/**" = ["T20"]
+"migrations/**" = [
+    "S608",  # DDL is built from a validated role name; nothing here comes from a request
+]
 "src/corridor/cli.py" = ["T20"]
 "src/corridor/demo.py" = ["T20"]
 
@@ -162,7 +166,7 @@ layers = [
     "(corridor.payments) | (corridor.fx)",
     "(corridor.wallets) | (corridor.risk)",
     "(corridor.ledger) | (corridor.identity) | (corridor.providers) | (corridor.outbox) | (corridor.audit)",
-    "(corridor.platform)",
+    "corridor.platform",
 ]
 
 [[tool.importlinter.contracts]]
