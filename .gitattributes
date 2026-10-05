@@ -1,0 +1,9 @@
+# One line-ending convention everywhere, so files built into a Linux image from a Windows
+# checkout are identical to those built on Linux.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
+*.pdf binary
+uv.lock linguist-generated=true

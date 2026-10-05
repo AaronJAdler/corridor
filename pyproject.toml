@@ -1,0 +1,172 @@
+[project]
+name = "corridor"
+version = "0.1.0"
+description = "Wallet backend with a double-entry ledger, built on FastAPI, PostgreSQL and Redis."
+readme = "README.md"
+requires-python = ">=3.14"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Aaron Adler" }]
+dependencies = [
+    "alembic>=1.20,<2",
+    "argon2-cffi>=25.1",
+    "asyncpg>=0.31",
+    "fastapi>=0.142",
+    "httpx>=0.28",
+    "prometheus-client>=0.26",
+    "pydantic[email]>=2.13,<3",
+    "pydantic-settings>=2.15,<3",
+    "pyjwt[crypto]>=2.15,<3",
+    "redis>=8.1,<9",
+    "sqlalchemy[asyncio]>=2.1,<2.2",
+    "structlog>=26.1",
+    "typer>=0.27",
+    "uvicorn[standard]>=0.54",
+]
+
+[project.scripts]
+corridor = "corridor.cli:app"
+
+[dependency-groups]
+dev = [
+    "detect-secrets>=1.5",
+    "hypothesis>=6.168",
+    "import-linter>=2.15",
+    "mypy>=2.4",
+    "pip-audit>=2.10",
+    "poethepoet>=0.48",
+    "pytest>=9.1",
+    "pytest-asyncio>=1.4",
+    "pytest-cov>=7.1",
+    "ruff>=0.16",
+]
+
+[build-system]
+requires = ["hatchling>=1.32"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/corridor", "src/corridor_sim"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+# --- Tasks -----------------------------------------------------------------
+# Plain commands, so they behave the same in PowerShell and in a Unix shell.
+
+[tool.poe.tasks]
+dev = { cmd = "corridor serve --reload", help = "Run the API with auto-reload" }
+worker = { cmd = "corridor worker", help = "Run the worker" }
+migrate = { cmd = "corridor db migrate", help = "Apply database migrations" }
+format = { sequence = [{ cmd = "ruff check --fix ." }, { cmd = "ruff format ." }], help = "Fix lint findings and format" }
+lint = { sequence = [{ cmd = "ruff check ." }, { cmd = "ruff format --check ." }], help = "Lint and check formatting" }
+typecheck = { cmd = "mypy", help = "Strict type check of src" }
+contracts = { cmd = "lint-imports", help = "Check module boundaries" }
+test = { cmd = "pytest", help = "Run the test suite" }
+smoke = { cmd = "python scripts/smoke.py", help = "Boot a real server process and probe it" }
+check = { sequence = ["lint", "typecheck", "contracts", "test"], help = "Every gate, in order" }
+
+# --- Lint ------------------------------------------------------------------
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["src", "tests"]
+extend-exclude = ["migrations/versions"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",  # pycodestyle, pyflakes
+    "I",            # import order
+    "B",            # bugbear
+    "UP",           # modern syntax
+    "SIM",          # simplifications
+    "ASYNC",        # async pitfalls
+    "DTZ",          # naive datetimes
+    "S",            # security
+    "PT",           # pytest style
+    "RUF",
+    "N",            # naming
+    "C4",           # comprehensions
+    "T20",          # no print
+    "TID",          # tidy imports
+    "PERF",
+]
+ignore = [
+    "E501",  # the formatter owns line length
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101",  # assert is the point of a test
+    "S105",  # fixture passwords
+    "S106",
+]
+"scripts/**" = ["T20"]
+"src/corridor/cli.py" = ["T20"]
+"src/corridor/demo.py" = ["T20"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.isort]
+known-first-party = ["corridor", "corridor_sim"]
+
+# --- Types -----------------------------------------------------------------
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+files = ["src"]
+plugins = ["pydantic.mypy"]
+warn_unreachable = true
+
+# --- Tests -----------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+asyncio_default_test_loop_scope = "function"
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["corridor"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.",
+]
+
+# --- Module boundaries -----------------------------------------------------
+# A module imports only from layers below it. Siblings in a layer are independent.
+# Parenthesised layers are optional; they hold modules that later phases add.
+
+[tool.importlinter]
+root_packages = ["corridor", "corridor_sim"]
+
+[[tool.importlinter.contracts]]
+name = "Layers: a module imports only from layers below it"
+type = "layers"
+layers = [
+    "(corridor.cli)",
+    "(corridor.api) | (corridor.worker)",
+    "(corridor.ops)",
+    "(corridor.webhooks) | (corridor.recon) | (corridor.agents)",
+    "(corridor.payments) | (corridor.fx)",
+    "(corridor.wallets) | (corridor.risk)",
+    "(corridor.ledger) | (corridor.identity) | (corridor.providers) | (corridor.outbox) | (corridor.audit)",
+    "(corridor.platform)",
+]
+
+[[tool.importlinter.contracts]]
+name = "Production code never imports the simulator"
+type = "forbidden"
+source_modules = ["corridor"]
+forbidden_modules = ["corridor_sim"]
