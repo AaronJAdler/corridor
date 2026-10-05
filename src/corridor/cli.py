@@ -52,3 +52,37 @@ def db_migrate(
         raise typer.BadParameter(f"{config} not found; run from the project root or pass --config.")
     command.upgrade(Config(str(config)), revision)
     typer.echo(f"Database is at {revision}.")
+
+
+@app.command("verify-ledger")
+def verify_ledger() -> None:
+    """Recompute the ledger's invariants. Exits 1 if any is violated."""
+    import asyncio
+
+    from sqlalchemy import text
+
+    from corridor import ledger
+    from corridor.platform.config import load_settings
+    from corridor.platform.db import Database, create_engine
+
+    async def run() -> list[ledger.Finding]:
+        db = Database(create_engine(load_settings(), application_name="corridor-verify"))
+        try:
+            async with db.transaction() as session:
+                # One snapshot for the whole report, and no time limit: this reads every
+                # posting.
+                await session.execute(
+                    text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+                )
+                await session.execute(text("SET LOCAL statement_timeout = 0"))
+                return await ledger.verify(session)
+        finally:
+            await db.dispose()
+
+    findings = asyncio.run(run())
+    for finding in findings:
+        typer.echo(str(finding))
+    if findings:
+        typer.echo(f"Ledger verification FAILED: {len(findings)} finding(s).", err=True)
+        raise typer.Exit(code=1)
+    typer.echo("Ledger verification passed: no findings.")

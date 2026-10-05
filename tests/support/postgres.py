@@ -33,6 +33,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 MIGRATIONS = REPO_ROOT / "migrations"
 
 ADMIN_URL_ENV = "CORRIDOR_TEST_POSTGRES_ADMIN_URL"
+# Optional. How PostgreSQL copies the template: WAL_LOG, its default, suits a server with
+# fsync on; FILE_COPY is several times faster on a throwaway server with fsync off.
+CLONE_STRATEGY_ENV = "CORRIDOR_TEST_POSTGRES_CLONE_STRATEGY"
 OWNER_ROLE = "corridor_test_owner"
 APP_ROLE = "corridor_test_app"
 
@@ -193,12 +196,20 @@ async def _ensure_template(url: URL) -> str:
         await connection.close()
 
 
+def _clone_strategy() -> str:
+    strategy = os.environ.get(CLONE_STRATEGY_ENV, "WAL_LOG").upper()
+    if strategy not in {"WAL_LOG", "FILE_COPY"}:
+        raise RuntimeError(f"{CLONE_STRATEGY_ENV} must be WAL_LOG or FILE_COPY")
+    return strategy
+
+
 async def _create(url: URL, template: str) -> str:
     name = f"{_TEST_PREFIX}{secrets.token_hex(8)}"
     connection = await asyncpg.connect(_asyncpg_dsn(url))
     try:
         await connection.execute(
-            f"CREATE DATABASE {_quote(name)} TEMPLATE {_quote(template)} OWNER {_quote(OWNER_ROLE)}"
+            f"CREATE DATABASE {_quote(name)} TEMPLATE {_quote(template)}"
+            f" OWNER {_quote(OWNER_ROLE)} STRATEGY {_clone_strategy()}"
         )
         await _stamp(connection, name)
     finally:

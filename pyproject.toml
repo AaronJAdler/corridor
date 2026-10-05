@@ -137,6 +137,9 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 asyncio_default_test_loop_scope = "function"
 filterwarnings = ["error"]
+markers = [
+    "corrupts_ledger: the test damages the ledger on purpose, so the check that every test leaves it sound is skipped",
+]
 
 [tool.coverage.run]
 source = ["corridor"]

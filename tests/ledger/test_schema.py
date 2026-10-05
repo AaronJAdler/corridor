@@ -30,6 +30,10 @@ UNBALANCED = "CR003"
 FOREIGN_KEY_VIOLATION = "23503"
 INSUFFICIENT_PRIVILEGE = "42501"
 
+# These tests write rows by hand, bypassing the service, so what they leave behind is not
+# what the verifier expects of the service (accounts without balance rows, for one).
+pytestmark = pytest.mark.corrupts_ledger
+
 
 async def add_account(
     session: AsyncSession,

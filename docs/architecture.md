@@ -347,19 +347,22 @@ snapshot; section 21 covers that.
 
 ### 4.7 Posting algorithm
 
-`ledger.post_entry(session, draft)` runs inside the caller's transaction, wrapped in a
-savepoint so a rejected entry leaves no partial writes:
+`ledger.post_entry(session, draft)` runs inside the caller's transaction. Every check comes
+before the first write, so a refused entry has written nothing and the caller's transaction
+stays usable:
 
-1. Validate the draft: at least two postings, positive amounts, debits equal credits per
-   asset, every account exists and matches its asset.
-2. If an entry with the same `(source_type, source_id, kind)` exists, return it. If its
-   postings differ from the draft, raise `ConflictingEntry`.
-3. Lock the `account_balances` rows of the constrained accounts involved, **in ascending
+1. Validate the draft: at least two postings, positive amounts, each account named once,
+   every account exists, debits equal credits per asset.
+2. Lock the `account_balances` rows of the constrained accounts involved, **in ascending
    account id order**.
-4. Compute the new balances. If any would be negative, raise `InsufficientFunds` before
-   writing anything.
-5. Insert the entry with `ON CONFLICT DO NOTHING`. If a concurrent transaction inserted the
-   same source first, return that entry.
+3. If an entry with the same `(source_type, source_id, kind)` exists, return it. If its
+   postings differ from the draft, raise `ConflictingEntry`. This comes after the locks
+   because a concurrent transaction posting the same event holds the same locks, and before
+   the funds check because a replay must be recognised even if the balance has since been
+   spent.
+4. Compute the new balances. If any would be negative, raise `InsufficientFunds`.
+5. Insert the entry with `ON CONFLICT DO NOTHING`. If a concurrent transaction that shares
+   no constrained account inserted the same source first, return that entry.
 6. Insert the postings in one statement, with `balance_after` for constrained accounts.
 7. Update the locked balance rows.
 

@@ -10,7 +10,9 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 from fastapi import FastAPI
+from pydantic import SecretStr
 
+from corridor import ledger
 from corridor.api.app import create_app
 from corridor.platform.clock import ManualClock, use_clock
 from corridor.platform.config import Settings
@@ -53,13 +55,38 @@ def settings(database: postgres.TestDatabase) -> Settings:
 
 
 @pytest.fixture
-async def db(settings: Settings) -> AsyncIterator[Database]:
-    """The database as the application sees it: connected as the application role."""
+async def db(settings: Settings, request: pytest.FixtureRequest) -> AsyncIterator[Database]:
+    """The database as the application sees it: connected as the application role.
+
+    When the test ends, the ledger verifier runs against whatever the test left behind, and
+    any finding fails the test. Every test in the suite is therefore also a test that the
+    ledger's invariants survived it.
+    """
     database = Database(create_engine(settings, application_name="corridor-test"))
     try:
         yield database
+        if request.node.get_closest_marker("corrupts_ledger") is None:
+            async with database.transaction() as session:
+                findings = await ledger.verify(session)
+            if findings:
+                pytest.fail(
+                    "the ledger verifier found:\n" + "\n".join(map(str, findings)), pytrace=False
+                )
     finally:
         await database.dispose()
+
+
+@pytest.fixture
+async def superuser_db(
+    settings: Settings, database: postgres.TestDatabase
+) -> AsyncIterator[Database]:
+    """Connected as a superuser. Only for tests that damage data to prove it is noticed."""
+    super_settings = settings.model_copy(update={"database_url": SecretStr(database.superuser_url)})
+    superuser = Database(create_engine(super_settings, application_name="corridor-test-superuser"))
+    try:
+        yield superuser
+    finally:
+        await superuser.dispose()
 
 
 @pytest.fixture

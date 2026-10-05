@@ -27,11 +27,12 @@ uv run corridor db migrate           apply migrations (needs CORRIDOR_DATABASE_O
 ```
 
 Tests and the smoke test need a real PostgreSQL 16+ and Redis 7+. Point them at both with
-two environment variables; they read nothing else from the environment:
+two environment variables:
 
 ```text
 CORRIDOR_TEST_POSTGRES_ADMIN_URL   postgresql://USER[:PASSWORD]@HOST:PORT/postgres  (a role that can create databases and roles)
 CORRIDOR_TEST_REDIS_URL            redis://HOST:PORT/0
+CORRIDOR_TEST_POSTGRES_CLONE_STRATEGY   optional: FILE_COPY is faster on a throwaway server with fsync off
 ```
 
 ## Rules that must never be broken
