@@ -19,7 +19,7 @@ Updated in the same change that lands each phase.
 | Phase | Title | Steps | Status | Verified by |
 |---|---|---|---|---|
 | 0 | Foundation | 4 | **done** 2026-10-05 | `uv run poe check` (137 tests), `uv run poe smoke` |
-| 1 | Ledger | 4 | not started | |
+| 1 | Ledger | 4 | **done** 2026-10-05 | `uv run poe check` (248 tests); S2 observed: 200 debits, 50 succeed |
 | 2 | Identity | 5 | not started | |
 | 3 | Async backbone | 2 | not started | |
 | 4 | Wallets and transfers | 4 | not started | |
@@ -722,3 +722,7 @@ during the build are appended here with the date and the reason.
 | 2026-10-05 | Tests use their own roles, `corridor_test_owner` and `corridor_test_app`; the application role's name is configuration | Running the suite cannot disturb a developer's own roles on the same server |
 | 2026-10-05 | The engine hides bound parameters in error messages | Statement errors would otherwise carry email addresses and password hashes into logs |
 | 2026-10-05 | `create_app` configures logging itself | The redacting pipeline is in place however the app is started, not only through the CLI |
+| 2026-10-05 | S1 is checked after every test, not once per run: the `db` fixture runs the verifier at teardown and fails the test on any finding | Each test has its own database, so a single run at the end would have nothing to verify. `corridor verify-ledger` is exercised against a live stack in phase 13 |
+| 2026-10-05 | `post_entry` has no savepoint | Every check precedes the first write, so a refusal has nothing to roll back; the savepoint cost two round trips per entry and no test could tell it was there |
+| 2026-10-05 | An account appears at most once in an entry | Keeps `balance_after` unambiguous; callers combine amounts |
+| 2026-10-05 | Accepted untested guard: `ORDER BY account_id` on the balance lock | With one `IN (...)` query PostgreSQL returns the rows in the same order to every session whatever the list order, so removing the clause changes nothing a test can see. It stays so that lock order does not depend on the planner. A control test shows the deadlock is real when rows are locked in posting order |
