@@ -106,6 +106,9 @@ def create_engine(settings: Settings, *, application_name: str) -> AsyncEngine:
         max_overflow=settings.db_max_overflow,
         pool_timeout=settings.db_pool_timeout_seconds,
         pool_pre_ping=True,
+        # Bound values are left out of error messages and statement logs: they include
+        # email addresses and password hashes.
+        hide_parameters=True,
         connect_args=_connect_args(settings, application_name),
     )
 

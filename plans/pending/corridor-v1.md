@@ -18,7 +18,7 @@ Updated in the same change that lands each phase.
 
 | Phase | Title | Steps | Status | Verified by |
 |---|---|---|---|---|
-| 0 | Foundation | 4 | not started | |
+| 0 | Foundation | 4 | **done** 2026-10-05 | `uv run poe check` (137 tests), `uv run poe smoke` |
 | 1 | Ledger | 4 | not started | |
 | 2 | Identity | 5 | not started | |
 | 3 | Async backbone | 2 | not started | |
@@ -716,3 +716,9 @@ during the build are appended here with the date and the reason.
 | 2026-10-05 | `agents` sits above `payments` | An approved request executes a transfer; `payments` stays unaware of agents |
 | 2026-10-05 | Entry points own transactions | One visible commit boundary per request, event or job |
 | 2026-10-05 | The simulator package lives at `src/corridor_sim`, beside `src/corridor` | One source root keeps packaging and imports simple; a contract forbids `corridor` from importing it |
+| 2026-10-05 | Business time comes from an application clock and is passed into SQL as a parameter | Tests can move time without sleeping; one time source for every rule that has a deadline |
+| 2026-10-05 | Advisory locks are taken in ascending order of the lock key, which is derived from the user id | A total order on the keys themselves cannot deadlock even if two ids hash to one key |
+| 2026-10-05 | The metrics module and `/metrics` exist from phase 0; step 12.1 completes the set | The transaction-retry counter was needed by the unit of work |
+| 2026-10-05 | Tests use their own roles, `corridor_test_owner` and `corridor_test_app`; the application role's name is configuration | Running the suite cannot disturb a developer's own roles on the same server |
+| 2026-10-05 | The engine hides bound parameters in error messages | Statement errors would otherwise carry email addresses and password hashes into logs |
+| 2026-10-05 | `create_app` configures logging itself | The redacting pipeline is in place however the app is started, not only through the CLI |

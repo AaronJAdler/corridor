@@ -7,8 +7,11 @@ Every data-touching test runs against a real PostgreSQL and a real Redis. See
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 
+import httpx
 import pytest
+from fastapi import FastAPI
 
+from corridor.api.app import create_app
 from corridor.platform.clock import ManualClock, use_clock
 from corridor.platform.config import Settings
 from corridor.platform.db import Database, create_engine
@@ -38,7 +41,7 @@ def settings(database: postgres.TestDatabase) -> Settings:
     return Settings(
         _env_file=None,
         environment="test",
-        log_level="WARNING",
+        log_level="INFO",
         database_url=database.app_url,
         database_owner_url=database.owner_url,
         database_app_role=postgres.APP_ROLE,
@@ -86,3 +89,20 @@ def clock() -> Iterator[ManualClock]:
     with use_clock(ManualClock(datetime(2026, 1, 15, 12, 0, tzinfo=UTC))) as manual:
         assert isinstance(manual, ManualClock)
         yield manual
+
+
+@pytest.fixture
+async def app(settings: Settings) -> AsyncIterator[FastAPI]:
+    """The API, started: its lifespan has run, so its connections are open."""
+    application = create_app(settings)
+    async with application.router.lifespan_context(application):
+        yield application
+
+
+@pytest.fixture
+async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
+    """An HTTP client wired straight to the app, with no network in between."""
+    # An unhandled error is returned as the 500 response a real client would see.
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    async with httpx.AsyncClient(transport=transport, base_url="http://corridor.test") as http:
+        yield http

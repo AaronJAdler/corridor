@@ -295,6 +295,19 @@ async def test_a_violation_reports_its_sqlstate_and_constraint(db: Database) -> 
     assert constraint_of(RuntimeError("not a database error")) is None
 
 
+@pytest.mark.usefixtures("scratch_table")
+async def test_error_messages_do_not_contain_bound_values(db: Database) -> None:
+    row = uuid.UUID("0199b7c2-6f0e-7b1a-9d53-2c1f4e8a7b10")
+    with pytest.raises(IntegrityError) as failure:
+        async with db.transaction() as session:
+            await session.execute(insert(amounts).values(id=row, amount=424242))
+            await session.execute(insert(amounts).values(id=row, amount=424242))
+
+    # The statement is shown; the values bound to it are not.
+    assert "INSERT INTO scratch_amounts" in str(failure.value)
+    assert "424242" not in str(failure.value)
+
+
 # --- advisory locks ------------------------------------------------------------------------
 
 

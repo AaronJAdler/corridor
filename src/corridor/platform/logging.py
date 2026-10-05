@@ -35,6 +35,21 @@ _SENSITIVE_VALUE: Final = re.compile(
 )
 
 
+class _StdoutHandler(logging.StreamHandler):  # type: ignore[type-arg]
+    """Writes to whatever ``sys.stdout`` is at the time, not what it was at start-up."""
+
+    def __init__(self) -> None:
+        logging.Handler.__init__(self)
+
+    @property
+    def stream(self) -> Any:
+        return sys.stdout
+
+    @stream.setter
+    def stream(self, _value: Any) -> None:
+        pass
+
+
 def _scrub(value: Any) -> Any:
     if isinstance(value, str):
         return _SENSITIVE_VALUE.sub(REDACTED, value)
@@ -88,7 +103,7 @@ def configure_logging(level: str = "INFO", fmt: str = "json") -> None:
         cache_logger_on_first_use=True,
     )
 
-    handler = logging.StreamHandler(sys.stdout)
+    handler = _StdoutHandler()
     handler.setFormatter(
         structlog.stdlib.ProcessorFormatter(
             foreign_pre_chain=shared,
@@ -96,7 +111,9 @@ def configure_logging(level: str = "INFO", fmt: str = "json") -> None:
         )
     )
     root = logging.getLogger()
-    root.handlers = [handler]
+    # Replace only a handler installed by an earlier call, so configuring twice is harmless
+    # and handlers that belong to someone else (a test runner's, say) are left alone.
+    root.handlers = [h for h in root.handlers if not isinstance(h, _StdoutHandler)] + [handler]
     root.setLevel(level)
 
     # Uvicorn installs its own handlers; hand its records to the root pipeline instead. The

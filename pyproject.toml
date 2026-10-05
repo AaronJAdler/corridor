@@ -103,7 +103,10 @@ ignore = [
     "S106",
     "PT012", # a transaction block that must fail is one action, though several statements
 ]
-"scripts/**" = ["T20"]
+"scripts/**" = [
+    "T20",
+    "S603",  # scripts start this project's own processes from fixed argument lists
+]
 "migrations/**" = [
     "S608",  # DDL is built from a validated role name; nothing here comes from a request
 ]

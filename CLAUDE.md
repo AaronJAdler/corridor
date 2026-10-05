@@ -21,10 +21,13 @@ uv run poe contracts      module boundaries (import-linter)
 uv run poe test           the test suite
 uv run pytest tests/ledger -q        one directory
 uv run pytest -k name -q             one test
+uv run poe smoke          start the API as a real process and probe it
+uv run corridor serve     run the API (needs CORRIDOR_DATABASE_URL and CORRIDOR_REDIS_URL)
+uv run corridor db migrate           apply migrations (needs CORRIDOR_DATABASE_OWNER_URL)
 ```
 
-Tests need a real PostgreSQL 16+ and Redis 7+. Point the suite at them with two environment
-variables; nothing else is read from the environment by tests:
+Tests and the smoke test need a real PostgreSQL 16+ and Redis 7+. Point them at both with
+two environment variables; they read nothing else from the environment:
 
 ```text
 CORRIDOR_TEST_POSTGRES_ADMIN_URL   postgresql://USER[:PASSWORD]@HOST:PORT/postgres  (a role that can create databases and roles)

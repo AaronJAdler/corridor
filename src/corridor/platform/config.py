@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: Literal["json", "console"] = "json"
 
+    # Addresses of the proxies whose X-Forwarded-For is believed. In deployment this is the
+    # load balancer's network; the rate limiter keys on the client address it yields.
+    forwarded_allow_ips: str = "127.0.0.1"
+
     # PostgreSQL. The application connects as the least-privileged role. The owner URL is
     # used only by migrations and is not set on the API or the worker.
     database_url: SecretStr
