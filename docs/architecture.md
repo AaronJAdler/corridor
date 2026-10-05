@@ -252,7 +252,7 @@ erDiagram
         text asset_code FK
         text kind
         text category
-        char normal_side "D or C"
+        text normal_side "D or C"
         uuid owner_id "opaque, no foreign key"
         text provider
         boolean is_constrained
@@ -276,7 +276,7 @@ erDiagram
         uuid entry_id FK
         uuid account_id FK
         text asset_code "composite FK with account_id"
-        char direction "D or C"
+        text direction "D or C"
         numeric amount "check amount > 0"
         numeric balance_after "constrained accounts only"
     }

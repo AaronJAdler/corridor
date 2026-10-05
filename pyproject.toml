@@ -172,6 +172,14 @@ layers = [
     "corridor.platform",
 ]
 
+# Tables are private: only the owning module imports its models.
+
+[[tool.importlinter.contracts]]
+name = "Ledger tables are private to the ledger"
+type = "protected"
+protected_modules = ["corridor.ledger.models"]
+allowed_importers = ["corridor.ledger"]
+
 [[tool.importlinter.contracts]]
 name = "Production code never imports the simulator"
 type = "forbidden"
