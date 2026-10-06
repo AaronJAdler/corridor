@@ -2,6 +2,9 @@
 
 from fastapi import APIRouter
 
-from corridor.api.routers import auth
+from corridor.api.routers import auth, wallets
 
-ROUTERS: tuple[APIRouter, ...] = (auth.router, auth.account_router)
+# A user is registered together with their wallets, in the one transaction.
+auth.on_user_registered.append(wallets.provision_for_new_user)
+
+ROUTERS: tuple[APIRouter, ...] = (auth.router, auth.account_router, wallets.router)
