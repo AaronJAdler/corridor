@@ -1,0 +1,116 @@
+"""Identity: users, passwords, tokens and the principal every other module receives.
+
+Other modules use the names exported here and nothing else from this package.
+"""
+
+from corridor.identity.errors import (
+    ConfigurationError,
+    EmailTaken,
+    HandleTaken,
+    InsufficientScope,
+    InvalidHandle,
+    InvalidToken,
+    UserNotFound,
+    WeakPassword,
+)
+from corridor.identity.keys import (
+    KeySet,
+    generate_private_key_pem,
+    key_id,
+    load_keyset,
+    write_keypair,
+)
+from corridor.identity.passwords import (
+    MAX_PASSWORD_LENGTH,
+    MIN_PASSWORD_LENGTH,
+    PasswordHasher,
+    validate_password,
+)
+from corridor.identity.principal import (
+    Principal,
+    Scope,
+    require_admin,
+    require_scope,
+    require_user_session,
+)
+from corridor.identity.service import (
+    complete_login,
+    find_login_candidate,
+    find_user,
+    get_user,
+    get_users,
+    issue_session,
+    lift_restriction,
+    register,
+    restrict_user,
+    revoke_all_sessions,
+    revoke_session,
+    rotate_refresh_token,
+    set_kyc_tier,
+)
+from corridor.identity.tokens import (
+    is_session_revoked,
+    mark_session_revoked,
+    mint_access_token,
+    verify_access_token,
+)
+from corridor.identity.types import (
+    AccessClaims,
+    LoginCandidate,
+    LoginOutcome,
+    RefreshOutcome,
+    Role,
+    TokenPair,
+    User,
+    UserStatus,
+)
+
+__all__ = [
+    "MAX_PASSWORD_LENGTH",
+    "MIN_PASSWORD_LENGTH",
+    "AccessClaims",
+    "ConfigurationError",
+    "EmailTaken",
+    "HandleTaken",
+    "InsufficientScope",
+    "InvalidHandle",
+    "InvalidToken",
+    "KeySet",
+    "LoginCandidate",
+    "LoginOutcome",
+    "PasswordHasher",
+    "Principal",
+    "RefreshOutcome",
+    "Role",
+    "Scope",
+    "TokenPair",
+    "User",
+    "UserNotFound",
+    "UserStatus",
+    "WeakPassword",
+    "complete_login",
+    "find_login_candidate",
+    "find_user",
+    "generate_private_key_pem",
+    "get_user",
+    "get_users",
+    "is_session_revoked",
+    "issue_session",
+    "key_id",
+    "lift_restriction",
+    "load_keyset",
+    "mark_session_revoked",
+    "mint_access_token",
+    "register",
+    "require_admin",
+    "require_scope",
+    "require_user_session",
+    "restrict_user",
+    "revoke_all_sessions",
+    "revoke_session",
+    "rotate_refresh_token",
+    "set_kyc_tier",
+    "validate_password",
+    "verify_access_token",
+    "write_keypair",
+]
