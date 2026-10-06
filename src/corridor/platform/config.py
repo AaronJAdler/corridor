@@ -89,6 +89,22 @@ class Settings(BaseSettings):
     outbox_retention_days: int = Field(default=7, ge=1)
     worker_metrics_port: int = Field(default=0, ge=0, le=65535)
 
+    # The providers: where each one is, and the key presented to it. None means the
+    # provider is not configured, and its adapter refuses to be built. One deadline covers
+    # a whole call, from connecting to the last byte of the response.
+    bank_rail_url: str | None = None
+    custody_url: str | None = None
+    fx_rates_url: str | None = None
+    bank_rail_api_key: SecretStr | None = None
+    custody_api_key: SecretStr | None = None
+    fx_rates_api_key: SecretStr | None = None
+    provider_timeout_seconds: float = Field(default=5.0, gt=0)
+
+    # The secrets that sign each provider's webhooks. A list, so that a secret can be
+    # rotated: the new one is added before the provider starts using it.
+    bank_rail_webhook_secrets: list[SecretStr] = Field(default_factory=list)
+    custody_webhook_secrets: list[SecretStr] = Field(default_factory=list)
+
 
 class MigrationSettings(BaseSettings):
     """What a migration run needs, and nothing else: the owner connection and the name of
