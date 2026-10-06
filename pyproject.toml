@@ -214,6 +214,12 @@ protected_modules = ["corridor.api.models"]
 allowed_importers = ["corridor.api"]
 
 [[tool.importlinter.contracts]]
+name = "Wallet tables are private to wallets"
+type = "protected"
+protected_modules = ["corridor.wallets.models"]
+allowed_importers = ["corridor.wallets"]
+
+[[tool.importlinter.contracts]]
 name = "The simulator never imports production code"
 type = "forbidden"
 source_modules = ["corridor_sim"]
