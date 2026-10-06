@@ -27,6 +27,8 @@ sys.path.insert(0, str(ROOT))
 from tests.support import postgres  # noqa: E402 - needs the project root on the path
 from tests.support import redis as redis_support  # noqa: E402
 
+from corridor.identity import generate_private_key_pem  # noqa: E402
+
 STARTUP_TIMEOUT_SECONDS = 30.0
 
 
@@ -96,6 +98,8 @@ def main() -> int:
         "CORRIDOR_DATABASE_URL": database.app_url,
         "CORRIDOR_REDIS_URL": redis_support.redis_url(),
         "CORRIDOR_REDIS_KEY_PREFIX": redis_support.unique_prefix(),
+        # Generated for this run and held in memory only.
+        "CORRIDOR_JWT_SIGNING_KEY": generate_private_key_pem(),
     }
     command = [
         sys.executable,

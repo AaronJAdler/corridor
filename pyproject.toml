@@ -208,6 +208,12 @@ protected_modules = ["corridor.worker.models"]
 allowed_importers = ["corridor.worker"]
 
 [[tool.importlinter.contracts]]
+name = "Idempotency keys are private to the API"
+type = "protected"
+protected_modules = ["corridor.api.models"]
+allowed_importers = ["corridor.api"]
+
+[[tool.importlinter.contracts]]
 name = "The simulator never imports production code"
 type = "forbidden"
 source_modules = ["corridor_sim"]

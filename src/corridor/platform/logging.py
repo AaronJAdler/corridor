@@ -129,6 +129,8 @@ def configure_logging(level: str = "INFO", fmt: str = "json") -> None:
         uvicorn_logger.handlers = []
         uvicorn_logger.propagate = True
     logging.getLogger("uvicorn.access").disabled = True
+    # httpx logs every request URL at INFO; provider URLs carry ids and references.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def get_logger(name: str) -> structlog.stdlib.BoundLogger:

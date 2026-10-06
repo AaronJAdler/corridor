@@ -183,7 +183,9 @@ def test_a_keyset_is_loaded_from_a_key_file(settings: Settings, tmp_path: Path) 
     path = tmp_path / "signing.pem"
     path.write_text(private_pem(signing))
 
-    keys = load_keyset(settings.model_copy(update={"jwt_signing_key_file": path}))
+    keys = load_keyset(
+        settings.model_copy(update={"jwt_signing_key": None, "jwt_signing_key_file": path})
+    )
 
     assert keys.signing_kid == key_id(signing.public_key())
     assert keys.signing_key.private_numbers() == signing.private_numbers()
@@ -290,7 +292,7 @@ def test_a_signing_key_that_is_not_a_p256_private_key_is_refused_without_echoing
 
     for configured in (
         settings.model_copy(update={"jwt_signing_key": SecretStr(pem)}),
-        settings.model_copy(update={"jwt_signing_key_file": path}),
+        settings.model_copy(update={"jwt_signing_key": None, "jwt_signing_key_file": path}),
     ):
         with pytest.raises(ConfigurationError) as failure:
             load_keyset(configured)
@@ -305,7 +307,9 @@ def test_a_signing_key_file_that_cannot_be_read_is_a_configuration_error(
     missing = tmp_path / "nowhere" / "signing.pem"
 
     with pytest.raises(ConfigurationError, match="CORRIDOR_JWT_SIGNING_KEY_FILE"):
-        load_keyset(settings.model_copy(update={"jwt_signing_key_file": missing}))
+        load_keyset(
+            settings.model_copy(update={"jwt_signing_key": None, "jwt_signing_key_file": missing})
+        )
 
 
 def unusable_public_keys() -> dict[str, str]:
@@ -344,7 +348,9 @@ def test_a_written_keypair_round_trips_through_the_key_file_setting(
     if os.name == "posix":
         assert stat.S_IMODE(private_path.stat().st_mode) == 0o600
 
-    keys = load_keyset(settings.model_copy(update={"jwt_signing_key_file": private_path}))
+    keys = load_keyset(
+        settings.model_copy(update={"jwt_signing_key": None, "jwt_signing_key_file": private_path})
+    )
     assert keys.signing_kid == kid
 
     # The public file is what a later configuration lists once this key is retired.
