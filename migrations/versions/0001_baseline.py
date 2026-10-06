@@ -27,9 +27,13 @@ def upgrade() -> None:
         # A trigger function for tables whose rows are never changed once written. The
         # privilege removal is the first barrier; this is the one that also stops the owner
         # and anyone holding a broader role by mistake.
+        # The search path is pinned, with the temporary schema last, as on every function:
+        # a session's temporary objects must never be found ahead of the real ones.
         """
         CREATE FUNCTION forbid_mutation() RETURNS trigger
-        LANGUAGE plpgsql AS $$
+        LANGUAGE plpgsql
+        SET search_path = pg_catalog, public, pg_temp
+        AS $$
         BEGIN
             RAISE EXCEPTION '% on % is not allowed: the table is append-only', TG_OP, TG_TABLE_NAME
                 USING ERRCODE = 'CR001';

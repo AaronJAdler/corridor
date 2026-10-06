@@ -231,6 +231,71 @@ async def test_a_posting_cannot_be_added_to_an_entry_that_already_balanced(db: D
     assert await count(db, "postings") == 2
 
 
+# --- temporary tables cannot stand in for the ledger -------------------------------------------
+
+SEARCH_PATH = "search_path=pg_catalog, public, pg_temp"
+
+
+@pytest.mark.parametrize("role", ["application", "owner"])
+async def test_a_temporary_table_named_postings_cannot_hide_an_unbalanced_entry(
+    db: Database, owner_db: Database, role: str
+) -> None:
+    # A session's temporary schema is searched before public unless a search path says
+    # otherwise. The attacker shows the balance check a temporary "postings" that balances
+    # while the real postings, written by their full name, do not.
+    attacker = db if role == "application" else owner_db
+
+    with pytest.raises(DBAPIError) as failure:
+        async with attacker.transaction() as session:
+            debit = await add_account(session, "bank_settlement", provider="simbank")
+            credit = await add_account(session, "suspense")
+            entry = await add_entry(session)
+            await session.execute(
+                text("CREATE TEMPORARY TABLE journal_entries (LIKE public.journal_entries)")
+            )
+            await session.execute(text("CREATE TEMPORARY TABLE postings (LIKE public.postings)"))
+            for direction in ("D", "C"):
+                await session.execute(
+                    text(
+                        "INSERT INTO pg_temp.postings (seq, entry_id, account_id, asset_code,"
+                        " direction, amount) VALUES (0, :entry, :account, 'USD', :direction, 500)"
+                    ),
+                    {"entry": entry, "account": debit, "direction": direction},
+                )
+            for account, direction, amount in ((debit, "D", 500), (credit, "C", 1)):
+                await session.execute(
+                    text(
+                        "INSERT INTO public.postings (entry_id, account_id, asset_code, direction,"
+                        " amount) VALUES (:entry, :account, 'USD', :direction, :amount)"
+                    ),
+                    {"entry": entry, "account": account, "direction": direction, "amount": amount},
+                )
+
+    assert sqlstate_of(failure.value) == UNBALANCED
+    # A new connection, which has no temporary tables, sees what was really stored.
+    await attacker.dispose()
+    assert await count(db, "public.journal_entries") == 0
+    assert await count(db, "public.postings") == 0
+
+
+@pytest.mark.parametrize("function", ["forbid_mutation", "ledger_check_entry"])
+async def test_a_trigger_function_resolves_names_with_the_temporary_schema_last(
+    db: Database, function: str
+) -> None:
+    async with db.transaction() as session:
+        config = (
+            await session.execute(
+                text(
+                    "SELECT proconfig FROM pg_proc"
+                    " WHERE proname = :function AND pronamespace = 'public'::regnamespace"
+                ),
+                {"function": function},
+            )
+        ).scalar_one()
+
+    assert config == [SEARCH_PATH]
+
+
 # --- history is append-only ------------------------------------------------------------------
 
 

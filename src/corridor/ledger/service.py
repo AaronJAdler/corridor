@@ -335,7 +335,9 @@ async def _lock_balances(
         select(_balances.c.account_id, _balances.c.balance)
         .where(_balances.c.account_id.in_(account_ids))
         .order_by(_balances.c.account_id)
-        .with_for_update()
+        # FOR NO KEY UPDATE: posting never changes the key, so a foreign-key check from an
+        # insert that references the row has no reason to wait for it.
+        .with_for_update(key_share=True)
     )
     balances = {row.account_id: row.balance for row in rows}
     missing = set(account_ids) - balances.keys()

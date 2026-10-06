@@ -125,9 +125,14 @@ CREATE INDEX ix_postings_entry_id ON postings (entry_id);
 CREATE INDEX ix_postings_account_id_seq ON postings (account_id, seq)
 """
 
+# The search path is pinned with the temporary schema last. Left to the session's default,
+# a temporary table named "postings" would be found first and the check would read that
+# instead of the ledger.
 CHECK_ENTRY = """
 CREATE FUNCTION ledger_check_entry() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql
+SET search_path = pg_catalog, public, pg_temp
+AS $$
 DECLARE
     target uuid;
     posting_count bigint;
