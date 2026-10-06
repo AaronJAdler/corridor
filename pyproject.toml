@@ -184,6 +184,36 @@ protected_modules = ["corridor.ledger.models"]
 allowed_importers = ["corridor.ledger"]
 
 [[tool.importlinter.contracts]]
+name = "Identity tables are private to identity"
+type = "protected"
+protected_modules = ["corridor.identity.models"]
+allowed_importers = ["corridor.identity"]
+
+[[tool.importlinter.contracts]]
+name = "Audit tables are private to audit"
+type = "protected"
+protected_modules = ["corridor.audit.models"]
+allowed_importers = ["corridor.audit"]
+
+[[tool.importlinter.contracts]]
+name = "Outbox tables are private to outbox"
+type = "protected"
+protected_modules = ["corridor.outbox.models"]
+allowed_importers = ["corridor.outbox"]
+
+[[tool.importlinter.contracts]]
+name = "Worker tables are private to worker"
+type = "protected"
+protected_modules = ["corridor.worker.models"]
+allowed_importers = ["corridor.worker"]
+
+[[tool.importlinter.contracts]]
+name = "The simulator never imports production code"
+type = "forbidden"
+source_modules = ["corridor_sim"]
+forbidden_modules = ["corridor"]
+
+[[tool.importlinter.contracts]]
 name = "Production code never imports the simulator"
 type = "forbidden"
 source_modules = ["corridor"]

@@ -86,3 +86,12 @@ def verify_ledger() -> None:
         typer.echo(f"Ledger verification FAILED: {len(findings)} finding(s).", err=True)
         raise typer.Exit(code=1)
     typer.echo("Ledger verification passed: no findings.")
+
+
+@app.command()
+def worker() -> None:
+    """Run the worker: the outbox dispatcher and the scheduled jobs."""
+    from corridor.platform.config import load_settings
+    from corridor.worker.main import run
+
+    run(load_settings())

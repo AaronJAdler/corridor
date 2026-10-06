@@ -52,8 +52,8 @@ CORRIDOR_TEST_POSTGRES_CLONE_STRATEGY   optional: FILE_COPY is faster on a throw
    opens one transaction and passes the session down. Service functions take a session and
    never commit.
 7. **Locks are taken in one order:** idempotency key, then per-user money-out locks in
-   ascending order, then the business row (`FOR UPDATE`), then balance rows in ascending
-   account id.
+   ascending order, then the business row (`FOR UPDATE`), then balance rows (`FOR NO KEY UPDATE`) in
+   ascending account id.
 8. **Tables are private to their module.** Other modules call the owner's service functions.
    Nothing imports another module's `models`.
 9. **No secrets in the repository, in logs or in test fixtures.** Synthetic data only.
