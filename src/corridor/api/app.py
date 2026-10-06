@@ -5,12 +5,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from corridor import __version__
+from corridor import __version__, identity
 from corridor.api import health
 from corridor.api.container import Container
 from corridor.api.errors import install_error_handlers
 from corridor.api.middleware import RequestContextMiddleware
 from corridor.api.ratelimit import RateLimitMiddleware
+from corridor.api.routers import ROUTERS
 from corridor.platform.config import Settings, load_settings
 from corridor.platform.db import Database, create_engine
 from corridor.platform.logging import configure_logging
@@ -26,9 +27,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # First, and before any connection is opened: a process that cannot sign or verify
+        # a token must not start, and the error says which setting is wrong.
+        keys = identity.load_keyset(resolved)
+        hasher = identity.PasswordHasher(resolved)
         db = Database(create_engine(resolved, application_name="corridor-api"))
         redis = RedisStore(create_redis(resolved), resolved.redis_key_prefix)
-        app.state.container = Container(settings=resolved, db=db, redis=redis)
+        app.state.container = Container(
+            settings=resolved, db=db, redis=redis, keys=keys, hasher=hasher
+        )
         try:
             yield
         finally:
@@ -42,6 +49,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
         docs_url="/docs" if interactive_docs else None,
         redoc_url=None,
+        # No OAuth2 flow is offered, so the page that would receive its redirect is not served.
+        swagger_ui_oauth2_redirect_url=None,
         openapi_url="/openapi.json" if interactive_docs else None,
     )
     # The last middleware added is the outermost. The request context goes on last so that
@@ -50,4 +59,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(RequestContextMiddleware)
     install_error_handlers(app)
     app.include_router(health.router)
+    for router in ROUTERS:
+        app.include_router(router)
     return app

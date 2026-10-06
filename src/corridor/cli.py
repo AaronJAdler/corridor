@@ -1,4 +1,5 @@
-"""Command line: ``corridor serve``, ``corridor db migrate`` and, later, the rest."""
+"""Command line: ``corridor serve``, ``corridor db migrate``, ``corridor keys generate``
+and, later, the rest."""
 
 from pathlib import Path
 from typing import Annotated
@@ -8,6 +9,8 @@ import typer
 app = typer.Typer(no_args_is_help=True, add_completion=False, help="Corridor wallet backend.")
 db_app = typer.Typer(no_args_is_help=True, help="Database administration.")
 app.add_typer(db_app, name="db")
+keys_app = typer.Typer(no_args_is_help=True, help="Signing keys for access tokens.")
+app.add_typer(keys_app, name="keys")
 
 
 @app.command()
@@ -52,6 +55,28 @@ def db_migrate(
         raise typer.BadParameter(f"{config} not found; run from the project root or pass --config.")
     command.upgrade(Config(str(config)), revision)
     typer.echo(f"Database is at {revision}.")
+
+
+@keys_app.command("generate")
+def keys_generate(
+    out: Annotated[Path, typer.Option(help="Directory to write the key pair into.")],
+) -> None:
+    """Generate a signing key and print the settings that use it.
+
+    The first line makes an instance sign with the new key. The second lets an instance
+    verify the new key's tokens without holding it: set it on the instances that still sign
+    with another key while this one is rolled out, and when this one is retired.
+    """
+    import json
+    import shlex
+
+    from corridor import identity
+
+    kid, private_path = identity.write_keypair(out)
+    public_pem = (out / f"{kid}.pub.pem").read_text(encoding="ascii")
+    # Only the path of the private key is printed, never the key.
+    typer.echo(f"CORRIDOR_JWT_SIGNING_KEY_FILE={shlex.quote(str(private_path))}")
+    typer.echo(f"CORRIDOR_JWT_ADDITIONAL_PUBLIC_KEYS={shlex.quote(json.dumps([public_pem]))}")
 
 
 @app.command("verify-ledger")

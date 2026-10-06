@@ -12,7 +12,7 @@ import pytest
 from fastapi import FastAPI
 from pydantic import SecretStr
 
-from corridor import ledger
+from corridor import identity, ledger
 from corridor.api.app import create_app
 from corridor.platform.clock import ManualClock, use_clock
 from corridor.platform.config import Settings
@@ -38,8 +38,15 @@ def database(database_template: str) -> Iterator[postgres.TestDatabase]:
         postgres.drop_database(created)
 
 
+@pytest.fixture(scope="session")
+def signing_key_pem() -> str:
+    """The key that signs access tokens in this test session. It is generated here and
+    lives only in memory: no key is ever read from, or written to, a file in the repository."""
+    return identity.generate_private_key_pem()
+
+
 @pytest.fixture
-def settings(database: postgres.TestDatabase) -> Settings:
+def settings(database: postgres.TestDatabase, signing_key_pem: str) -> Settings:
     return Settings(
         _env_file=None,
         environment="test",
@@ -55,6 +62,10 @@ def settings(database: postgres.TestDatabase) -> Settings:
         argon2_time_cost=1,
         argon2_memory_cost_kib=8,
         argon2_parallelism=1,
+        jwt_signing_key=signing_key_pem,
+        # A test logs in more often in a second than a person does in a day. The tests of
+        # the limit itself lower it again.
+        rate_limit_auth_per_minute=10_000,
     )
 
 
