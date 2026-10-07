@@ -139,6 +139,12 @@ class Settings(BaseSettings):
     transfer_fee_bps: int = Field(default=0, ge=0, le=1000)
     transfer_min_fee: dict[str, str] = Field(default_factory=dict)
 
+    # Agents. The key that agent API keys are hashed under: what is stored is the
+    # HMAC-SHA256 of a key's secret part, so a copy of the table is of no use without it.
+    # None means agent keys are not configured: none can be issued and none is accepted.
+    # A short key could be searched for, so it has the least length a webhook secret has.
+    api_key_hash_key: Annotated[SecretStr, Field(min_length=32)] | None = None
+
     @field_validator("forwarded_allow_ips")
     @classmethod
     def _no_wildcard_proxy(cls, value: str) -> str:

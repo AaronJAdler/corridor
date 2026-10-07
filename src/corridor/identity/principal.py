@@ -5,6 +5,7 @@ case receives it, so no use case works out for itself who is calling.
 """
 
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final, Literal, Self
@@ -54,12 +55,31 @@ class Principal:
             session_id=session_id,
         )
 
+    @classmethod
+    def for_agent(cls, owner_id: uuid.UUID, agent_id: uuid.UUID, scopes: Iterable[str]) -> Self:
+        """The principal of an agent acting for its owner under one of its keys."""
+        return cls(
+            user_id=owner_id,
+            actor_type="agent",
+            actor_id=agent_id,
+            # Whatever its owner is: an office is not delegated with a wallet.
+            role="user",
+            # Every scope is the mark of a user's own session, and no key confers it.
+            scopes=frozenset(scopes) - {ALL_SCOPES},
+            session_id=None,
+        )
+
     def has_scope(self, scope: str) -> bool:
         return ALL_SCOPES in self.scopes or scope in self.scopes
 
     @property
     def is_agent(self) -> bool:
         return self.actor_type == "agent"
+
+    @property
+    def agent_id(self) -> uuid.UUID | None:
+        """The agent that is acting, or None when the user acts for themselves."""
+        return self.actor_id if self.actor_type == "agent" else None
 
     @property
     def is_admin(self) -> bool:

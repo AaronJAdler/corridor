@@ -256,6 +256,12 @@ protected_modules = ["corridor.ops.models"]
 allowed_importers = ["corridor.ops"]
 
 [[tool.importlinter.contracts]]
+name = "Agent tables are private to agents"
+type = "protected"
+protected_modules = ["corridor.agents.models"]
+allowed_importers = ["corridor.agents"]
+
+[[tool.importlinter.contracts]]
 name = "The simulator never imports production code"
 type = "forbidden"
 source_modules = ["corridor_sim"]

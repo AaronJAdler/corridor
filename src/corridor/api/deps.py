@@ -3,6 +3,10 @@
 Authentication lives here. A route is protected by depending on ``get_principal``, usually
 through ``CurrentPrincipal``, ``AdminPrincipal`` or ``require``. A route that does not, and
 is not in ``PUBLIC_ROUTES``, fails the route-table test.
+
+Only ``require`` admits an agent's API key. ``CurrentPrincipal`` and ``AdminPrincipal``
+admit a user's own session and nothing else, so a route that names no scope is not one an
+agent can reach.
 """
 
 from collections.abc import Callable
@@ -11,13 +15,13 @@ from typing import Annotated, Final, cast
 from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from corridor import identity
+from corridor import agents, identity
 from corridor.api.container import Container
 from corridor.identity import KeySet, PasswordHasher, Principal
 from corridor.platform.config import Settings
 from corridor.platform.db import Database
 from corridor.platform.errors import Unauthenticated
-from corridor.platform.logging import bind_context
+from corridor.platform.logging import bind_context, get_logger
 from corridor.platform.redis import RedisStore
 
 # The routes that answer without a credential, as (path, method). Every other route must
@@ -39,8 +43,15 @@ PUBLIC_ROUTES: Final[frozenset[tuple[str, str]]] = frozenset(
     }
 )
 
+log = get_logger(__name__)
+
 # What every agent API key starts with. No access token can: a JWT starts "eyJ".
 _API_KEY_PREFIX: Final = "ck_"
+
+# What is said to a key that is not accepted, whatever was wrong with it: a key nobody
+# issued, a wrong secret, a revoked or expired key, a paused agent and an owner who may not
+# act are one answer, so that the answer tells a guesser nothing.
+_KEY_NOT_ACCEPTED: Final = "This credential is not accepted."
 
 # Reads the Authorization header and describes the scheme in the OpenAPI document. It does
 # not refuse anything itself, so that every refusal is this module's own problem document.
@@ -89,7 +100,7 @@ async def get_principal(
         raise Unauthenticated("This endpoint needs a bearer credential.")
     token = credentials.credentials
     if token.startswith(_API_KEY_PREFIX):
-        principal = await _authenticate_api_key(token)
+        principal = await _authenticate_api_key(token, container)
     else:
         principal = await _authenticate_access_token(token, container)
     bind_context(
@@ -110,21 +121,45 @@ async def _authenticate_access_token(token: str, container: Container) -> Princi
     return Principal.for_user(claims.user_id, claims.role, claims.session_id)
 
 
-async def _authenticate_api_key(token: str) -> Principal:
-    """Authenticate an agent by its API key. There are no agents yet, so no key is good."""
-    raise Unauthenticated("This credential is not accepted.")
+async def _authenticate_api_key(token: str, container: Container) -> Principal:
+    """Authenticate an agent by its API key."""
+    # Hashed here, before the transaction and before anything is known about the key.
+    presented = agents.read_key(token, container.settings)
+    if presented is None:
+        raise Unauthenticated(_KEY_NOT_ACCEPTED)
+    # A transaction of its own, committed before the handler opens one: recording when the
+    # key was last used locks the key's row, and that lock is gone before any lock on
+    # money is taken.
+    outcome = await container.db.run(lambda session: agents.authenticate(session, presented))
+    if outcome.reason is not None or outcome.agent_id is None or outcome.owner_user_id is None:
+        log.info(
+            "auth.api_key_refused",
+            reason=outcome.reason,
+            agent_id=None if outcome.agent_id is None else str(outcome.agent_id),
+        )
+        raise Unauthenticated(_KEY_NOT_ACCEPTED)
+    return Principal.for_agent(outcome.owner_user_id, outcome.agent_id, outcome.scopes)
 
 
-CurrentPrincipal = Annotated[Principal, Depends(get_principal)]
+def _require_user_session(principal: Annotated[Principal, Depends(get_principal)]) -> Principal:
+    identity.require_user_session(principal)
+    return principal
+
+
+# The user, in their own session. An agent's key is refused, whatever its scopes: a route
+# is open to an agent only by naming, with ``require``, the scope that opens it.
+CurrentPrincipal = Annotated[Principal, Depends(_require_user_session)]
 
 
 def require(scope: str) -> Callable[[Principal], Principal]:
     """A dependency that admits only a credential holding ``scope``, and yields its principal::
 
     principal: Annotated[Principal, Depends(require(Scope.TRANSFERS_CREATE))]
+
+    A user's own session holds every scope. An agent's key holds the ones it was given.
     """
 
-    def require_scope(principal: CurrentPrincipal) -> Principal:
+    def require_scope(principal: Annotated[Principal, Depends(get_principal)]) -> Principal:
         identity.require_scope(principal, scope)
         return principal
 
