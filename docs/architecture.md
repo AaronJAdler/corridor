@@ -380,10 +380,10 @@ stays usable:
 
 **Lock order.** Deadlocks are prevented by always taking locks in this order:
 
-1. The idempotency key (unique index insert).
+1. The idempotency key (an advisory lock on the caller and key, then the key row).
 2. Per-user money-out advisory locks, ascending by user id.
 3. The business row being advanced (`SELECT … FOR UPDATE` on a withdrawal, deposit or quote).
-4. Balance rows, ascending by account id.
+4. Balance rows, ascending by account id, `FOR NO KEY UPDATE`.
 
 **Why a per-user lock.** Daily limits are across all of a user's assets, but balance rows are
 per asset. Two concurrent sends in different assets would each read the same day-to-date

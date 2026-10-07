@@ -20,11 +20,11 @@ Updated in the same change that lands each phase.
 |---|---|---|---|---|
 | 0 | Foundation | 4 | **done** 2026-10-05 | `uv run poe check` (137 tests), `uv run poe smoke` |
 | 1 | Ledger | 4 | **done** 2026-10-05 | `uv run poe check` (248 tests); S2 observed: 200 debits, 50 succeed |
-| 2 | Identity | 5 | not started | |
-| 3 | Async backbone | 2 | not started | |
-| 4 | Wallets and transfers | 4 | not started | |
+| 2 | Identity | 5 | **done** 2026-10-06 | `gate.sh tests` on the combined tree |
+| 3 | Async backbone | 2 | **done** 2026-10-06 | `gate.sh tests` on the combined tree |
+| 4 | Wallets and transfers | 4 | **done** 2026-10-06 | `gate.sh tests` on the combined tree |
 | — | **Checkpoint A: core** | | | |
-| 5 | Providers and simulators | 5 | not started | |
+| 5 | Providers and simulators | 5 | **done** 2026-10-06 | `gate.sh tests` on the combined tree |
 | 6 | Inbound money | 5 | not started | |
 | 7 | Outbound money | 6 | not started | |
 | — | **Checkpoint B: money in and out** | | | |
@@ -726,3 +726,8 @@ during the build are appended here with the date and the reason.
 | 2026-10-05 | `post_entry` has no savepoint | Every check precedes the first write, so a refusal has nothing to roll back; the savepoint cost two round trips per entry and no test could tell it was there |
 | 2026-10-05 | An account appears at most once in an entry | Keeps `balance_after` unambiguous; callers combine amounts |
 | 2026-10-05 | Accepted untested guard: `ORDER BY account_id` on the balance lock | With one `IN (...)` query PostgreSQL returns the rows in the same order to every session whatever the list order, so removing the clause changes nothing a test can see. It stays so that lock order does not depend on the planner. A control test shows the deadlock is real when rows are locked in posting order |
+| 2026-10-06 | Phases 2 to 5 were built by sub-agents in isolated worktrees, earlier than the plan's "from phase 5" | The owner asked for sub-agents wherever possible; the orchestrator re-runs every gate on the combined tree and makes every commit |
+| 2026-10-06 | Trigger functions pin `search_path` with the temporary schema last; balance rows are locked `FOR NO KEY UPDATE` | A session's temporary table named `postings` could otherwise hide an unbalanced entry from the balance check (reproduced, then fixed); the weaker lock is all posting needs |
+| 2026-10-06 | Idempotency takes an advisory lock on (actor, key) before reading the key row | Concurrent duplicates queue and replay cleanly instead of racing to the primary key; the primary key remains the safety net |
+| 2026-10-06 | Cursor pagination lives in `platform`, not `api` | Modules below the API return pages; a worker stopped on the layer contract rather than break it |
+| 2026-10-06 | Not yet done from review notes: `TEMPORARY` is not revoked from the application role; the minimum transfer fee is one number for all assets; restricting a user does not take the money-out lock | Each needs a decision outside the slice that found it; tracked here until phase 12 |
