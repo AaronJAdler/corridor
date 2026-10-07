@@ -29,6 +29,7 @@ from tests.payments.support import (
     count,
     deposit,
     fee_revenue,
+    lift_limits,
     rows,
     send,
 )
@@ -397,6 +398,7 @@ async def test_an_amount_that_with_its_fee_is_more_than_the_ledger_holds_is_refu
     db: Database, with_fee: Settings, maria: User, joao: User
 ) -> None:
     await deposit(db, maria, 100_00)
+    await lift_limits(db, maria)
 
     # The amount alone is the largest there is. The fee takes the debit past it.
     with pytest.raises(InvalidAmount) as refusal:
@@ -412,6 +414,7 @@ async def test_the_largest_amount_is_not_refused_as_too_large_when_there_is_no_f
     db: Database, settings: Settings, maria: User, joao: User
 ) -> None:
     await deposit(db, maria, 100_00)
+    await lift_limits(db, maria)
 
     # It is refused for the ordinary reason: nobody has that much.
     with pytest.raises(InsufficientFunds):
@@ -576,3 +579,18 @@ async def test_a_user_registered_without_wallets_cannot_be_sent_money(
         await send(db, settings, maria, "@bare", 1_00)
 
     assert await available(db, maria) == 10_00
+
+
+async def test_a_transfer_is_counted_against_the_limits_under_its_own_id(
+    db: Database, settings: Settings, maria: User, joao: User
+) -> None:
+    await deposit(db, maria, 100_00)
+
+    transfer = await send(db, settings, maria, joao, 40_00)
+
+    (usage,) = await rows(db, "SELECT kind, movement_id, usd_value FROM risk_usage")
+    assert (usage["kind"], usage["movement_id"], usage["usd_value"]) == (
+        "transfer",
+        transfer.id,
+        40_00,
+    )

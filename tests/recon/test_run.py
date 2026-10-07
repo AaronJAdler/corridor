@@ -9,10 +9,13 @@ import uuid
 from typing import Any
 
 import pytest
+from prometheus_client import REGISTRY
 from sqlalchemy import text
 
-from corridor import recon
+from corridor import ops, recon, risk
+from corridor.identity import Principal
 from corridor.ledger import AccountKind
+from corridor.platform.ids import new_id
 from corridor.providers import SimBank, SimCustody
 from tests.payments.support import rows
 from tests.recon.conftest import WINDOW, Reconcile
@@ -622,3 +625,62 @@ async def test_a_payout_that_answers_to_another_reference_is_not_acted_on(
     }
     assert (await stack.withdrawal(withdrawal_id))["status"] == "submitted"
     assert await stack.wallet(user) == (500_00 - 101_50, 101_50)
+
+
+# --- counting, and deposits that changed after they arrived ----------------------------------
+
+
+def opened(kind: str) -> float:
+    """How many breaks of a kind this process has counted as opened."""
+    value = REGISTRY.get_sample_value("corridor_recon_breaks_total", {"kind": kind})
+    return value or 0.0
+
+
+async def test_a_break_is_counted_when_it_is_opened_and_not_when_it_is_seen_again(
+    stack: Stack, reconcile: Reconcile
+) -> None:
+    await funded(stack)
+    await forget(stack)
+    await let_pass(stack)
+    before = (opened("unknown_deposit"), opened("settlement_balance"), opened("missing_deposit"))
+
+    await reconcile()
+    after_first = (
+        opened("unknown_deposit"),
+        opened("settlement_balance"),
+        opened("missing_deposit"),
+    )
+    await reconcile()
+
+    assert after_first == (before[0] + 1, before[1] + 1, before[2])
+    assert (
+        opened("unknown_deposit"),
+        opened("settlement_balance"),
+        opened("missing_deposit"),
+    ) == after_first
+
+
+async def test_a_deposit_released_from_suspense_long_after_it_arrived_is_no_break(
+    stack: Stack, reconcile: Reconcile
+) -> None:
+    user = await stack.person()
+    async with stack.db.transaction() as session:
+        await risk.add_to_denylist(session, kind="name", value="Maria Silva", outcome="review")
+    await stack.bank_deposit(user, "250.00")
+    await stack.settle()
+    assert await stack.book_balance(AccountKind.SUSPENSE, "USD") == 250_00
+    # A review can wait for days. By then the deposit's line is further back than any run
+    # reads the statement, and the row was changed in the window all the same.
+    await let_pass(stack, (recon.LOOKBACK + 2 * WINDOW).total_seconds())
+    (review,) = await rows(stack.db, "SELECT id FROM risk_reviews")
+    async with stack.db.transaction() as session:
+        await ops.clear_review(
+            session, Principal.for_user(new_id(), "admin", new_id()), review["id"]
+        )
+    await stack.settle()
+    await let_pass(stack)
+
+    result = await reconcile()
+
+    assert await stack.wallet(user) == (250_00, 0)
+    assert result.breaks == ()

@@ -50,3 +50,9 @@ SCHEDULED_JOB_RUNS = Counter(
     "Scheduled job runs, by job and outcome (ok, error).",
     ["job", "outcome"],
 )
+
+RECON_BREAKS = Counter(
+    "corridor_recon_breaks_total",
+    "Reconciliation breaks opened, by kind. A break that a later run sees again is not counted again.",
+    ["kind"],
+)

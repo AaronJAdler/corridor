@@ -567,3 +567,63 @@ async def test_20_concurrent_transfers_in_three_assets_cannot_together_pass_the_
     # The limit was what stopped the rest: not even the smallest of them still fits.
     assert total + 199_99 > DAILY
     assert len(sent) == await count(db, "transfers") == len(await usage(db, maria)) == 12
+
+
+# --- giving usage back -----------------------------------------------------------------------
+
+
+async def release(db: Database, kind: risk.MovementKind, movement_id: uuid.UUID) -> None:
+    async with db.transaction() as session:
+        await risk.release_usage(session, kind, movement_id)
+
+
+async def test_a_movement_whose_usage_was_released_no_longer_counts(
+    db: Database, clock: ManualClock, maria: User
+) -> None:
+    await authorize(db, movement(maria, 1_000_00))
+    await authorize(db, movement(maria, 1_000_00))
+    undone = movement(maria, 500_00, kind="withdrawal")
+    await authorize(db, undone)
+    with pytest.raises(LimitExceeded):
+        await authorize(db, movement(maria, 1))
+    clock.advance(seconds=60)
+
+    await release(db, "withdrawal", undone.movement_id or new_id())
+
+    await authorize(db, movement(maria, 500_00))
+    with pytest.raises(LimitExceeded):
+        await authorize(db, movement(maria, 1))
+    # The record of what was authorised stays, marked with when it was given back.
+    released = [row for row in await usage(db, maria) if row["released_at"] is not None]
+    assert [(row["movement_id"], row["released_at"]) for row in released] == [
+        (undone.movement_id, clock.now())
+    ]
+
+
+async def test_releasing_usage_gives_back_only_the_movement_of_that_kind(
+    db: Database, maria: User
+) -> None:
+    shared = new_id()
+    await authorize(db, movement(maria, 100_00, kind="transfer", movement_id=shared))
+    await authorize(db, movement(maria, 100_00, kind="withdrawal", movement_id=shared))
+
+    await release(db, "withdrawal", shared)
+
+    (kept,) = [row for row in await usage(db, maria) if row["released_at"] is None]
+    assert kept["kind"] == "transfer"
+
+
+async def test_releasing_usage_again_keeps_the_first_time_and_an_unknown_movement_is_nothing(
+    db: Database, clock: ManualClock, maria: User
+) -> None:
+    asked = movement(maria, 100_00, kind="withdrawal")
+    await authorize(db, asked)
+    await release(db, "withdrawal", asked.movement_id or new_id())
+    first = clock.now()
+    clock.advance(seconds=60)
+
+    await release(db, "withdrawal", asked.movement_id or new_id())
+    await release(db, "withdrawal", new_id())
+
+    (row,) = await usage(db, maria)
+    assert row["released_at"] == first

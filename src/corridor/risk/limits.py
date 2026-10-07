@@ -16,7 +16,7 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import Final, Literal, cast
 
-from sqlalchemy import RowMapping, Table, and_, func, not_, or_, select
+from sqlalchemy import RowMapping, Table, and_, func, not_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,8 +25,10 @@ from corridor.platform.clock import utcnow
 from corridor.platform.ids import new_id
 from corridor.platform.logging import get_logger
 from corridor.platform.money import MAX_MINOR_UNITS, InvalidAmount, get_asset
+from corridor.platform.pagination import DEFAULT_LIMIT, Page, clamp_limit
 from corridor.risk.errors import LimitExceeded
 from corridor.risk.models import LimitRow, ReferenceRateRow, UsageRow
+from corridor.risk.screening import page_of, position_of
 from corridor.risk.types import Limit, LimitScope, MoneyMovement, MovementKind
 
 log = get_logger(__name__)
@@ -38,6 +40,7 @@ _rates = cast(Table, ReferenceRateRow.__table__)
 
 WINDOW: Final = timedelta(hours=24)
 _CENTS_PER_DOLLAR: Final = 100
+CURSOR_KIND: Final = "risk_limits"
 
 
 async def usd_value(session: AsyncSession, asset: str, amount: int) -> int:
@@ -115,6 +118,25 @@ async def check_and_record(session: AsyncSession, movement: MoneyMovement, user:
     )
 
 
+async def release_usage(session: AsyncSession, kind: MovementKind, movement_id: uuid.UUID) -> None:
+    """Give back what a movement used of its user's limits, because the money did not go
+    out after all: a withdrawal that was canceled, failed or released.
+
+    The row stays, as the record of what was authorised, marked with when it was given
+    back. A second call changes nothing, and neither does one for a movement that was
+    never counted.
+    """
+    await session.execute(
+        update(_usage)
+        .where(
+            _usage.c.kind == kind,
+            _usage.c.movement_id == movement_id,
+            _usage.c.released_at.is_(None),
+        )
+        .values(released_at=utcnow())
+    )
+
+
 async def set_limit(
     session: AsyncSession,
     *,
@@ -166,6 +188,19 @@ async def set_limit(
     return _limit(stored.mappings().one())
 
 
+async def list_limits(
+    session: AsyncSession, *, cursor: str | None = None, limit: int = DEFAULT_LIMIT
+) -> Page[Limit]:
+    """One page of every rule there is, the tiers' and the ones set since, newest first."""
+    limit = clamp_limit(limit)
+    query = select(_limits)
+    if cursor is not None:
+        query = query.where(_limits.c.id < position_of(cursor, CURSOR_KIND, "all"))
+    # One more than the page, to learn whether anything follows it without a second query.
+    rows = await session.execute(query.order_by(_limits.c.id.desc()).limit(limit + 1))
+    return page_of([_limit(row) for row in rows.mappings()], limit, CURSOR_KIND, "all")
+
+
 async def _rule_for(
     session: AsyncSession,
     kind: MovementKind,
@@ -201,6 +236,8 @@ async def _spent(
         _usage.c.user_id == movement.user_id,
         # A movement made exactly 24 hours ago has left the window.
         _usage.c.created_at > utcnow() - WINDOW,
+        # A movement that was given back moved nothing out.
+        _usage.c.released_at.is_(None),
     ]
     if agent_id is not None:
         conditions.append(_usage.c.agent_id == agent_id)

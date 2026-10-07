@@ -517,7 +517,7 @@ async def test_a_token_for_another_audience_or_from_another_key_is_refused(
         assert (response.status_code, response.json()["code"]) == (401, "invalid_token")
 
 
-async def test_an_agent_key_is_not_accepted_yet(client: httpx.AsyncClient) -> None:
+async def test_an_api_key_that_nobody_issued_is_refused(client: httpx.AsyncClient) -> None:
     response = await client.get(
         "/v1/me", headers={"Authorization": "Bearer ck_test_0123456789abcdef0123"}
     )

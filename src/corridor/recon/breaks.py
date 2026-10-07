@@ -33,6 +33,7 @@ _runs = cast(Table, ReconRunRow.__table__)
 _breaks = cast(Table, ReconBreakRow.__table__)
 
 CURSOR_KIND: Final = "recon_breaks"
+RUNS_CURSOR_KIND: Final = "recon_runs"
 MAX_NOTE_LENGTH: Final = 500
 
 
@@ -177,6 +178,43 @@ async def list_breaks(
     )
 
 
+async def list_runs(
+    session: AsyncSession,
+    principal: Principal,
+    *,
+    cursor: str | None = None,
+    limit: int = DEFAULT_LIMIT,
+) -> Page[Run]:
+    """One page of reconciliation runs, newest first, for an admin.
+
+    Pages are cut on the run id, which is a UUIDv7 and so in order of creation.
+    """
+    identity.require_admin(principal)
+    limit = clamp_limit(limit)
+    query = select(_runs)
+    if cursor is not None:
+        query = query.where(_runs.c.id < _position(cursor, "all", RUNS_CURSOR_KIND))
+    # One more than the page, to learn whether anything follows it without a second query.
+    rows = await session.execute(query.order_by(_runs.c.id.desc()).limit(limit + 1))
+    found = [_run(row) for row in rows.mappings()]
+    shown = found[:limit]
+    await audit.record(
+        session,
+        actor=audit.Actor.admin(principal.user_id),
+        action="recon.runs_listed",
+        resource_type="recon_run",
+        details={"returned": len(shown)},
+    )
+    return Page(
+        items=tuple(shown),
+        next_cursor=(
+            encode_cursor(kind=RUNS_CURSOR_KIND, scope="all", position=str(shown[-1].id))
+            if len(found) > limit
+            else None
+        ),
+    )
+
+
 async def resolve_break(
     session: AsyncSession, principal: Principal, break_id: uuid.UUID, *, note: str
 ) -> Break:
@@ -219,8 +257,8 @@ async def _resolve(
     return _break(updated.mappings().one())
 
 
-def _position(cursor: str, scope: str) -> uuid.UUID:
-    position = decode_cursor(cursor, kind=CURSOR_KIND, scope=scope)
+def _position(cursor: str, scope: str, kind: str = CURSOR_KIND) -> uuid.UUID:
+    position = decode_cursor(cursor, kind=kind, scope=scope)
     if not isinstance(position, str):
         raise InvalidCursor
     try:

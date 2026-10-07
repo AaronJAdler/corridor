@@ -231,10 +231,9 @@ async def test_an_account_of_the_same_name_at_another_provider_attributes_nothin
 async def test_a_restricted_user_can_still_receive_a_deposit(
     db: Database, sim: Sim, bank: SimBank, custody: SimCustody, maria: User
 ) -> None:
-    # The account they were given while active is still theirs to be paid into.
-    data = await received(db, sim, bank, custody, maria)
     async with db.transaction() as session:
         await identity.restrict_user(session, maria.id, "under review")
+    data = await received(db, sim, bank, custody, maria)
 
     await payments.apply_bank_deposit_received(db, data)
 

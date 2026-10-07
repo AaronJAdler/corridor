@@ -405,3 +405,19 @@ async def test_reading_a_conversion_needs_the_fx_read_scope(
     async with db.transaction() as session:
         with pytest.raises(InsufficientScope):
             await fx.get_conversion(session, agent_of(maria, Scope.FX_CONVERT), conversion.id)
+
+
+async def test_a_conversion_is_counted_against_the_limits_under_its_own_id(
+    db: Database, settings: Settings, maria: User
+) -> None:
+    await deposit(db, maria, 250_00)
+    quote = await quote_for(db, settings, maria, 100_00, mid="17.25")
+
+    conversion = await convert(db, maria, quote)
+
+    (usage,) = await rows(db, "SELECT kind, movement_id, usd_value FROM risk_usage")
+    assert (usage["kind"], usage["movement_id"], usage["usd_value"]) == (
+        "conversion",
+        conversion.id,
+        100_00,
+    )

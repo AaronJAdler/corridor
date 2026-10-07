@@ -9,8 +9,10 @@ from corridor.payments.deposits import (
     apply_chain_deposit_confirmed,
     apply_chain_deposit_detected,
     apply_chain_deposit_failed,
+    apply_statement_deposit,
     get_deposit,
     list_deposits,
+    release_from_suspense,
 )
 from corridor.payments.errors import (
     MAX_MEMO_LENGTH,
@@ -21,6 +23,7 @@ from corridor.payments.errors import (
     BeneficiaryRejected,
     CannotTransferToSelf,
     DepositNotFound,
+    DepositNotInSuspense,
     DepositNotReceived,
     DuplicateTransfer,
     DuplicateWithdrawal,
@@ -72,7 +75,9 @@ from corridor.payments.withdrawals import (
     cancel_withdrawal,
     get_withdrawal,
     list_withdrawals,
+    reject_held_withdrawal,
     request_withdrawal,
+    send_cleared_withdrawal,
 )
 
 __all__ = [
@@ -89,6 +94,7 @@ __all__ = [
     "Deposit",
     "DepositInstruction",
     "DepositNotFound",
+    "DepositNotInSuspense",
     "DepositNotReceived",
     "DepositStatus",
     "DuplicateTransfer",
@@ -117,6 +123,7 @@ __all__ = [
     "apply_chain_deposit_failed",
     "apply_payout_completed",
     "apply_payout_failed",
+    "apply_statement_deposit",
     "apply_withdrawal_completed",
     "apply_withdrawal_failed",
     "cancel_withdrawal",
@@ -133,7 +140,10 @@ __all__ = [
     "list_deposits",
     "list_transfers",
     "list_withdrawals",
+    "reject_held_withdrawal",
+    "release_from_suspense",
     "request_withdrawal",
+    "send_cleared_withdrawal",
     "submit_withdrawal",
     "sweep_payouts",
     "withdrawals_completed_between",

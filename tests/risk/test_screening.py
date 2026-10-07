@@ -298,7 +298,7 @@ async def test_a_withdrawal_to_an_address_listed_for_review_is_held_for_an_opera
 
     # The funds are reserved, as for any withdrawal, and nothing may send it yet.
     assert withdrawal.status == "held"
-    assert await held(db, maria, "USDC") == 1_000_000
+    assert await held(db, maria, "USDC") == 1_000_000 + withdrawal.fee
     (review,) = await reviews(db)
     assert (review["subject_type"], review["subject_id"]) == ("withdrawal", withdrawal.id)
     assert (review["user_id"], review["outcome"], review["status"]) == (maria.id, "review", "open")

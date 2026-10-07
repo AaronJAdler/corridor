@@ -45,3 +45,16 @@ class SelfApproval(PermissionDenied):
 
     def __init__(self) -> None:
         super().__init__("An adjustment is approved by a different administrator.")
+
+
+class ReviewHasNoUser(Conflict):
+    """An admin tried to clear the review of a deposit that arrived at nobody's account.
+    There is no user to release it to, and clearing a review does not choose one."""
+
+    code = "review_has_no_user"
+    title = "Review has no user"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "This deposit was not attributed to a user. Release it with an adjustment."
+        )

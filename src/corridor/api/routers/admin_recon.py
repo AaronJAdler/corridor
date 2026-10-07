@@ -1,4 +1,5 @@
-"""Admin endpoints for reconciliation: read the breaks, and resolve one with a note.
+"""Admin endpoints for reconciliation: read the runs and the breaks, and resolve a break
+with a note.
 
 Every route here needs an administrator, and the service checks again. What an admin reads
 or does is written to the audit log in the transaction that serves it.
@@ -68,6 +69,39 @@ class BreakPageResponse(BaseModel):
     next_cursor: str | None
 
 
+class RunResponse(BaseModel):
+    id: uuid.UUID
+    # The half-open window ``[window_start, window_end)`` the run compared.
+    window_start: datetime
+    window_end: datetime
+    # "incomplete" when a provider could not be read for all that was asked of it.
+    status: recon.RunStatus
+    # The disagreements the run saw, and how many of them had no open break before it.
+    breaks_found: int
+    breaks_opened: int
+    started_at: datetime
+    finished_at: datetime
+
+    @classmethod
+    def of(cls, run: recon.Run) -> Self:
+        return cls(
+            id=run.id,
+            window_start=run.window_start,
+            window_end=run.window_end,
+            status=run.status,
+            breaks_found=run.breaks_found,
+            breaks_opened=run.breaks_opened,
+            started_at=run.started_at,
+            finished_at=run.finished_at,
+        )
+
+
+class RunPageResponse(BaseModel):
+    items: list[RunResponse]
+    # Send it back as ``cursor`` for the next page. Null on the last page.
+    next_cursor: str | None
+
+
 class ResolveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -78,6 +112,22 @@ class ResolveRequest(BaseModel):
 
 def _amount(minor: int | None, asset: str) -> str | None:
     return None if minor is None else format_amount(minor, asset)
+
+
+@router.get("/runs", summary="Reconciliation runs, newest first")
+async def list_runs(
+    principal: AdminPrincipal,
+    db: Db,
+    cursor: str | None = None,
+    limit: int = DEFAULT_LIMIT,
+) -> RunPageResponse:
+    async def work(session: AsyncSession) -> Page[recon.Run]:
+        return await recon.list_runs(session, principal, cursor=cursor, limit=limit)
+
+    page = await db.run(work)
+    return RunPageResponse(
+        items=[RunResponse.of(run) for run in page.items], next_cursor=page.next_cursor
+    )
 
 
 @router.get("/breaks", summary="Reconciliation breaks, newest first")

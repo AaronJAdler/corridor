@@ -9,12 +9,19 @@ import uuid
 from typing import Any
 
 import pytest
+from sqlalchemy.exc import DBAPIError
 
-from corridor import ledger, ops, wallets
+from corridor import ledger, ops, risk, wallets
 from corridor.identity import Principal, User
 from corridor.ledger import AccountKind, Direction, EntryDraft, credit, debit
 from corridor.ops import Adjustment, Leg
-from corridor.platform.db import Database
+from corridor.platform.db import (
+    LOCK_NOT_AVAILABLE,
+    Database,
+    advisory_xact_lock,
+    lock_key,
+    sqlstate_of,
+)
 from corridor.platform.errors import PermissionDenied
 from corridor.platform.ids import new_id
 from corridor.platform.money import UnknownAsset
@@ -546,3 +553,85 @@ async def test_adjustments_are_listed_newest_first_by_status_and_in_pages(
     assert ([item.id for item in rest.items], rest.next_cursor) == ([made[1].id], None)
     assert [item.id for item in approved.items] == [made[0].id]
     assert (one.id, one.status) == (made[0].id, "approved")
+
+
+# --- the lock order --------------------------------------------------------------------------
+
+
+def clawback(user_account: uuid.UUID, settlement: uuid.UUID, amount: int = 25_00) -> list[Leg]:
+    """A debit of a user's available balance against the bank."""
+    return [
+        Leg(user_account, "USD", Direction.DEBIT, amount),
+        Leg(settlement, "USD", Direction.CREDIT, amount),
+    ]
+
+
+async def test_approving_a_debit_of_a_users_balance_waits_for_their_money_out_lock(
+    db: Database, impatient_db: Database, ana: Principal, bruno: Principal, maria: User
+) -> None:
+    user_account, settlement = await accounts(db, maria)
+    await approve(db, bruno, await request(db, ana, goodwill(user_account, settlement)))
+    pending = await request(db, ana, clawback(user_account, settlement))
+
+    async with db.transaction() as holder:
+        # What a transfer or a withdrawal of this user holds while it decides.
+        await advisory_xact_lock(holder, [lock_key(risk.MONEY_OUT_LOCK, maria.id)])
+        with pytest.raises(DBAPIError) as failure:
+            await approve(impatient_db, bruno, pending)
+
+    assert sqlstate_of(failure.value) == LOCK_NOT_AVAILABLE
+    assert await available(db, maria) == 25_00
+    # Once the lock is free it goes through.
+    assert (await approve(db, bruno, pending)).status == "approved"
+    assert await available(db, maria) == 0
+
+
+async def test_approving_a_credit_to_a_user_does_not_wait_for_their_money_out_lock(
+    db: Database, impatient_db: Database, ana: Principal, bruno: Principal, maria: User
+) -> None:
+    pending = await request(db, ana, goodwill(*await accounts(db, maria)))
+
+    async with db.transaction() as holder:
+        await advisory_xact_lock(holder, [lock_key(risk.MONEY_OUT_LOCK, maria.id)])
+        approved = await approve(impatient_db, bruno, pending)
+
+    assert approved.status == "approved"
+    assert await available(db, maria) == 25_00
+
+
+async def test_two_adjustments_that_debit_the_same_two_users_in_opposite_orders_both_post(
+    db: Database, ana: Principal, bruno: Principal, maria: User
+) -> None:
+    async with db.transaction() as session:
+        joao = await add_user(session, "joao")
+        await wallets.provision(session, joao.id)
+    marias, settlement = await accounts(db, maria)
+    joaos, _ = await accounts(db, joao)
+    for account in (marias, joaos):
+        await approve(db, bruno, await request(db, ana, goodwill(account, settlement, 100_00)))
+
+    def both(first: uuid.UUID, second: uuid.UUID) -> list[Leg]:
+        return [
+            Leg(first, "USD", Direction.DEBIT, 1_00),
+            Leg(second, "USD", Direction.DEBIT, 1_00),
+            Leg(settlement, "USD", Direction.CREDIT, 2_00),
+        ]
+
+    pending = [
+        await request(db, ana, both(marias, joaos) if turn % 2 else both(joaos, marias))
+        for turn in range(10)
+    ]
+
+    done = await asyncio.gather(*(approve(db, bruno, adjustment) for adjustment in pending))
+
+    assert [adjustment.status for adjustment in done] == ["approved"] * 10
+    assert await available(db, maria) == 90_00
+    assert await balance_of(db, AccountKind.USER_AVAILABLE, owner=joao) == 90_00
+
+
+async def test_approving_an_adjustment_that_does_not_exist_is_not_found(
+    db: Database, bruno: Principal
+) -> None:
+    with pytest.raises(ops.AdjustmentNotFound):
+        async with db.transaction() as session:
+            await ops.approve_adjustment(session, bruno, new_id())

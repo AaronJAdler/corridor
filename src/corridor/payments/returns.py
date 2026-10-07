@@ -57,7 +57,8 @@ async def apply_bank_deposit_returned(db: Database, data: Mapping[str, Any]) -> 
 
     async def work(session: AsyncSession) -> None:
         # Read without a lock first, only to learn whose money-out lock comes before the
-        # row lock. A bank deposit's user never changes once its row exists.
+        # row lock. A deposit's user changes once at most, when an operator releases it
+        # from suspense, and that is looked for again below, under the row's lock.
         seen = await deposits.find_deposit(session, BANK_PROVIDER, event.deposit_id)
         if seen is None:
             unseen = await deposits.record_returned_unseen(
@@ -92,6 +93,11 @@ async def apply_bank_deposit_returned(db: Database, data: Mapping[str, Any]) -> 
         if deposit is None:
             raise RuntimeError(f"deposit {seen['id']} was recorded and is gone")
         deposits.check_same(deposit, event.asset, amount)
+        if deposit["user_id"] != seen["user_id"]:
+            # Released from suspense to a user between the read and the lock, so the
+            # money-out lock held here is not that user's. Raised so that the return is
+            # delivered again, and takes the right one.
+            raise DepositNotReceived("a deposit was released while its return was being recorded")
 
         if deposit["status"] == "completed":
             shortfall = await _take_back(session, deposit)

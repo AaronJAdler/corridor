@@ -26,6 +26,7 @@ from corridor.platform.clock import utcnow
 from corridor.platform.db import Database
 from corridor.platform.ids import new_id
 from corridor.platform.logging import get_logger
+from corridor.platform.metrics import RECON_BREAKS
 from corridor.platform.money import ASSETS
 from corridor.providers import (
     BankRail,
@@ -136,7 +137,9 @@ async def run(
         views.append(view)
         complete = complete and read
 
-    async def compare(session: AsyncSession) -> tuple[Run, list[tuple[Break, Finding]]]:
+    async def compare(
+        session: AsyncSession,
+    ) -> tuple[Run, list[tuple[Break, Finding]], list[BreakKind]]:
         findings: dict[tuple[str, str, str], Finding] = {}
         for seen in views:
             for asset, statement in seen.statements.items():
@@ -147,12 +150,13 @@ async def run(
 
         run_id = new_id()
         found: list[tuple[Break, Finding]] = []
-        opened = 0
+        opened: list[BreakKind] = []
         # In one order, so that two runs opening the same breaks queue and do not deadlock.
         for key in sorted(findings):
             recorded, is_new = await breaks.open_break(session, run_id, findings[key])
             found.append((recorded, findings[key]))
-            opened += is_new
+            if is_new:
+                opened.append(recorded.kind)
         recorded_run = await breaks.record_run(
             session,
             run_id=run_id,
@@ -160,12 +164,15 @@ async def run(
             window_end=window_end,
             status="completed" if complete else "incomplete",
             breaks_found=len(found),
-            breaks_opened=opened,
+            breaks_opened=len(opened),
             started_at=started_at,
         )
-        return recorded_run, found
+        return recorded_run, found, opened
 
-    recorded_run, found = await db.run(compare)
+    recorded_run, found, opened_kinds = await db.run(compare)
+    # After the commit, and so once: the transaction above may have been run again.
+    for kind in opened_kinds:
+        RECON_BREAKS.labels(kind=kind).inc()
     repaired = await repair.repair(db, found, complete=complete)
     log.info(
         "recon.run_finished",
@@ -435,11 +442,14 @@ async def _deposit_findings(session: AsyncSession, sides: _Sides) -> list[Findin
         sides.window_end,
         limit=SCAN_LIMIT,
     )
-    found.extend(
-        sides.finding("unknown_deposit", deposit.provider_ref, deposit.amount, None)
-        for deposit in credited
-        if deposit.provider_ref not in known
-    )
+    for deposit in credited:
+        if deposit.provider_ref in known:
+            continue
+        if await _booked_before(session, deposit, sides.window_start):
+            # On the books before this window, and changed in it: released from suspense,
+            # say. Its line is on an earlier statement, not on this one.
+            continue
+        found.append(sides.finding("unknown_deposit", deposit.provider_ref, deposit.amount, None))
     return found
 
 
@@ -614,6 +624,14 @@ async def _credited_before(session: AsyncSession, deposit: Deposit, moment: date
         # Its row was last changed by the return, so the entry itself is asked.
         return (await ledger.get_entry(session, deposit.entry_id)).posted_at < moment
     return deposit.updated_at < moment
+
+
+async def _booked_before(session: AsyncSession, deposit: Deposit, moment: datetime) -> bool:
+    """Whether the entry that brought a deposit onto the books was posted before ``moment``,
+    whatever has happened to its row since."""
+    if deposit.entry_id is None:
+        return False
+    return (await ledger.get_entry(session, deposit.entry_id)).posted_at < moment
 
 
 def _withdrawal_id(reference: str | None) -> uuid.UUID | None:

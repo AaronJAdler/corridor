@@ -4,6 +4,7 @@ Every data-touching test runs against a real PostgreSQL and a real Redis. See
 ``tests/support/postgres.py`` for how each test gets a database of its own.
 """
 
+import secrets
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 
@@ -45,8 +46,17 @@ def signing_key_pem() -> str:
     return identity.generate_private_key_pem()
 
 
+@pytest.fixture(scope="session")
+def api_key_hash_key() -> str:
+    """The key agent API keys are hashed under in this test session. Random, and never
+    written anywhere, for the same reason as the signing key."""
+    return secrets.token_urlsafe(48)
+
+
 @pytest.fixture
-def settings(database: postgres.TestDatabase, signing_key_pem: str) -> Settings:
+def settings(
+    database: postgres.TestDatabase, signing_key_pem: str, api_key_hash_key: str
+) -> Settings:
     return Settings(
         _env_file=None,
         environment="test",
@@ -63,6 +73,7 @@ def settings(database: postgres.TestDatabase, signing_key_pem: str) -> Settings:
         argon2_memory_cost_kib=8,
         argon2_parallelism=1,
         jwt_signing_key=signing_key_pem,
+        api_key_hash_key=api_key_hash_key,
         # A test logs in more often in a second than a person does in a day. The tests of
         # the limit itself lower it again.
         rate_limit_auth_per_minute=10_000,

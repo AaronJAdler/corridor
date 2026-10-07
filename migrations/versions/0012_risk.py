@@ -66,6 +66,9 @@ CREATE TABLE risk_usage (
     usd_value    numeric(38,0) NOT NULL,
     movement_id  uuid          NOT NULL,
     created_at   timestamptz   NOT NULL,
+    -- When the movement ended without moving the money out: a withdrawal that was
+    -- canceled, failed or given back. From then on it counts against no limit.
+    released_at  timestamptz,
     CONSTRAINT pk_risk_usage PRIMARY KEY (id),
     -- A movement is counted once, however often it is authorised.
     CONSTRAINT uq_risk_usage_kind_movement_id UNIQUE (kind, movement_id),
@@ -133,10 +136,12 @@ CREATE TABLE risk_reviews (
 CREATE INDEX ix_risk_reviews_status_id ON risk_reviews (status, id)
 """
 
-# Usage is a record of what was authorised and is never rewritten. Reference rates are
+# Usage is a record of what was authorised and is never rewritten: the one thing the
+# application may write to a row afterwards is when it was given back. Reference rates are
 # changed by a migration, not by the application. A review is resolved, never removed.
 REVOKES = """
 REVOKE UPDATE, DELETE ON risk_usage FROM "{app_role}";
+GRANT UPDATE (released_at) ON risk_usage TO "{app_role}";
 REVOKE INSERT, UPDATE, DELETE ON risk_reference_rates FROM "{app_role}";
 REVOKE DELETE ON risk_reviews FROM "{app_role}"
 """

@@ -20,6 +20,7 @@ from tests.recon.test_schema import NOW, add_break, add_run
 from tests.support.auth import register_user
 
 BREAKS = "/v1/admin/recon/breaks"
+RUNS = "/v1/admin/recon/runs"
 
 
 async def some_breaks(db: Database, count: int, **changes: Any) -> list[str]:
@@ -267,3 +268,75 @@ async def test_two_admins_resolving_a_break_at_once_resolve_it_once(db: Database
 
     assert sorted(outcomes) == ["refused"] * 5 + ["resolved"]
     assert len(await audited(db, "recon.break_resolved")) == 1
+
+
+# --- runs ------------------------------------------------------------------------------------
+
+
+async def test_the_runs_endpoint_needs_an_administrator(
+    client: httpx.AsyncClient, db: Database
+) -> None:
+    maria = await register_user(client)
+    await add_run(db)
+
+    anonymous = await client.get(RUNS)
+    refused = await client.get(RUNS, headers=maria.headers)
+
+    assert (anonymous.status_code, anonymous.json()["code"]) == (401, "unauthenticated")
+    assert (refused.status_code, refused.json()["code"]) == (403, "permission_denied")
+    assert await audited(db, "recon.runs_listed") == []
+    async with db.transaction() as session:
+        with pytest.raises(PermissionDenied):
+            await recon.list_runs(session, ordinary_user())
+
+
+async def test_an_admin_lists_the_runs_newest_first_a_page_at_a_time(
+    client: httpx.AsyncClient, db: Database, settings: Settings
+) -> None:
+    root = await admin(client, db, settings)
+    ids = [str(await add_run(db)) for _ in range(4)]
+    ids.append(str(await add_run(db, status="incomplete", breaks_found=3, breaks_opened=2)))
+
+    seen: list[dict[str, Any]] = []
+    cursor: str | None = None
+    pages = 0
+    while True:
+        params: dict[str, Any] = {"limit": 2} | ({"cursor": cursor} if cursor else {})
+        page = (await client.get(RUNS, params=params, headers=root.headers)).json()
+        seen += page["items"]
+        pages += 1
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+
+    assert ([item["id"] for item in seen], pages) == (ids[::-1], 3)
+    newest = seen[0]
+    assert (newest["status"], newest["breaks_found"], newest["breaks_opened"]) == (
+        "incomplete",
+        3,
+        2,
+    )
+    assert newest["window_start"] < newest["window_end"]
+    listings = await audited(db, "recon.runs_listed")
+    assert [event["details"] for event in listings] == [
+        {"returned": 2},
+        {"returned": 2},
+        {"returned": 1},
+    ]
+    assert {event["actor_id"] for event in listings} == {root.id}
+
+
+async def test_a_cursor_of_the_breaks_is_not_one_of_the_runs(
+    client: httpx.AsyncClient, db: Database, settings: Settings
+) -> None:
+    root = await admin(client, db, settings)
+    await some_breaks(db, 2)
+    of_breaks = (await client.get(BREAKS, params={"limit": 1}, headers=root.headers)).json()
+
+    crossed = await client.get(
+        RUNS, params={"cursor": of_breaks["next_cursor"]}, headers=root.headers
+    )
+    none = await client.get(RUNS, params={"limit": 0}, headers=root.headers)
+
+    assert (crossed.status_code, crossed.json()["code"]) == (422, "invalid_cursor")
+    assert none.status_code == 422

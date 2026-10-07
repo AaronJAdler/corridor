@@ -19,7 +19,7 @@ from pydantic import Field
 from sqlalchemy import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from corridor import audit, identity, ledger, wallets
+from corridor import audit, identity, ledger, risk, wallets
 from corridor.ledger import AccountKind, EntryDraft, PostingDraft, credit, debit
 from corridor.payments import beneficiaries, withdrawals
 from corridor.payments.errors import MalformedProviderEvent, ProviderEventMismatch
@@ -129,6 +129,9 @@ async def submit_withdrawal(
     which no retry will mend until someone has. A provider this process was not given is
     such a fault, and is raised before anything is sent or changed.
 
+    A withdrawal whose review is not cleared is not sent. It is left ``held``, and the
+    handler returns as if it had nothing to do, which until an operator decides it has not.
+
     The user is looked at again before the mark. The request was authorised when it was
     made, and the account may have been restricted or closed since: a returned deposit
     does that. A held withdrawal of such an account is given back and never sent.
@@ -153,6 +156,11 @@ async def submit_withdrawal(
                     resource_id=withdrawal_id,
                     details={"provider": row["provider"], "reason": ACCOUNT_NOT_ACTIVE},
                 )
+                return None
+            if not await risk.is_cleared(session, "withdrawal", withdrawal_id):
+                # Screening wants an operator to see it first, or one has rejected it.
+                # It stays held and this event is done: clearing the review writes
+                # another, and rejecting it gives the funds back.
                 return None
             if (bank if row["kind"] == "bank" else custody) is None:
                 # Before the mark: the withdrawal stays held, and its user can still cancel.

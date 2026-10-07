@@ -6,7 +6,7 @@ from typing import Any, NoReturn
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from corridor import ledger, payments, wallets
+from corridor import ledger, payments, risk, wallets
 from corridor.identity import Principal, User
 from corridor.ledger import AccountKind
 from corridor.payments import Beneficiary, DepositInstruction, Transfer, Withdrawal
@@ -47,6 +47,15 @@ async def deposit(db: Database, user: User, amount: int, asset: str = "USD") -> 
     async with db.transaction() as session:
         wallet = await wallets.get_wallet(session, user.id, asset)
         await fund(session, wallet.available_account_id, amount, asset)
+
+
+async def lift_limits(db: Database, user: User) -> None:
+    """Give one user a rule with no limits, for a test about amounts their tier would refuse
+    before the code under test is reached. Everyone else keeps their tier's limits."""
+    async with db.transaction() as session:
+        await risk.set_limit(
+            session, scope="user", user_id=user.id, per_tx_usd=None, daily_usd=None
+        )
 
 
 async def available(db: Database, user: User, asset: str = "USD") -> int:

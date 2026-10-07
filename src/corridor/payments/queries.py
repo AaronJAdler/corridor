@@ -14,7 +14,7 @@ from typing import Final, cast
 from sqlalchemy import Table, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from corridor.payments.deposits import _deposit
+from corridor.payments.deposits import as_deposit
 from corridor.payments.models import DepositRow, WithdrawalRow
 from corridor.payments.types import Deposit, Withdrawal
 from corridor.payments.withdrawals import as_withdrawal
@@ -40,7 +40,7 @@ async def find_deposits(
             _deposits.c.provider == provider, _deposits.c.provider_ref.in_(list(provider_refs))
         )
     )
-    return {row["provider_ref"]: _deposit(row) for row in rows.mappings()}
+    return {row["provider_ref"]: as_deposit(row) for row in rows.mappings()}
 
 
 async def deposits_credited_between(
@@ -66,7 +66,7 @@ async def deposits_credited_between(
         .order_by(_deposits.c.id)
         .limit(limit)
     )
-    return [_deposit(row) for row in rows.mappings()]
+    return [as_deposit(row) for row in rows.mappings()]
 
 
 async def find_withdrawals(

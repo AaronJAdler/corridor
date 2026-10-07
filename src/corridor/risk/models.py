@@ -56,7 +56,8 @@ class LimitRow(Base):
 
 
 class UsageRow(Base):
-    """A row of ``risk_usage``: one authorised movement and what it was worth."""
+    """A row of ``risk_usage``: one authorised movement and what it was worth, and when it
+    was given back if the money never went out."""
 
     __tablename__ = "risk_usage"
     __table_args__ = (
@@ -77,6 +78,7 @@ class UsageRow(Base):
     usd_value: Mapped[int] = mapped_column(MinorUnits)
     movement_id: Mapped[uuid.UUID]
     created_at: Mapped[datetime]
+    released_at: Mapped[datetime | None]
 
 
 class ReferenceRateRow(Base):

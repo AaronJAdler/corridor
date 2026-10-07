@@ -146,6 +146,22 @@ async def test_the_application_cannot_rewrite_usage_rates_or_reviews(
     assert sqlstate_of(refused.value) == INSUFFICIENT_PRIVILEGE
 
 
+async def test_the_application_can_mark_usage_as_released_and_nothing_else_about_it(
+    db: Database,
+) -> None:
+    await add_usage(db)
+
+    async with db.transaction() as session:
+        await session.execute(text("UPDATE risk_usage SET released_at = CURRENT_TIMESTAMP"))
+
+    with pytest.raises(DBAPIError) as refused:
+        async with db.transaction() as session:
+            await session.execute(
+                text("UPDATE risk_usage SET released_at = NULL, created_at = CURRENT_TIMESTAMP")
+            )
+    assert sqlstate_of(refused.value) == INSUFFICIENT_PRIVILEGE
+
+
 # --- limits ----------------------------------------------------------------------------------
 
 

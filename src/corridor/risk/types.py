@@ -63,6 +63,19 @@ class Limit:
 
 
 @dataclass(frozen=True, slots=True)
+class DenylistEntry:
+    """One party on the deny list, in the form screening compares it in."""
+
+    id: uuid.UUID
+    kind: PartyKind
+    # As normalised: the form a party is looked up in, not the form it was typed in.
+    value: str
+    outcome: Literal["deny", "review"]
+    note: str | None
+    created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
 class Review:
     """A movement that screening would not let through unseen, and what became of it."""
 

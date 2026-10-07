@@ -45,8 +45,8 @@ async def get_deposit_instruction(
     whichever was stored.
 
     An instruction that exists is shown to its user whatever state the account is in. A
-    new one is made only for an active account, and that is decided before the provider
-    is asked for anything.
+    new one is made for any account that is not closed, and that is decided before the
+    provider is asked for anything.
     """
     identity.require_scope(principal, Scope.DEPOSITS_READ)
     kind = get_asset(asset).kind
@@ -54,7 +54,9 @@ async def get_deposit_instruction(
 
     async def read(session: AsyncSession) -> DepositInstruction | None:
         found = await _find(session, principal, asset)
-        if found is None and (await identity.get_user(session, user_id)).status != "active":
+        # A restricted user may owe money after a returned deposit, and paying in is how
+        # that is settled. Only a closed account is given nowhere new to pay into.
+        if found is None and (await identity.get_user(session, user_id)).status == "closed":
             raise AccountNotActive
         return found
 

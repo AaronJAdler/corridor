@@ -76,6 +76,17 @@ class AccountNotActive(Denied):
         super().__init__("This account cannot do this at the moment.")
 
 
+class DepositNotInSuspense(Conflict):
+    """An operator asked for a deposit to be released from suspense that is not there: it
+    was released already, or its bank took it back."""
+
+    code = "deposit_not_in_suspense"
+    title = "Deposit is not in suspense"
+
+    def __init__(self) -> None:
+        super().__init__("This deposit is no longer in suspense.")
+
+
 class DepositNotFound(NotFound):
     """There is no such deposit, or there is and it is not this user's to see. The two are
     never told apart."""

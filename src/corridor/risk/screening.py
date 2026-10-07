@@ -18,9 +18,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from corridor.platform.clock import utcnow
 from corridor.platform.ids import new_id
 from corridor.platform.logging import get_logger
+from corridor.platform.pagination import (
+    DEFAULT_LIMIT,
+    InvalidCursor,
+    Page,
+    clamp_limit,
+    decode_cursor,
+    encode_cursor,
+)
 from corridor.risk.errors import ReviewAlreadyResolved, ReviewNotFound
 from corridor.risk.models import DenylistRow, ReviewRow
-from corridor.risk.types import PartyKind, Review, ScreeningOutcome, SubjectType
+from corridor.risk.types import (
+    DenylistEntry,
+    Limit,
+    PartyKind,
+    Review,
+    ReviewStatus,
+    ScreeningOutcome,
+    SubjectType,
+)
 
 log = get_logger(__name__)
 
@@ -31,6 +47,9 @@ _reviews = cast(Table, ReviewRow.__table__)
 _PARTY_KINDS: Final = frozenset({"name", "address", "account"})
 _WHITESPACE: Final = re.compile(r"\s+")
 _NOT_ALPHANUMERIC: Final = re.compile(r"[\W_]+")
+
+DENYLIST_CURSOR_KIND: Final = "risk_denylist"
+REVIEWS_CURSOR_KIND: Final = "risk_reviews"
 
 
 def normalise(kind: PartyKind, value: str) -> str:
@@ -77,14 +96,15 @@ async def add_to_denylist(
     value: str,
     outcome: Literal["deny", "review"],
     note: str | None = None,
-) -> None:
-    """List a party, or change what the list says of one that is on it already."""
+) -> DenylistEntry:
+    """List a party, or change what the list says of one that is on it already. Returns
+    the entry as it now stands."""
     if outcome not in ("deny", "review"):
         raise ValueError(f"a listed party is denied or reviewed, not {outcome!r}")
     normalised = normalise(kind, value)
     if not normalised:
         raise ValueError("a listed party has a value")
-    await session.execute(
+    stored = await session.execute(
         pg_insert(_denylist)
         .values(
             id=new_id(),
@@ -98,7 +118,24 @@ async def add_to_denylist(
             constraint="uq_risk_denylist_kind_value_normalised",
             set_={"outcome": outcome, "note": note},
         )
+        .returning(_denylist)
     )
+    return _entry(stored.mappings().one())
+
+
+async def list_denylist(
+    session: AsyncSession, *, cursor: str | None = None, limit: int = DEFAULT_LIMIT
+) -> Page[DenylistEntry]:
+    """One page of the deny list, newest first. Pages are cut on the entry id, which is a
+    UUIDv7 and so in order of creation."""
+    limit = clamp_limit(limit)
+    query = select(_denylist)
+    if cursor is not None:
+        query = query.where(_denylist.c.id < position_of(cursor, DENYLIST_CURSOR_KIND, "all"))
+    # One more than the page, to learn whether anything follows it without a second query.
+    rows = await session.execute(query.order_by(_denylist.c.id.desc()).limit(limit + 1))
+    found = [_entry(row) for row in rows.mappings()]
+    return page_of(found, limit, DENYLIST_CURSOR_KIND, "all")
 
 
 async def open_review(
@@ -137,6 +174,35 @@ async def find_review(
     return _review(row) if row is not None else None
 
 
+async def get_review(session: AsyncSession, review_id: uuid.UUID) -> Review:
+    found = await session.execute(select(_reviews).where(_reviews.c.id == review_id))
+    row = found.mappings().one_or_none()
+    if row is None:
+        raise ReviewNotFound
+    return _review(row)
+
+
+async def list_reviews(
+    session: AsyncSession,
+    *,
+    status: ReviewStatus | None = None,
+    cursor: str | None = None,
+    limit: int = DEFAULT_LIMIT,
+) -> Page[Review]:
+    """One page of reviews, newest first. All of them, or those in one status."""
+    limit = clamp_limit(limit)
+    # The cursor is tied to the filter, so one from another list is refused.
+    scope = status or "all"
+    query = select(_reviews)
+    if status is not None:
+        query = query.where(_reviews.c.status == status)
+    if cursor is not None:
+        query = query.where(_reviews.c.id < position_of(cursor, REVIEWS_CURSOR_KIND, scope))
+    rows = await session.execute(query.order_by(_reviews.c.id.desc()).limit(limit + 1))
+    found = [_review(row) for row in rows.mappings()]
+    return page_of(found, limit, REVIEWS_CURSOR_KIND, scope)
+
+
 async def is_cleared(
     session: AsyncSession, subject_type: SubjectType, subject_id: uuid.UUID
 ) -> bool:
@@ -172,6 +238,43 @@ async def resolve_review(
             raise ReviewNotFound
         raise ReviewAlreadyResolved
     return _review(row)
+
+
+def position_of(cursor: str, kind: str, scope: str) -> uuid.UUID:
+    """The id a cursor of one of this module's lists names."""
+    position = decode_cursor(cursor, kind=kind, scope=scope)
+    if not isinstance(position, str):
+        raise InvalidCursor
+    try:
+        return uuid.UUID(position)
+    except ValueError:
+        raise InvalidCursor from None
+
+
+def page_of[T: (DenylistEntry, Review, Limit)](
+    found: list[T], limit: int, kind: str, scope: str
+) -> Page[T]:
+    """The page of ``limit`` out of the ``limit + 1`` rows that were read for it."""
+    shown = found[:limit]
+    return Page(
+        items=tuple(shown),
+        next_cursor=(
+            encode_cursor(kind=kind, scope=scope, position=str(shown[-1].id))
+            if len(found) > limit
+            else None
+        ),
+    )
+
+
+def _entry(row: RowMapping) -> DenylistEntry:
+    return DenylistEntry(
+        id=row["id"],
+        kind=row["kind"],
+        value=row["value_normalised"],
+        outcome=row["outcome"],
+        note=row["note"],
+        created_at=row["created_at"],
+    )
 
 
 def _of(subject_type: SubjectType, subject_id: uuid.UUID) -> Select[Any]:

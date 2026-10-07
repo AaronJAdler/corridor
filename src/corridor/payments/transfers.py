@@ -105,6 +105,7 @@ async def create_transfer(
             asset=asset,
             amount=amount,
             counterparty_id=payee.id,
+            movement_id=transfer_id,
         ),
     )
 

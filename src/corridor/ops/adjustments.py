@@ -16,7 +16,7 @@ from typing import Final, cast
 from sqlalchemy import RowMapping, Table, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from corridor import audit, identity, ledger, payments, wallets
+from corridor import audit, identity, ledger, payments, risk, wallets
 from corridor.identity import Principal
 from corridor.ledger import AccountKind, Direction, EntryDraft, PostingDraft
 from corridor.ops.errors import (
@@ -28,6 +28,7 @@ from corridor.ops.errors import (
 from corridor.ops.models import AdjustmentRow
 from corridor.ops.types import Adjustment, AdjustmentStatus, Leg
 from corridor.platform.clock import utcnow
+from corridor.platform.db import advisory_xact_lock, lock_key
 from corridor.platform.money import MAX_MINOR_UNITS, get_asset
 from corridor.platform.pagination import (
     DEFAULT_LIMIT,
@@ -172,8 +173,14 @@ async def approve_adjustment(
     The row is locked and its status looked at before anything is posted, so of two
     approvals at once, one posts and the other finds the adjustment decided. The approver
     is never the requester: that is refused here, and by the table.
+
+    An adjustment that debits a user's available balance takes money out of it, as a
+    transfer does, so that user's money-out lock is taken first, before the adjustment's
+    row and before any balance, in the order every money path takes its locks. The legs
+    are written once, with the request, so they are read for that without a lock.
     """
     identity.require_admin(principal)
+    await advisory_xact_lock(session, await _money_out_locks(session, adjustment_id))
     row = await _lock(session, adjustment_id)
     if row["status"] != "pending":
         raise AdjustmentNotPending
@@ -301,6 +308,25 @@ async def _check(session: AsyncSession, legs: Sequence[Leg]) -> None:
         raise InvalidAdjustment(
             f"Debits and credits differ in {', '.join(unbalanced)}.", field="legs"
         )
+
+
+async def _money_out_locks(session: AsyncSession, adjustment_id: uuid.UUID) -> list[int]:
+    """The money-out lock of every user whose available balance an adjustment debits.
+    ``advisory_xact_lock`` takes them in ascending order."""
+    rows = await session.execute(
+        select(_adjustments.c.legs).where(_adjustments.c.id == adjustment_id)
+    )
+    legs = rows.scalar_one_or_none()
+    if legs is None:
+        raise AdjustmentNotFound
+    keys: list[int] = []
+    for leg in legs:
+        if leg["direction"] != Direction.DEBIT.value:
+            continue
+        account = await ledger.get_account(session, uuid.UUID(leg["account_id"]))
+        if account.kind is AccountKind.USER_AVAILABLE and account.owner_id is not None:
+            keys.append(lock_key(risk.MONEY_OUT_LOCK, account.owner_id))
+    return keys
 
 
 async def _suspense_holding(session: AsyncSession, asset: str, amount: int) -> uuid.UUID:

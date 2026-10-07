@@ -1,19 +1,17 @@
 """Providers whose webhooks arrive twice, late, out of order, or never.
 
 A provider's word is at least once, unordered and not guaranteed. What survives a webhook
-that never comes is said here too, and so is what does not: a bank deposit whose only
-announcement is lost stays uncredited, because nothing in this build reads the bank's
-statement yet.
+that never comes is said here too: a payout's result is asked for by the sweeper, and a
+deposit whose only announcement is lost is read from the provider's statement by
+reconciliation.
 """
 
 from typing import Any
 
 import pytest
 
-from corridor.ledger import AccountKind
 from tests.chaos.checks import (
     assert_at_rest,
-    assert_books_match_the_providers,
     assert_given_back,
     assert_paid_out_once,
 )
@@ -295,47 +293,85 @@ async def test_a_chain_deposit_whose_detection_is_never_delivered_is_credited_on
     assert await stack.wallet(user, asset) == (amount, 0)
 
 
-async def test_a_bank_deposit_whose_announcement_is_never_delivered_stays_uncredited(
-    stack: Stack,
+async def repaired(stack: Stack) -> list[tuple[str, str, str | None]]:
+    """What reconciliation found and what became of it: kind, status and who resolved it."""
+    found = await rows(stack.db, "SELECT kind, status, resolved_by FROM recon_breaks ORDER BY id")
+    return [(row["kind"], row["status"], row["resolved_by"]) for row in found]
+
+
+async def until_reconciled(stack: Stack) -> None:
+    """Let the scheduler come round to the reconciliation job again, and the system settle
+    after it."""
+    for _ in range(6):
+        await stack.turn(60)
+    await stack.settle()
+
+
+async def test_a_bank_deposit_whose_announcement_is_never_delivered_is_credited_by_reconciliation(
+    reconciling: Stack,
 ) -> None:
-    """Not recoverable in this build. ``deposit.received`` is the only way Corridor learns
-    of a bank deposit, and nothing polls the bank's statement until reconciliation exists.
-    This test states the gap: the money is at the bank, and no user has it."""
+    """``deposit.received`` never comes, and nothing else announces a bank deposit. The
+    reconciliation job reads the bank's statement, finds a deposit the books do not have,
+    and credits it from the statement: once, to the user whose account it arrived at."""
+    stack = reconciling
     kept = await funded(stack, "bank")
     await stack.webhooks_behave(drop_types=["deposit.received"])
     user, asset, amount, source = await deposit(stack, "bank")
-
     await stack.settle()
-    for _ in range(60):
-        await stack.turn(60)
-
-    await assert_at_rest(stack, lost_deposits=[source])
     assert await stack.wallet(user, asset) == (0, 0)
+
+    await until_reconciled(stack)
+
+    await assert_at_rest(stack)
+    assert await stack.wallet(user, asset) == (amount, 0)
     assert await stack.wallet(kept, asset) == (FUNDING["bank"][2], 0)
-    assert len(await stack.deposits()) == 1
-    # The bank holds what Corridor's books do not know about: exactly the lost deposit.
-    assert (
-        await stack.provider_balance("bank", asset)
-        - await stack.book_balance(AccountKind.BANK_SETTLEMENT, asset, provider="simbank")
-        == amount
+    credits = await rows(
+        stack.db,
+        "SELECT kind FROM journal_entries WHERE source_type = 'deposit' AND source_id = :source",
+        source=source,
     )
-    with pytest.raises(AssertionError):
-        await assert_books_match_the_providers(stack)
+    assert [credit["kind"] for credit in credits] == ["deposit"]
+    assert await repaired(stack) == [("missing_deposit", "resolved", "system")]
+    # And the next runs find the two sides agreeing, and credit nothing again.
+    await until_reconciled(stack)
+    await assert_at_rest(stack)
+    assert await stack.wallet(user, asset) == (amount, 0)
+    assert len(await repaired(stack)) == 1
 
 
-async def test_a_chain_deposit_whose_confirmation_is_never_delivered_stays_pending(
-    stack: Stack,
+async def test_a_chain_deposit_whose_confirmation_is_never_delivered_is_credited_by_reconciliation(
+    reconciling: Stack,
 ) -> None:
-    """The same gap on the chain: the detection recorded the deposit, so the user can see
-    it coming, and without the confirmation it is never credited."""
+    """The same on the chain: the detection recorded the deposit as pending, so the user
+    can see it coming, and the custodian's statement is what says it became final."""
+    stack = reconciling
     await stack.webhooks_behave(drop_types=["deposit.confirmed"])
-    user, asset, amount, source = await deposit(stack, "chain")
-
+    user, asset, amount, _ = await deposit(stack, "chain")
     await stack.settle()
-
-    await assert_at_rest(stack, lost_deposits=[source])
-    assert await stack.wallet(user, asset) == (0, 0)
     (stored,) = await stack.deposits()
     assert (stored["status"], stored["entry_id"]) == ("pending", None)
-    assert await stack.provider_balance("custody", asset) == amount
-    assert await stack.book_balance(AccountKind.CUSTODY_OMNIBUS, asset, provider="simcustody") == 0
+
+    await until_reconciled(stack)
+
+    await assert_at_rest(stack)
+    assert await stack.wallet(user, asset) == (amount, 0)
+    (stored,) = await stack.deposits()
+    assert stored["status"] == "completed"
+    assert await repaired(stack) == [("missing_deposit", "resolved", "system")]
+
+
+async def test_a_dropped_deposit_announced_late_after_reconciliation_is_still_credited_once(
+    reconciling: Stack,
+) -> None:
+    stack = reconciling
+    await stack.webhooks_behave(hold=True)
+    user, asset, amount, _ = await deposit(stack, "bank")
+    await until_reconciled(stack)
+    assert await stack.wallet(user, asset) == (amount, 0)
+
+    # The announcement that was held back is delivered after all.
+    await stack.webhooks_behave(hold=False)
+    await stack.settle()
+
+    await assert_at_rest(stack)
+    assert await stack.wallet(user, asset) == (amount, 0)

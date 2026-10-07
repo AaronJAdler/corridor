@@ -51,6 +51,8 @@ SOURCE_TYPE: Final = "withdrawal"
 HOLD_ENTRY_KIND: Final = "withdrawal_hold"
 RELEASE_ENTRY_KIND: Final = "withdrawal_release"
 WITHDRAWAL_SUBMIT: Final = "withdrawal.submit"
+# Why a withdrawal that was never sent was given back: an operator rejected its review.
+REVIEW_REJECTED: Final = "review_rejected"
 CURSOR_KIND: Final = "withdrawals"
 
 
@@ -121,6 +123,7 @@ async def request_withdrawal(
             principal=principal,
             asset=asset,
             amount=amount,
+            movement_id=withdrawal_id,
         ),
     )
 
@@ -208,6 +211,48 @@ async def ask_to_be_sent(session: AsyncSession, withdrawal_id: uuid.UUID) -> Non
     await outbox.enqueue(session, WITHDRAWAL_SUBMIT, {"withdrawal_id": str(withdrawal_id)})
 
 
+async def send_cleared_withdrawal(session: AsyncSession, withdrawal_id: uuid.UUID) -> Withdrawal:
+    """Ask again for a held withdrawal to be sent, now that its review has been cleared.
+
+    The event written with the request found the review open and left the withdrawal as it
+    was, so nothing else would ever send it. A withdrawal that is no longer held, because
+    its user canceled it or it was given back while it waited, is left alone.
+    """
+    row = await lock(session, withdrawal_id)
+    if row is None:
+        # The caller got the id from a review of this withdrawal, so this is a bug.
+        raise LookupError(f"there is no withdrawal {withdrawal_id} to send")
+    if row["status"] == "held":
+        await ask_to_be_sent(session, withdrawal_id)
+    return as_withdrawal(row)
+
+
+async def reject_held_withdrawal(
+    session: AsyncSession, withdrawal_id: uuid.UUID, *, actor: audit.Actor
+) -> Withdrawal:
+    """Give back a held withdrawal whose review an operator rejected, and end it as failed.
+
+    Only while it is ``held``, the one state in which the provider is certain not to have
+    it. One that has ended some other way already is left as it ended.
+    """
+    row = await lock(session, withdrawal_id)
+    if row is None:
+        raise LookupError(f"there is no withdrawal {withdrawal_id} to reject")
+    if row["status"] != "held":
+        return as_withdrawal(row)
+    failed = await release(session, row, status="failed", failure_reason=REVIEW_REJECTED)
+    await audit.record(
+        session,
+        actor=actor,
+        action="withdrawal.failed",
+        principal_id=row["user_id"],
+        resource_type="withdrawal",
+        resource_id=withdrawal_id,
+        details={"provider": row["provider"], "reason": REVIEW_REJECTED},
+    )
+    return failed
+
+
 async def cancel_withdrawal(
     session: AsyncSession, principal: Principal, withdrawal_id: uuid.UUID
 ) -> Withdrawal:
@@ -288,7 +333,10 @@ async def release(
     """Return a withdrawal's reserved funds to its user and end it as ``status``.
 
     The caller holds the row's lock and has checked that the funds are still reserved.
+    Nothing went out, so what the withdrawal used of its user's limits is given back with
+    the funds: every way a withdrawal is released comes through here.
     """
+    await risk.release_usage(session, "withdrawal", row["id"])
     reserved: int = row["amount"] + row["fee"]
     wallet = await wallets.resolve(session, row["user_id"], row["asset_code"])
     entry = await ledger.post_entry(

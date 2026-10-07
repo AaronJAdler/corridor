@@ -1,14 +1,15 @@
 """Repair: what a run puts right by itself, and what it leaves for a person.
 
-A deposit or a payout result whose webhook never came is applied from the provider's own
-record, through the function the webhook would have reached. S5 is the first test here.
+A payout result whose webhook never came is applied from the provider's own record,
+through the function the webhook would have reached, and a deposit through the one for
+deposits read from a statement. S5 is the first test here.
 """
 
 from typing import Any
 
 import pytest
 
-from corridor import payments
+from corridor import payments, risk
 from corridor.ledger import AccountKind
 from corridor.recon import repair as repair_module
 from tests.payments.support import entries, rows
@@ -59,6 +60,30 @@ async def test_a_bank_deposit_whose_webhook_was_dropped_is_credited_by_the_run(
     assert await repairs(stack) == [
         {"actor_type": "system", "actor_id": "recon.repair", "resource_id": str(closed["id"])}
     ]
+
+
+async def test_a_repaired_deposit_is_recorded_as_credited_without_screening(
+    stack: Stack, reconcile: Reconcile
+) -> None:
+    """A statement does not say who sent a deposit, so the repair has nobody to ask the
+    deny list about. The deposit goes to the user whose account it arrived at, and the
+    audit log says that it was not screened: here, for a sender the list would have stopped."""
+    user = await stack.person()
+    async with stack.db.transaction() as session:
+        await risk.add_to_denylist(session, kind="name", value="Maria Silva", outcome="deny")
+    await stack.webhooks_behave(drop_types=["deposit.received"])
+    await stack.bank_deposit(user, "250.00")
+    await stack.settle()
+
+    result = await reconcile()
+
+    assert result.repaired == 1
+    assert await stack.wallet(user) == (250_00, 0)
+    (event,) = await rows(
+        stack.db, "SELECT details FROM audit_events WHERE action = 'deposit.completed'"
+    )
+    assert event["details"]["screened"] is False
+    assert await rows(stack.db, "SELECT 1 FROM risk_reviews") == []
 
 
 async def test_the_run_after_a_repair_finds_nothing(stack: Stack, reconcile: Reconcile) -> None:
@@ -223,7 +248,7 @@ async def test_a_withdrawal_never_recorded_as_sent_is_settled_from_what_the_prov
 # --- what is left open -----------------------------------------------------------------------
 
 
-async def refuse(*_arguments: Any) -> None:
+async def refuse(*_arguments: Any, **_named: Any) -> None:
     raise payments.ProviderEventMismatch("not this one")
 
 
@@ -236,7 +261,7 @@ async def test_a_repair_that_payments_refuses_leaves_the_break_open_and_repairs_
     await stack.bank_deposit(late, "250.00")
     await submitted(stack, user)
     await let_pass(stack)
-    monkeypatch.setattr(payments, "apply_bank_deposit_received", refuse)
+    monkeypatch.setattr(payments, "apply_statement_deposit", refuse)
 
     result = await reconcile()
 
@@ -259,7 +284,7 @@ async def test_a_break_that_something_else_put_right_is_closed_by_the_next_run(
     await stack.bank_deposit(user, "250.00")
     await let_pass(stack)
     with monkeypatch.context() as patch:
-        patch.setattr(payments, "apply_bank_deposit_received", refuse)
+        patch.setattr(payments, "apply_statement_deposit", refuse)
         assert (await reconcile()).repaired == 0
     assert [row["status"] for row in await breaks(stack)] == ["open"]
     # The webhook arrives after all, and credits the deposit.
@@ -283,7 +308,7 @@ async def test_a_deposit_that_is_recorded_and_not_credited_does_not_close_its_br
     await stack.chain_deposit(user, "50.000000")
     await stack.settle()
     await let_pass(stack)
-    monkeypatch.setattr(payments, "apply_chain_deposit_confirmed", refuse)
+    monkeypatch.setattr(payments, "apply_statement_deposit", refuse)
 
     result = await reconcile()
 

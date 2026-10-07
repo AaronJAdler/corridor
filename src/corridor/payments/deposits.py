@@ -24,7 +24,12 @@ from corridor import audit, identity, ledger, outbox, risk, wallets
 from corridor.identity import Principal, Scope
 from corridor.ledger import AccountKind, EntryDraft, credit, debit
 from corridor.payments import instructions
-from corridor.payments.errors import DepositNotFound, MalformedProviderEvent, ProviderEventMismatch
+from corridor.payments.errors import (
+    DepositNotFound,
+    DepositNotInSuspense,
+    MalformedProviderEvent,
+    ProviderEventMismatch,
+)
 from corridor.payments.events import ProviderEvent, amount_of, parse, reason_code
 from corridor.payments.models import DepositRow
 from corridor.payments.types import BANK_PROVIDER, CUSTODY_PROVIDER, Deposit, FlowKind
@@ -50,6 +55,7 @@ _deposits = cast(Table, DepositRow.__table__)
 SOURCE_TYPE: Final = "deposit"
 ENTRY_KIND: Final = "deposit"
 SUSPENSE_ENTRY_KIND: Final = "deposit_suspense"
+RELEASE_ENTRY_KIND: Final = "deposit_release"
 DEPOSIT_COMPLETED: Final = "deposit.completed"
 CURSOR_KIND: Final = "deposits"
 
@@ -217,6 +223,141 @@ async def apply_chain_deposit_failed(db: Database, data: Mapping[str, Any]) -> N
     await db.run(work)
 
 
+async def apply_statement_deposit(
+    db: Database,
+    *,
+    provider: str,
+    provider_ref: str,
+    account_ref: str,
+    asset: str,
+    amount: int,
+    tx_hash: str | None = None,
+    sender: str | None = None,
+) -> None:
+    """A deposit read from a provider's statement, whose event never arrived: record it and
+    credit it, unless it already was. For reconciliation.
+
+    An entry point, and idempotent as the events are: the row and its status under a lock
+    decide whether there is anything left to do, so this can race the late event, or
+    another run, and the deposit is still credited once.
+
+    A statement says less than an event does. The account or address the money arrived
+    at is on it, so the deposit is attributed exactly as an event's is. Who sent it usually
+    is not. ``sender`` is the name, for a bank, or the address, for a chain, when the
+    statement does give it, and is then screened as an event's is. When it is not given
+    there is nothing to ask the deny list about, and the deposit goes where one whose
+    sender was given as nothing goes: to the user whose instruction it arrived at, or to
+    suspense when it arrived at nobody's. That nothing was screened is written to the
+    audit record of the credit, as ``screened: false``, for whoever reviews it later.
+    """
+    kind: FlowKind
+    party: risk.PartyKind
+    if provider == BANK_PROVIDER:
+        kind, party = "bank", "name"
+    elif provider == CUSTODY_PROVIDER:
+        kind, party = "chain", "address"
+    else:
+        raise ValueError(f"no deposits arrive through {provider!r}")
+    if not provider_ref:
+        raise MalformedProviderEvent("a statement line with no id")
+    if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+        raise MalformedProviderEvent("a deposit of no amount")
+    if get_asset(asset).kind != _ASSET_KIND[kind]:
+        raise MalformedProviderEvent(f"an asset that does not move by {kind}")
+    can_screen = sender is not None and sender.strip() != ""
+
+    async def work(session: AsyncSession) -> None:
+        await _insert(
+            session,
+            user_id=await _attribute(session, provider, account_ref, asset),
+            asset=asset,
+            amount=amount,
+            provider=provider,
+            provider_ref=provider_ref,
+            kind=kind,
+            status="pending",
+            tx_hash=tx_hash,
+        )
+        deposit = await _lock(session, provider, provider_ref)
+        check_same(deposit, asset, amount)
+        if deposit["status"] != "pending":
+            # Credited by its event after all, or failed, or returned before it was seen.
+            return
+        # Decided now, from where it arrived, whatever an earlier detection recorded.
+        user_id = await _attribute(session, provider, account_ref, asset)
+        screened: risk.ScreeningOutcome = "clear"
+        if can_screen and sender is not None:
+            screened = await risk.screen_party(session, kind=party, value=sender)
+        await _credit_screened(session, deposit, user_id, screened, was_screened=can_screen)
+
+    await db.run(work)
+
+
+async def release_from_suspense(
+    session: AsyncSession, deposit_id: uuid.UUID, user_id: uuid.UUID, *, actor: audit.Actor
+) -> Deposit:
+    """Credit a deposit that is in suspense to ``user_id``, and make it theirs.
+
+    For an operator who has cleared the review that kept it there. The money moves from
+    suspense to the user's available balance in one entry, the deposit is recorded as
+    completed and as that user's, and from then on it is a deposit like any other of
+    theirs. The row is locked and its status looked at first, so a deposit is released
+    once: one that is no longer in suspense, because it was released already or the bank
+    took it back, is refused.
+    """
+    rows = await session.execute(
+        select(_deposits).where(_deposits.c.id == deposit_id).with_for_update()
+    )
+    deposit = rows.mappings().one_or_none()
+    if deposit is None:
+        # The caller got the id from a review of this deposit, so this is a bug.
+        raise LookupError(f"there is no deposit {deposit_id} to release")
+    if deposit["status"] != "suspense":
+        raise DepositNotInSuspense
+    asset, amount, provider = deposit["asset_code"], deposit["amount"], deposit["provider"]
+    suspense = await ledger.open_account(session, AccountKind.SUSPENSE, asset)
+    wallet = await wallets.resolve(session, user_id, asset)
+    entry = await ledger.post_entry(
+        session,
+        EntryDraft(
+            kind=RELEASE_ENTRY_KIND,
+            source_type=SOURCE_TYPE,
+            source_id=ledger_source_id(provider, deposit["provider_ref"]),
+            postings=(debit(suspense.id, amount), credit(wallet.available_account_id, amount)),
+            metadata={"provider": provider, "deposit_id": str(deposit_id)},
+        ),
+    )
+    # ``entry_id`` stays the entry that brought the money onto the books: reconciliation
+    # reads it as when the deposit reached the provider's account in the ledger.
+    updated = await session.execute(
+        update(_deposits)
+        .where(_deposits.c.id == deposit_id)
+        .values(status="completed", user_id=user_id, updated_at=utcnow())
+        .returning(_deposits)
+    )
+    await audit.record(
+        session,
+        actor=actor,
+        action="deposit.released",
+        principal_id=user_id,
+        resource_type="deposit",
+        resource_id=deposit_id,
+        details={"asset": asset, "amount": str(amount), "entry_id": str(entry.id)},
+    )
+    await outbox.enqueue(
+        session,
+        DEPOSIT_COMPLETED,
+        {
+            "deposit_id": str(deposit_id),
+            "user_id": str(user_id),
+            "asset": asset,
+            "amount": str(amount),
+            "entry_id": str(entry.id),
+        },
+    )
+    return as_deposit(updated.mappings().one())
+
+
 async def get_deposit(
     session: AsyncSession, principal: Principal, deposit_id: uuid.UUID
 ) -> Deposit:
@@ -230,7 +371,7 @@ async def get_deposit(
     row = rows.mappings().one_or_none()
     if row is None or row["user_id"] != principal.user_id:
         raise DepositNotFound
-    return _deposit(row)
+    return as_deposit(row)
 
 
 async def list_deposits(
@@ -253,7 +394,7 @@ async def list_deposits(
         query = query.where(_deposits.c.id < position_of(cursor, CURSOR_KIND, scope))
     # One more than the page, to learn whether anything follows it without a second query.
     rows = await session.execute(query.order_by(_deposits.c.id.desc()).limit(limit + 1))
-    found = [_deposit(row) for row in rows.mappings()]
+    found = [as_deposit(row) for row in rows.mappings()]
     shown = found[:limit]
     return Page(
         items=tuple(shown),
@@ -437,6 +578,8 @@ async def _credit_screened(
     deposit: RowMapping,
     user_id: uuid.UUID | None,
     screened: risk.ScreeningOutcome,
+    *,
+    was_screened: bool | None = None,
 ) -> None:
     """Credit a pending deposit to its user, unless screening stopped its sender.
 
@@ -445,9 +588,9 @@ async def _credit_screened(
     remembers whose it would have been, for the operator who releases or returns it.
     """
     if screened == "clear":
-        await _credit(session, deposit, user_id)
+        await _credit(session, deposit, user_id, was_screened=was_screened)
         return
-    await _credit(session, deposit, None)
+    await _credit(session, deposit, None, was_screened=was_screened)
     await risk.open_review(
         session,
         subject_type="deposit",
@@ -457,11 +600,19 @@ async def _credit_screened(
     )
 
 
-async def _credit(session: AsyncSession, deposit: RowMapping, user_id: uuid.UUID | None) -> None:
+async def _credit(
+    session: AsyncSession,
+    deposit: RowMapping,
+    user_id: uuid.UUID | None,
+    *,
+    was_screened: bool | None = None,
+) -> None:
     """Post the entry for a pending deposit whose row this transaction holds, and close it.
 
     To the available balance of ``user_id`` if the deposit is somebody's, and to suspense
     if it is nobody's. Either way the provider's side is debited: the money did arrive.
+    ``was_screened`` is given for a deposit read from a statement, and is written to the
+    audit record: such a deposit may have had no sender to screen.
     """
     asset, amount, provider = deposit["asset_code"], deposit["amount"], deposit["provider"]
     received = await ledger.open_account(
@@ -496,7 +647,12 @@ async def _credit(session: AsyncSession, deposit: RowMapping, user_id: uuid.UUID
         principal_id=user_id,
         resource_type="deposit",
         resource_id=deposit["id"],
-        details={"asset": asset, "amount": str(amount), "entry_id": str(entry.id)},
+        details={
+            "asset": asset,
+            "amount": str(amount),
+            "entry_id": str(entry.id),
+            **({} if was_screened is None else {"screened": was_screened}),
+        },
     )
     if user_id is not None:
         await outbox.enqueue(
@@ -513,7 +669,7 @@ async def _credit(session: AsyncSession, deposit: RowMapping, user_id: uuid.UUID
         )
 
 
-def _deposit(row: RowMapping) -> Deposit:
+def as_deposit(row: RowMapping) -> Deposit:
     return Deposit(
         id=row["id"],
         user_id=row["user_id"],

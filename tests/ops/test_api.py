@@ -352,7 +352,16 @@ async def test_every_admin_route_is_behind_the_admin_dependency(app: FastAPI) ->
 
     assert unguarded == []
     assert {(route.method, route.path) for route in routes} == {
+        ("GET", "/v1/admin/recon/runs"),
         ("GET", "/v1/admin/recon/breaks"),
+        ("GET", "/v1/admin/reviews"),
+        ("POST", "/v1/admin/reviews/{review_id}/clear"),
+        ("POST", "/v1/admin/reviews/{review_id}/reject"),
+        ("GET", "/v1/admin/risk/denylist"),
+        ("POST", "/v1/admin/risk/denylist"),
+        ("GET", "/v1/admin/risk/limits"),
+        ("PUT", "/v1/admin/risk/limits"),
+        ("PUT", "/v1/admin/users/{user_id}/kyc-tier"),
         ("POST", "/v1/admin/recon/breaks/{break_id}/resolve"),
         ("GET", "/v1/admin/outbox/dead"),
         ("POST", "/v1/admin/outbox/dead/{event_id}/requeue"),

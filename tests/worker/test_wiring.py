@@ -352,7 +352,8 @@ async def test_a_worker_process_builds_the_providers_that_have_an_address_and_cl
     (bank_built,) = served["bank"]
     (custody_built,) = served["custody"]
     assert served["registry"] == {"bank": bank_built, "custody": custody_built}
-    assert served["jobs"] == {"bank": bank_built, "custody": custody_built}
+    # A deployed worker reconciles: it is asked for here and nowhere else.
+    assert served["jobs"] == {"bank": bank_built, "custody": custody_built, "reconcile": True}
     assert served["open_while_running"] == [True, True]
     assert (bank_built.closed, custody_built.closed) == (True, True)
 
@@ -375,7 +376,7 @@ async def test_a_worker_process_leaves_out_a_provider_that_has_no_address(
 
     assert (served["bank"], served["custody"]) == ([], [])
     assert served["registry"] == {"bank": None, "custody": None}
-    assert served["jobs"] == {"bank": None, "custody": None}
+    assert served["jobs"] == {"bank": None, "custody": None, "reconcile": True}
 
 
 # --- the API's start-up check ----------------------------------------------------------------

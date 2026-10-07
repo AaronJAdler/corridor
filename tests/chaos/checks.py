@@ -5,7 +5,6 @@ per withdrawal, one credit per deposit, nothing left in flight, nothing given up
 books that agree with the providers'.
 """
 
-from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Any
 
@@ -50,11 +49,11 @@ class Requested:
         return "payout.failed" if self.kind == "bank" else "withdrawal.failed"
 
 
-async def assert_at_rest(stack: Stack, *, lost_deposits: Collection[str] = ()) -> None:
+async def assert_at_rest(stack: Stack) -> None:
     """Every claim that does not depend on what the scenario was.
 
-    ``lost_deposits`` names the provider deposits whose only announcement was dropped, as
-    ``provider:id``: nothing in this build can learn of them.
+    No deposit is allowed to be missing: one whose only announcement was dropped is read
+    from the provider's statement by reconciliation, and credited from that.
     """
     assert set(await stack.outbox()) <= {"done"}, await _unfinished(stack)
     unprocessed = await rows(stack.db, "SELECT type FROM webhook_events WHERE processed_at IS NULL")
@@ -87,14 +86,11 @@ async def assert_at_rest(stack: Stack, *, lost_deposits: Collection[str] = ()) -
     )
     assert held == []
 
-    await assert_each_deposit_credited_once(stack, lost_deposits=lost_deposits)
-    if not lost_deposits:
-        await assert_books_match_the_providers(stack)
+    await assert_each_deposit_credited_once(stack)
+    await assert_books_match_the_providers(stack)
 
 
-async def assert_each_deposit_credited_once(
-    stack: Stack, *, lost_deposits: Collection[str] = ()
-) -> None:
+async def assert_each_deposit_credited_once(stack: Stack) -> None:
     arrived = {f"simbank:{deposit['id']}" for deposit in await stack.provider_bank_deposits()}
     arrived |= {
         f"simcustody:{deposit['id']}"
@@ -115,7 +111,7 @@ async def assert_each_deposit_credited_once(
         if deposit["status"] == "returned" and deposit["entry_id"] is None
     }
     assert {credit["source_id"]: credit["entries"] for credit in credits} == dict.fromkeys(
-        arrived - set(lost_deposits) - returned_unseen, 1
+        arrived - returned_unseen, 1
     )
 
 

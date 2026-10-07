@@ -12,11 +12,14 @@ from corridor.risk.errors import (
     ReviewNotFound,
     UserRestricted,
 )
-from corridor.risk.limits import set_limit
+from corridor.risk.limits import list_limits, release_usage, set_limit
 from corridor.risk.screening import (
     add_to_denylist,
     find_review,
+    get_review,
     is_cleared,
+    list_denylist,
+    list_reviews,
     open_review,
     resolve_review,
     screen_party,
@@ -24,6 +27,7 @@ from corridor.risk.screening import (
 from corridor.risk.service import MONEY_OUT_LOCK, authorize
 from corridor.risk.types import (
     Decision,
+    DenylistEntry,
     Limit,
     LimitScope,
     MoneyMovement,
@@ -40,6 +44,7 @@ __all__ = [
     "CounterpartyUnavailable",
     "Decision",
     "Denied",
+    "DenylistEntry",
     "Limit",
     "LimitExceeded",
     "LimitScope",
@@ -57,8 +62,13 @@ __all__ = [
     "add_to_denylist",
     "authorize",
     "find_review",
+    "get_review",
     "is_cleared",
+    "list_denylist",
+    "list_limits",
+    "list_reviews",
     "open_review",
+    "release_usage",
     "resolve_review",
     "screen_party",
     "set_limit",

@@ -234,7 +234,7 @@ async def _serve(settings: Settings) -> None:
         db,
         build_registry(db, settings, bank=bank, custody=custody),
         settings,
-        jobs=build_jobs(settings, bank=bank, custody=custody),
+        jobs=build_jobs(settings, bank=bank, custody=custody, reconcile=True),
     )
     loop = asyncio.get_running_loop()
 

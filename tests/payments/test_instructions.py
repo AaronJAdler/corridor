@@ -12,6 +12,7 @@ from corridor.payments import AccountNotActive, ProviderUnavailable
 from corridor.platform.db import Database
 from corridor.platform.money import UnknownAsset
 from corridor.providers import SimBank, SimCustody, VirtualAccount, is_valid_address
+from tests.identity.support import close_account
 from tests.payments.support import acting_as, agent_of, count, rows
 from tests.support.providers import Sim
 
@@ -313,11 +314,25 @@ async def test_an_answer_that_disagrees_with_the_stored_instruction_is_not_retur
 
 
 @pytest.mark.parametrize("asset", ["USD", "USDC"])
-async def test_a_restricted_user_is_refused_a_new_instruction_before_any_provider_is_asked(
+async def test_a_restricted_user_is_still_given_a_new_instruction(
+    db: Database, sim: Sim, bank: SimBank, custody: SimCustody, maria: User, asset: str
+) -> None:
+    # They may owe money after a returned deposit, and this is where it is paid in.
+    async with db.transaction() as session:
+        await identity.restrict_user(session, maria.id, "under review")
+
+    instruction = await instruct(db, maria, asset, bank, custody)
+
+    assert (instruction.user_id, instruction.asset) == (maria.id, asset)
+    assert await count(db, "deposit_instructions") == 1
+
+
+@pytest.mark.parametrize("asset", ["USD", "USDC"])
+async def test_a_closed_user_is_refused_a_new_instruction_before_any_provider_is_asked(
     db: Database, sim: Sim, bank: SimBank, custody: SimCustody, maria: User, asset: str
 ) -> None:
     async with db.transaction() as session:
-        await identity.restrict_user(session, maria.id, "under review")
+        await close_account(session, maria.id)
 
     with pytest.raises(AccountNotActive) as refusal:
         await instruct(db, maria, asset, bank, custody)
@@ -327,12 +342,12 @@ async def test_a_restricted_user_is_refused_a_new_instruction_before_any_provide
     assert await count(db, "deposit_instructions") == 0
 
 
-async def test_a_restricted_user_still_sees_the_instruction_they_already_have(
+async def test_a_closed_user_still_sees_the_instruction_they_already_have(
     db: Database, sim: Sim, bank: SimBank, custody: SimCustody, maria: User
 ) -> None:
     first = await instruct(db, maria, "USD", bank, custody)
     async with db.transaction() as session:
-        await identity.restrict_user(session, maria.id, "under review")
+        await close_account(session, maria.id)
 
     assert await instruct(db, maria, "USD", bank, custody) == first
     with pytest.raises(AccountNotActive):

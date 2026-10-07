@@ -149,7 +149,9 @@ async def test_an_agent_of_an_admin_is_refused(
 
     response = await client.put(url(maria.id), json={"kyc_tier": 2})
 
-    assert_problem(response, 403, "permission_denied")
+    # Refused as an agent before its user's role is looked at: an admin route names no
+    # scope, so no key reaches it.
+    assert_problem(response, 403, "insufficient_scope")
     assert await tier_of(db, maria.id) == 0
 
 

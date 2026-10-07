@@ -80,6 +80,7 @@ async def convert(
             principal=principal,
             asset=quote.sell_asset,
             amount=quote.sell_amount,
+            movement_id=conversion_id,
         ),
     )
 

@@ -1,9 +1,10 @@
 """Repair: the two kinds of break a run can put right by itself.
 
-Both are an event that never arrived. The provider's own record of it is fed through the
-function the webhook would have reached, which is idempotent, so a repair that races the
-late webhook, the payout sweeper or another run changes nothing twice. Nothing else is
-repaired: every other break needs a person to decide what is true.
+Both are an event that never arrived. The provider's own record of it is given to
+payments: a payout's result through the function its webhook would have reached, and a
+deposit through the one for deposits read from a statement. Both are idempotent, so a
+repair that races the late webhook, the payout sweeper or another run changes nothing
+twice. Nothing else is repaired: every other break needs a person to decide what is true.
 
 A break is closed by looking at Corridor's own records afterwards, and not on the word of
 the repair. That also closes a break that something else put right in the meantime.
@@ -66,40 +67,22 @@ async def repair(db: Database, found: Sequence[tuple[Break, Finding]], *, comple
 
 
 async def _record_deposit(db: Database, provider: str, line: ProviderTransaction) -> None:
-    """Hand a statement line to the function its webhook would have reached.
+    """Hand a statement line to payments as a deposit read from a statement.
 
-    A statement says less than a webhook does: who sent the money and from where is not on
-    it, and those fields are left empty. What attributes a deposit, the account or address
-    it arrived at, is on it.
+    Not as the event its webhook would have been: a statement says less than a webhook
+    does, and payments is told so instead of being shown empty fields to take for a
+    sender it screened. What attributes a deposit, the account or address it arrived at,
+    is on the line. Who sent it is not, on either provider's statement.
     """
-    amount = format_amount(line.amount, line.asset_code)
-    if provider == payments.BANK_PROVIDER:
-        await payments.apply_bank_deposit_received(
-            db,
-            {
-                "deposit_id": line.id,
-                "virtual_account_id": line.related_id or "",
-                "asset": line.asset_code,
-                "amount": amount,
-                "sender_name": "",
-                "reference": line.reference or "",
-            },
-        )
-        return
-    await payments.apply_chain_deposit_confirmed(
+    await payments.apply_statement_deposit(
         db,
-        {
-            "deposit_id": line.id,
-            "address_id": line.related_id or "",
-            "address": "",
-            "asset": line.asset_code,
-            "amount": amount,
-            "tx_hash": line.tx_hash or "",
-            "from_address": "",
-            # A statement lists a deposit only once it is final, and does not say after
-            # how many confirmations.
-            "confirmations": 0,
-        },
+        provider=provider,
+        provider_ref=line.id,
+        account_ref=line.related_id or "",
+        asset=line.asset_code,
+        amount=line.amount,
+        tx_hash=line.tx_hash,
+        sender=None,
     )
 
 
