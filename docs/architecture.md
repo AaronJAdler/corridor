@@ -522,7 +522,7 @@ storing the raw event means any webhook can be replayed.
 
 Webhooks get lost. Two mechanisms make that survivable:
 
-- **Payout sweeper.** Every 30 seconds, withdrawals that have been `submitted` for longer
+- **Payout sweeper.** Every 30 seconds, withdrawals that have been `submitting` or `submitted` for longer
   than a threshold are checked against the provider's API and advanced.
 - **Reconciliation.** Section 10. It finds what both the webhook and the sweeper missed.
 
@@ -581,10 +581,11 @@ stateDiagram-v2
     held --> under_review: risk flag
     under_review --> held: approved
     under_review --> released: rejected
-    held --> submitted: provider accepted
+    held --> submitting: about to call the provider
     held --> canceled: user cancels
-    held --> completed: settlement webhook arrives first
-    held --> failed: provider rejected
+    submitting --> submitted: provider accepted
+    submitting --> completed: settlement webhook arrives first
+    submitting --> failed: provider rejected, and holds no payout
     submitted --> completed: payout settled
     submitted --> failed: payout failed
     completed --> [*]
@@ -592,6 +593,12 @@ stateDiagram-v2
     canceled --> [*]
     released --> [*]
 ```
+
+A withdrawal is marked `submitting`, and that is committed, before the provider is called. A
+cancellation is accepted only while it is still `held`, so funds are never released for a
+payout that is on its way. When the provider refuses, Corridor first asks it what it holds
+under the withdrawal's reference and releases only if the answer is nothing: an earlier
+attempt whose reply was lost may already have made the payout.
 
 `failed`, `canceled` and `released` all post a release entry that returns the funds to
 `user_available`. Every transition runs under `SELECT … FOR UPDATE` on the withdrawal row and

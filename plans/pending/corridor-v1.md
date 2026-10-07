@@ -25,10 +25,10 @@ Updated in the same change that lands each phase.
 | 4 | Wallets and transfers | 4 | **done** 2026-10-06 | `gate.sh tests` on the combined tree |
 | — | **Checkpoint A: core** | | **reached** 2026-10-06 | two independent reviews, no Critical or High; Required and Medium findings fixed |
 | 5 | Providers and simulators | 5 | **done** 2026-10-06 | `gate.sh tests` on the combined tree |
-| 6 | Inbound money | 5 | not started | |
-| 7 | Outbound money | 6 | not started | |
-| — | **Checkpoint B: money in and out** | | | |
-| 8 | FX | 3 | not started | |
+| 6 | Inbound money | 5 | **done** 2026-10-06 | `gate.sh tests`: 2772 passed |
+| 7 | Outbound money | 6 | **done** 2026-10-06 | `gate.sh tests`: 2772 passed |
+| — | **Checkpoint B: money in and out** | | **reached** 2026-10-06 | S4 observed: failure-injection suite, one payout per withdrawal in every case |
+| 8 | FX | 3 | **done** 2026-10-06 | `gate.sh tests`: 2772 passed |
 | 9 | Risk | 4 | not started | |
 | 10 | Reconciliation and operations | 4 | not started | |
 | 11 | Agents | 4 | not started | |
@@ -732,3 +732,6 @@ during the build are appended here with the date and the reason.
 | 2026-10-06 | Cursor pagination lives in `platform`, not `api` | Modules below the API return pages; a worker stopped on the layer contract rather than break it |
 | 2026-10-06 | Not yet done from review notes: `TEMPORARY` is not revoked from the application role; the minimum transfer fee is one number for all assets; restricting a user does not take the money-out lock | Each needs a decision outside the slice that found it; tracked here until phase 12 |
 | 2026-10-06 | Review findings deferred to phase 12, each open: a third party can keep an account locked by failing logins; registration and transfer-by-email reveal which emails exist; a closed or demoted user's access token works until it expires; no request body size limit; IPv6 clients are rate-limited per address, not per /64; the application role could update any column of `users` and `account_balances` if SQL injection ever appeared; appending a balanced pair of postings to an old entry is caught by the verifier, not refused by the database; restricting a user does not wait for that user's in-flight transfer; metrics are unauthenticated | None loses or creates money. Each needs a design decision rather than a patch |
+| 2026-10-06 | New withdrawal state `submitting`, committed before the provider call; cancel only from `held` | A cancellation during the provider call released funds for a payout that then went out |
+| 2026-10-06 | A provider refusal is checked against what the provider holds before funds are released | The failure-injection suite found two cases where a refusal followed a payout that had in fact been made |
+| 2026-10-06 | Open after checkpoint B: a dropped deposit webhook is not recovered until reconciliation (phase 10); a withdrawal left `submitting` whose event went dead needs an operator requeue; expired quotes are never purged; the minimum transfer fee is one number for all assets; revisions 0005 and 0011 were edited in place | Recorded so they are not mistaken for done |
