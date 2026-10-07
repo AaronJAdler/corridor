@@ -33,10 +33,10 @@ Updated in the same change that lands each phase.
 | 10 | Reconciliation and operations | 4 | **done** 2026-10-07 | full suite: 3798 passed, 3 route-table tests then fixed and rerun |
 | 11 | Agents | 4 | **done** 2026-10-07 | full suite: 3798 passed, 3 route-table tests then fixed and rerun |
 | — | **Checkpoint C: feature complete** | | **reached** 2026-10-07 | S5 observed: a deposit whose webhook is dropped is credited once by reconciliation |
-| 12 | Hardening | 5 | not started | |
-| 13 | Local stack | 4 | not started | |
-| 14 | Deployment | 6 | not started | |
-| 15 | Documentation | 5 | not started | |
+| 12 | Hardening | 5 | **done** 2026-10-07, except 12.5 and two files of 12.4 (decision log) | `gate.sh tests`: lint, types, contracts, secret scan, 4254 passed and 2 skipped (the two end-to-end tests, which `poe e2e` runs); every new guard removed once and its test seen to fail |
+| 13 | Local stack | 4 | **done** 2026-10-07; the image was not built and the stack not started | `uv run poe lint-docker`, `uv run poe lint-compose` (`docker compose config`, no daemon), `uv run poe e2e`: "End-to-end run passed", `uv run poe demo`: "Ledger verification passed: no findings", `uv run poe smoke` |
+| 14 | Deployment | 6 | **done** 2026-10-07 as definitions; nothing applied, no workflow run | `uv run poe lint-ci` (actionlint, zizmor: no findings); the Terraform was validated with OpenTofu, not with Terraform (decision log) |
+| 15 | Documentation | 5 | **done** 2026-10-07 | `uv run poe lint-docs`; the API guide's examples recorded from the API, the worker and the simulators running as processes; the settings and error-code tables generated from the code |
 | 16 | Final verification | 3 | not started | |
 
 ## Success criteria
@@ -706,7 +706,7 @@ Sizes: XS under 3 files, S 3 to 6, M 7 to 12. Nothing larger than M is taken as 
 
 ## Decision log
 
-Design decisions D1 to D20 are in
+Design decisions D1 to D18 are in
 [section 20 of the architecture](../../docs/architecture.md#20-decision-log). Changes made
 during the build are appended here with the date and the reason.
 
@@ -739,3 +739,14 @@ during the build are appended here with the date and the reason.
 | 2026-10-07 | Migrations are 0012 risk, 0013 recon, 0014 ops, 0015 agents, 0016 review fixes; admin routes are split into one router per area | The numbering in the task list above is one behind |
 | 2026-10-07 | An agent with no policy can pay nobody; over the threshold nothing moves and the owner approves | Deny by default |
 | 2026-10-07 | Accepted limits: a deposit repaired from a provider statement is credited unscreened (the statement names no sender); usage counts conversions; an agent's conversion is capped but never sent for approval; no cap on pending approval requests, agents or beneficiaries per user; tier 0 may withdraw | Recorded so they are not mistaken for done |
+| 2026-10-07 | Money writes fail closed when Redis is down: a request that cannot be counted against its limit is refused with `503 rate_limiter_unavailable`. Canceling a withdrawal is exempt and is counted with the reads | An uncounted write could be repeated without limit while part of the system is unhealthy. A user must still be able to stop a payout, and a cancellation sends no money and calls no provider |
+| 2026-10-07 | Registration answers `201` for an address that is already registered, after the same hashing work, and creates nothing. Left open: a taken handle is refused openly, and a logged-in user learns whether an address or a handle has an account by naming it as a transfer's recipient (`recipient_not_found` or not) | The endpoint that needs no credential must not say who has an account. Handles are public by design, and paying someone by address is the feature |
+| 2026-10-07 | Step 12.5, the load baseline, was not done: there is no `tests/load`, no `poe load` and no `docs/load-baseline.md` | No throughput or latency figure exists for this build, and the documents say so |
+| 2026-10-07 | Of step 12.4, `.pre-commit-config.yaml` and `.gitleaks.toml` were not written. The secret scan is `detect-secrets`, run in the CI workflow and by the gate | Recorded so that the step's file list is not read as done |
+| 2026-10-07 | Nothing was run in a container: no image was built and the compose stack was never started. What ran is `hadolint` on the Dockerfile and `docker compose config` on `compose.yaml`, with the Docker command line and no daemon | No registry is reachable from the workspace. The same programs run as processes in `poe e2e` |
+| 2026-10-07 | The signing key for the compose stack is generated with `corridor keys generate --mode 644`; a Compose `secrets:` entry was not used | The API container runs as user id 10001 and a bind mount keeps the host's permission bits. A file-based Compose secret is the same bind mount, and its `uid`, `gid` and `mode` are not applied outside a swarm. Not exercised: the stack was never started |
+| 2026-10-07 | The Terraform was validated with OpenTofu only, never with the Terraform binary, and nothing was applied | `terraform` is not installed in the workspace, so `poe lint-infra`, which names it, has not been run as written |
+| 2026-10-07 | The CI and deploy workflows have never run. They pass `actionlint` and `zizmor` | There is no remote and no linked GitHub account |
+| 2026-10-07 | The decision records are numbered D1 to D18, one ADR each (`docs/adr/0001` to `0018`); this plan first said D1 to D20 | The architecture's decision log and `docs/adr` both hold eighteen; the plan's number was written before either |
+| 2026-10-07 | Revision 0019: column-level `UPDATE` grants on `users`; the withdrawal states `under_review` and `released` removed from the constraint, the type and the API description; an index for the list of deposits in suspense | No code path wrote either state: a withdrawal under review stays `held`. The application role could otherwise rewrite an email address or a password hash |
+| 2026-10-07 | The first administrator is made with `corridor users make-admin --email … --yes`, over the owner connection, audited. Admin endpoints were added for the deposits in suspense, restricting a user and lifting it, and reading the audit log | The runbook used SQL for each of these, outside the audit log |

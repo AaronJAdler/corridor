@@ -1,8 +1,12 @@
 """Command line: ``corridor serve``, ``corridor worker``, ``corridor db migrate``,
-``corridor keys generate``, ``corridor verify-ledger`` and ``corridor demo``."""
+``corridor keys generate``, ``corridor users make-admin``, ``corridor verify-ledger`` and
+``corridor demo``."""
 
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
+
+if TYPE_CHECKING:
+    from corridor import identity
 
 import typer
 
@@ -11,6 +15,13 @@ db_app = typer.Typer(no_args_is_help=True, help="Database administration.")
 app.add_typer(db_app, name="db")
 keys_app = typer.Typer(no_args_is_help=True, help="Signing keys for access tokens.")
 app.add_typer(keys_app, name="keys")
+users_app = typer.Typer(no_args_is_help=True, help="Accounts, from the operator's own shell.")
+app.add_typer(users_app, name="users")
+
+# What a private key file may be made readable to: its owner, and at the most everyone
+# for reading. Nobody but the owner is ever given a way to change it.
+_WIDEST_KEY_MODE = 0o644
+_OWNER_READ = 0o400
 
 
 @app.command()
@@ -60,6 +71,13 @@ def db_migrate(
 @keys_app.command("generate")
 def keys_generate(
     out: Annotated[Path, typer.Option(help="Directory to write the key pair into.")],
+    mode: Annotated[
+        str,
+        typer.Option(
+            help="Permission bits of the private key, in octal. 644 lets a container that"
+            " runs as another user read a key mounted from this machine."
+        ),
+    ] = "600",
 ) -> None:
     """Generate a signing key and print the settings that use it.
 
@@ -72,11 +90,104 @@ def keys_generate(
 
     from corridor import identity
 
-    kid, private_path = identity.write_keypair(out)
+    kid, private_path = identity.write_keypair(out, mode=_key_mode(mode))
     public_pem = (out / f"{kid}.pub.pem").read_text(encoding="ascii")
     # Only the path of the private key is printed, never the key.
     typer.echo(f"CORRIDOR_JWT_SIGNING_KEY_FILE={shlex.quote(str(private_path))}")
     typer.echo(f"CORRIDOR_JWT_ADDITIONAL_PUBLIC_KEYS={shlex.quote(json.dumps([public_pem]))}")
+
+
+def _key_mode(text: str) -> int:
+    try:
+        mode = int(text, 8)
+    except ValueError:
+        raise typer.BadParameter("give the mode in octal, such as 600 or 644.") from None
+    if not mode & _OWNER_READ or mode & ~_WIDEST_KEY_MODE:
+        raise typer.BadParameter(
+            "a private key is readable by its owner, and at the most readable by others:"
+            " 400, 600, 640 or 644."
+        )
+    return mode
+
+
+@users_app.command("make-admin")
+def users_make_admin(
+    email: Annotated[str, typer.Option(help="The email address of a registered user.")],
+    yes: Annotated[
+        bool, typer.Option("--yes", help="Do it. Without this nothing is changed.")
+    ] = False,
+) -> None:
+    """Make a registered user an administrator, as the owner role
+    (CORRIDOR_DATABASE_OWNER_URL).
+
+    This is how the first administrator is made: the API gives the role only at the word
+    of someone who has it. It is written to the audit log, and the access tokens the user
+    holds are ended, so they log in again to act as an administrator.
+    """
+    import asyncio
+
+    from corridor.platform.config import MigrationSettings
+
+    if not yes:
+        typer.echo(
+            f"This would make {email} an administrator. Nothing was changed: run it again"
+            " with --yes.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    owner_url = MigrationSettings().database_owner_url
+    if owner_url is None:
+        typer.echo("CORRIDOR_DATABASE_OWNER_URL is not set; this needs the owner role.", err=True)
+        raise typer.Exit(code=1)
+
+    outcome = asyncio.run(make_admin(owner_url.get_secret_value(), email))
+    if outcome is None:
+        typer.echo(f"There is no open account with the email address {email}.", err=True)
+        raise typer.Exit(code=1)
+    user, changed = outcome
+    if changed:
+        typer.echo(f"{user.email} ({user.id}) is now an administrator.")
+    else:
+        typer.echo(f"{user.email} ({user.id}) is an administrator already. Nothing was changed.")
+
+
+async def make_admin(owner_url: str, email: str) -> tuple[identity.User, bool] | None:
+    """Give the user with this email address the administrator's role, over a connection
+    of the owner role. Returns the user and whether anything changed, or None if there is
+    no such open account.
+
+    The change and its audit event are one transaction. The actor is the system, by the
+    name of this command: whoever ran it is known to the machine it ran on, not to
+    Corridor.
+    """
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from corridor import audit, identity
+    from corridor.platform.db import Database
+
+    # Bound values are left out of error messages, as they are for the application.
+    db = Database(create_async_engine(owner_url, hide_parameters=True))
+    try:
+        async with db.transaction() as session:
+            # Only an address is looked up: a handle or an id is not what was asked for.
+            user = await identity.find_user(session, email) if "@" in email[1:] else None
+            if user is None:
+                return None
+            if user.role == "admin":
+                return user, False
+            promoted = await identity.set_role(session, user.id, "admin")
+            await audit.record(
+                session,
+                actor=audit.Actor.system("cli.users.make_admin"),
+                action="user.role_changed",
+                principal_id=user.id,
+                resource_type="user",
+                resource_id=user.id,
+                details={"old_role": user.role, "new_role": promoted.role},
+            )
+            return promoted, True
+    finally:
+        await db.dispose()
 
 
 def _report_ledger() -> None:

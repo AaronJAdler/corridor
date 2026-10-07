@@ -158,11 +158,13 @@ src/corridor/
   webhooks/     inbound provider webhooks: verify, store once, process later, redact
   recon/        reconciliation runs, breaks and repair
   agents/       agents, API keys, spend policies, approval requests
-  ops/          dead letters, reviews, adjustments with dual approval
+  ops/          dead letters, reviews, adjustments with dual approval, deposits in suspense,
+                a user's standing, reading the audit log
   api/          app factory, routers, auth and idempotency dependencies, rate-limit and
                 body-limit middleware, error rendering
   worker/       worker entry point: outbox loop, scheduler, scheduled jobs, webhook routing
-  cli.py        serve, worker, db migrate, keys generate, verify-ledger, demo
+  cli.py        serve, worker, db migrate, keys generate, users make-admin, verify-ledger,
+                demo
   demo.py       the narrated demo, written as a client of the API
 src/corridor_sim/  a separate FastAPI app: bank rail, custody and FX simulators
 migrations/     Alembic revisions, hand-written
@@ -202,7 +204,7 @@ each other. Three rules make the boundaries real:
 | `identity` | `users`, `refresh_tokens`, `login_lockouts`, `login_throttles` | register, log in, issue and rotate tokens, check a token, resolve a principal, look up a user, change tier, role and status |
 | `providers` | none | bank rail, custody and rate-source clients; address validation |
 | `outbox` | `outbox_events` | enqueue an event inside the caller's transaction; register a handler; list and requeue dead events |
-| `audit` | `audit_events` | record an audit event inside the caller's transaction |
+| `audit` | `audit_events` | record an audit event inside the caller's transaction; list events by actor, action, subject and time |
 | `wallets` | `wallet_accounts` | provision a user's accounts, resolve account ids, read balances, list statements |
 | `risk` | `risk_limits`, `risk_usage`, `risk_reference_rates`, `risk_denylist`, `risk_reviews` | authorise a money movement and count it, release usage, value an amount in USD, screen a party, open and resolve a review, restrict a user |
 | `payments` | `transfers`, `deposits`, `deposit_instructions`, `beneficiaries`, `withdrawals` | create transfers; apply provider events to deposits and withdrawals; request, cancel, submit and sweep withdrawals |
@@ -210,7 +212,7 @@ each other. Three rules make the boundaries real:
 | `webhooks` | `webhook_events` | verify, record and process a delivery |
 | `recon` | `recon_runs`, `recon_breaks` | run a reconciliation, list runs and breaks, resolve a break |
 | `agents` | `agents`, `agent_keys`, `agent_policies`, `agent_allowed_recipients`, `agent_approval_requests` | authenticate an API key, manage agents and policies, check a policy, request and decide approvals |
-| `ops` | `ops_adjustments` | dead-letter administration, review decisions, adjustments |
+| `ops` | `ops_adjustments` | dead-letter administration, review decisions, adjustments, the list of deposits in suspense, a user's role, restriction and closing, reading the audit log |
 | `api` | `idempotency_keys` | none; it is an entry point |
 | `worker` | `job_runs` | none; it is an entry point |
 
@@ -261,8 +263,9 @@ distinction drives the locking design in section 4.6.
 
 `suspense` is unconstrained so that deposits do not queue behind one row, but its balance
 is not meant to go below zero: every debit of it is tied to a deposit that is checked to
-be in suspense under a row lock (section 8.2), and the ledger verifier reports a negative
-suspense balance as a finding.
+be in suspense under a row lock (section 8.2), an adjustment written by hand may not debit
+it, and the ledger verifier reports a suspense balance below zero as the finding
+`negative_suspense`.
 
 A user's `user_available` and `user_held` accounts are opened when the user registers. The
 `user_receivable` account and the system accounts are opened the first time they are needed.
@@ -368,7 +371,7 @@ database refuses to store one, and a verifier detects one after the fact.
 | A constrained account has a balance row and no other account does | `open_account` | `CHECK` on account kind, owner, provider and `is_constrained` | `missing_balance_row`, `unexpected_balance_row`, `stray_balance_after` |
 | One business event posts at most once | `post_entry` returns the existing entry | `UNIQUE (source_type, source_id, kind)` | n/a |
 | An entry is reversed at most once | `reverse_entry` | `UNIQUE (reverses_entry_id)` | n/a |
-| Suspense never goes below zero | Deposit status check under a row lock | n/a | Reported as a finding |
+| Suspense never goes below zero | Deposit status check under a row lock; no hand-written debit | n/a | `negative_suspense` |
 
 Corrections are new entries. Nothing in the ledger is ever changed.
 
@@ -523,9 +526,11 @@ sequenceDiagram
 ```
 
 - **Scope.** A key is unique per actor: the user, or one agent. The fingerprint is a SHA-256
-  over the method, the concrete request path and the canonical JSON body, each hashed with
-  its length in front. Because the path carries the ids, a key used to approve one
-  adjustment cannot answer for another.
+  over the method, the route template and the canonical JSON body, each hashed with its
+  length in front. The path that was asked for is added only when it differs from the
+  template, that is, when the route has parameters: the path carries the ids, so a key
+  used to approve one adjustment cannot answer for another, and a route with no parameters
+  keeps the fingerprint it always had.
 - **Concurrent duplicates.** The second request waits on the advisory lock until the first
   transaction finishes, then reads the committed row and replays its response. If the wait
   exceeds `lock_timeout`, the client gets `409 request_in_progress` with `Retry-After: 1`.
@@ -760,8 +765,16 @@ adjustment that names the deposit, or the bank returns the deposit. Each one loc
 deposit's row, requires its status to be `suspense`, posts its entry and changes the status
 in the same transaction. Whichever comes second finds the deposit no longer in suspense. A
 return that arrives after a release is the return of a credited deposit: it takes the money
-back from the user. A release to a closed account is refused; a restricted account can be
-credited.
+back from the user. A release to a closed account is refused (`deposit_owner_closed`); a
+restricted account can be credited.
+
+A suspense adjustment names its deposit (`ops_adjustments.deposit_id`, and `user_id` for a
+release) and carries no amount of its own: its legs are worked out from the deposit when
+it is asked for, and the approval hands the deposit to payments, which applies the rule
+above. An adjustment written by hand is refused if any leg debits a suspense account, when
+it is asked for and again when it is approved, so there is no way to take money out of
+suspense and leave its deposit there. `GET /v1/admin/deposits/suspense` lists what is in
+suspense.
 
 ### 8.3 Withdrawal
 
@@ -801,7 +814,10 @@ stateDiagram-v2
 - **Cancel.** Accepted only while the withdrawal is `held`, the one state in which the
   provider is certain not to have it. A cancellation either commits before the `submitting`
   mark, and then nothing is sent, or finds the mark and is refused. An agent may cancel
-  only a withdrawal it requested; the user's own session may cancel any of the user's.
+  only a withdrawal it requested (`withdrawals.initiated_by_type` and `initiated_by_id`);
+  for any other of its owner's it gets `withdrawal_not_agents`. The user's own session may
+  cancel any of the user's. Canceling is the one money route that is served while Redis is
+  down (section 14).
 - **Refusal.** When the provider refuses the request, Corridor does not release the funds on
   that word alone. An earlier attempt whose reply was lost may already have made the payout.
   Corridor asks the provider what it holds under the withdrawal's reference, and releases
@@ -817,8 +833,8 @@ Every transition runs under `SELECT … FOR UPDATE` on the withdrawal row and ch
 current state first, so a late or repeated event changes nothing. Releasing a withdrawal
 also gives back what it used of the user's limits.
 
-The `status` column's `CHECK` constraint and the `WithdrawalStatus` type also allow
-`under_review` and `released`. No code writes either value.
+The six states in the diagram are the only ones: the `status` column's `CHECK` constraint,
+the `WithdrawalStatus` type and the API description list exactly these.
 
 ```mermaid
 sequenceDiagram
@@ -907,15 +923,23 @@ money paths have the right hooks and the right failure behaviour.
 - **Reviews.** `risk_reviews` holds one row per withdrawal or deposit that screening would
   not let through unseen. An admin clears or rejects it, once.
 - **Restricted and closed users.** Only an `active` account moves money out. A `restricted`
-  account (after a returned deposit left a shortfall) can still receive. A `closed` account
-  cannot be paid and is answered as "not found" to other users. Restricting a user takes
-  that user's money-out lock.
+  account can still receive. A user is restricted by Corridor when a returned deposit
+  leaves a shortfall, and by an admin through `POST /v1/admin/users/{id}/restrict`, with a
+  reason; `/lift-restriction` makes the user active again. A `closed` account cannot be
+  paid and is answered as "not found" to other users. Restricting a user takes that user's
+  money-out lock. An admin cannot restrict, close or change the role of their own account
+  (`own_account`), and an account is closed only once nothing is in it or on hold
+  (`account_holds_funds`).
 - **Audit log.** `audit_events` is append-only, protected by the same trigger as the ledger.
   Money movements write their audit event in the same transaction as the movement. Each
   event records the actor (`user`, `agent`, `admin`, `system` or `provider`), the user it
   acted for, the action, the resource, the outcome (`success`, `denied`, `failed`), the
   request id and a small JSON document of details. Admin reads are audited as well as admin
-  writes. An approval event names the destination of the movement for every outcome.
+  writes. An approval event names the destination of the movement for every outcome:
+  `recipient_id` for a transfer, `beneficiary_id` or `to_address` for a withdrawal. An
+  admin reads the log with `GET /v1/admin/audit`, filtered by actor, by what an action
+  begins with, by subject and by time; that read is one `audit.listed` event for each
+  request, never one for each event returned.
 
 ---
 
@@ -949,12 +973,14 @@ before the window for the same reason.
 - **Returned before it was seen.** A `missing_deposit` whose return is on the same statement
   is not credited. It is recorded as returned (the same tombstone a return webhook that
   overtakes its deposit leaves) and the break is closed.
-- **Grace period.** A deposit younger than a grace period (a setting, 2 minutes by default)
-  is left for its webhook and not repaired yet.
+- **Grace period.** A deposit the provider received less than
+  `reconciliation_grace_seconds` ago (2 minutes by default) is left for its webhook and not
+  repaired yet.
 - **One open break per disagreement.** A unique index on `(kind, provider, provider_ref)`
   for open breaks means a later run that sees the same disagreement does not open a second
   break. It refreshes the open one instead: `expected`, `actual` and `last_seen_run_id` are
-  updated, and a metric counts the times the difference changed.
+  updated, and `corridor_recon_break_changes_total` counts the times the difference
+  changed.
 - **Incomplete runs.** A provider that could not be read for everything the run asked makes
   the run `incomplete`. An incomplete run does not close payout breaks.
 - **Schedule and window.** The worker runs reconciliation every
@@ -997,8 +1023,9 @@ A user can let software act on their wallet without handing over their login.
   `agent_allowed_recipients` lists the users and the owner's beneficiaries it may pay
   otherwise. Setting a policy copies the two caps into `risk_limits` as the agent's rule,
   so `risk` enforces them where the money moves.
-- **Deny by default.** An agent with no policy row can pay nobody and cannot convert. A
-  policy with an empty recipient list and `any_recipient = false` can pay nobody.
+- **Deny by default.** An agent with no policy row can pay nobody (`recipient_not_allowed`)
+  and cannot convert (`policy_not_set`). A policy with an empty recipient list and
+  `any_recipient = false` can pay nobody.
 - **Policy check.** On every transfer and withdrawal by an agent, after the idempotency
   lock and before anything moves: the destination must be allowed; the amount must not
   exceed the per-transaction cap; and an amount above the threshold is answered with
@@ -1050,7 +1077,7 @@ The [API guide](api.md) documents every endpoint with a recorded request and res
 | FX | `POST /v1/fx/quotes`; `POST /v1/fx/conversions`; `GET /v1/fx/conversions/{id}` |
 | Agents | `POST /v1/agents`, `GET /v1/agents`; `POST /v1/agents/{id}/keys`, `DELETE /v1/agents/{id}/keys/{key_id}`; `PUT` and `GET /v1/agents/{id}/policy`; `POST /v1/agents/{id}/pause`, `/resume`, `/revoke`; `GET /v1/approvals`; `POST /v1/approvals/{id}/approve`, `/reject` |
 | Webhooks | `POST /v1/webhooks/{provider}` |
-| Admin | `/v1/admin/users/{id}/kyc-tier`, `/role`, `/close`; `/v1/admin/risk/limits`, `/denylist`; `/v1/admin/reviews`; `/v1/admin/recon/runs`, `/breaks`; `/v1/admin/outbox/dead`; `/v1/admin/adjustments` |
+| Admin | `/v1/admin/users/{id}/kyc-tier`, `/role`, `/restrict`, `/lift-restriction`, `/close`; `/v1/admin/risk/limits`, `/denylist`; `/v1/admin/reviews`; `/v1/admin/recon/runs`, `/breaks`; `/v1/admin/outbox/dead`; `/v1/admin/deposits/suspense`; `/v1/admin/adjustments`; `/v1/admin/audit` |
 | Service | `GET /healthz`, `/readyz`, `/metrics` |
 
 ---
@@ -1166,14 +1193,21 @@ application role only what the code needs:
 | `assets`, `risk_reference_rates` | `SELECT` |
 | `account_balances` | `SELECT`, `INSERT`, `UPDATE` |
 | `transfers`, `fx_conversions`, `beneficiaries`, `deposit_instructions`, `wallet_accounts`, `recon_runs` | `SELECT`, `INSERT` |
-| `withdrawals`, `deposits`, `webhook_events`, `risk_usage`, `agents`, `agent_keys`, `agent_policies`, `agent_approval_requests` | `SELECT`, `INSERT`, and `UPDATE` of the named columns that change after the row is written |
+| `users`, `withdrawals`, `deposits`, `webhook_events`, `recon_breaks`, `risk_usage`, `agents`, `agent_keys`, `agent_policies`, `agent_approval_requests` | `SELECT`, `INSERT`, and `UPDATE` of the named columns that change after the row is written. On `users` those are `role`, `kyc_tier`, `status`, `restricted_reason`, `tokens_valid_after` and `updated_at`: not the email address, the handle or the password hash |
 | `fx_quotes` | The same, and `DELETE`, for the purge of quotes nobody took |
-| `users`, `risk_reviews`, `ops_adjustments`, `recon_breaks` | `SELECT`, `INSERT`, `UPDATE` |
+| `risk_reviews`, `ops_adjustments` | `SELECT`, `INSERT`, `UPDATE` |
 | `agent_allowed_recipients` | `SELECT`, `INSERT`, `DELETE`: the list is replaced whole with its policy |
 | `outbox_events`, `job_runs`, `idempotency_keys`, `refresh_tokens`, `login_lockouts`, `login_throttles`, `risk_limits`, `risk_denylist` | Full row access; these are working state |
 
 The role cannot create, alter or drop anything, and cannot create temporary tables.
 `tests/security/test_grants.py` checks the grants against a migrated database.
+
+The owner role is used for one thing besides migrations, from an operator's shell;
+nothing in the API or the worker holds its connection. `corridor users make-admin --email
+<address> --yes` gives a registered user the administrator's role, which is how the first
+administrator is made, since the API changes a role only at the word of an administrator.
+It ends the user's access tokens and writes a `user.role_changed` audit event with the
+actor `system` / `cli.users.make_admin`. Without `--yes` it changes nothing.
 
 ### Supply chain
 
@@ -1235,7 +1269,8 @@ The role cannot create, alter or drop anything, and cannot create temporary tabl
 | `0015_agents` | Agents, keys, policies, allowed recipients, approval requests |
 | `0016_review_b` | Write-once triggers on payment and FX rows; purge of unused quotes |
 | `0017_hardening` | Login failure tables, `tokens_valid_after`, sealed entries, column-level grants, no temporary tables, webhook redaction |
-| `0018_review_c` | The schema changes of the last review, such as the run that last saw an open break |
+| `0018_review_c` | The kind of an adjustment and the deposit and user a suspense adjustment names; who asked for a withdrawal; the run that last saw an open break, and column-level grants on breaks |
+| `0019_operators` | Column-level `UPDATE` grants on `users`; the withdrawal states narrowed to the six the code writes; an index for the list of deposits in suspense |
 
 ### Redis
 
@@ -1247,7 +1282,7 @@ timeout and no retry: a slow Redis is treated as an absent one, and
 |---|---|---|
 | Rate limit by client address (`global`, `auth`, `webhooks` groups) | `rl:{group}:{sha256 of the address}` | **Fail open.** The request is served and counted in the metric. Login also has the database lockout and throttle |
 | Rate limit on money reads (`money_read`) | `rl:money_read:{sha256 of the actor}` | **Fail open** |
-| Rate limit on money writes (`money_write`) | `rl:money_write:{sha256 of the actor}` | **Fail closed.** The request is refused with `503 rate_limiter_unavailable` and `Retry-After: 5`. Nothing was done |
+| Rate limit on money writes (`money_write`) | `rl:money_write:{sha256 of the actor}` | **Fail closed.** The request is refused with `503 rate_limiter_unavailable` and `Retry-After: 5`. Nothing was done. Canceling a withdrawal is not in this group: it is counted with the reads, so that a payout can be stopped while Redis is down |
 | FX mid-rate cache | `fx:rate:{base}:{quote}`, a JSON document with an HMAC | The rate source is asked on every quote |
 | Session revocation mark | `revoked:sid:{session id}` | The mark is not written or not read. The access token works until it expires, at most 15 minutes. The per-request check against PostgreSQL still applies |
 
@@ -1345,13 +1380,18 @@ Every setting is an environment variable prefixed `CORRIDOR_`, read by
 | `CORRIDOR_WITHDRAWAL_FEE_BPS` | `int` | `0` |
 | `CORRIDOR_WITHDRAWAL_MIN_FEE` | `dict[str, str]` | `{"USD": "0.25", "MXN": "5.00", "USDC": "0.15"}` |
 | `CORRIDOR_PAYOUT_SWEEP_AFTER_SECONDS` | `int` | `120` |
-| `CORRIDOR_RECONCILIATION_INTERVAL_SECONDS` | `int` | `300` |
+| `CORRIDOR_RECONCILIATION_INTERVAL_SECONDS` | `float` | `300.0` |
 | `CORRIDOR_RECONCILIATION_WINDOW_SECONDS` | `int` | `3600` |
+| `CORRIDOR_RECONCILIATION_GRACE_SECONDS` | `int` | `120` |
 
 Notes:
 
-- `CORRIDOR_DATABASE_OWNER_URL` is read only by `corridor db migrate`. It is not set on the
-  API or the worker.
+- `CORRIDOR_DATABASE_OWNER_URL` is read only by `corridor db migrate` and
+  `corridor users make-admin`. It is not set on the API or the worker.
+- Reconciliation has three: `CORRIDOR_RECONCILIATION_INTERVAL_SECONDS` (how often a run is
+  made), `CORRIDOR_RECONCILIATION_WINDOW_SECONDS` (how far back each run looks) and
+  `CORRIDOR_RECONCILIATION_GRACE_SECONDS` (how old a deposit on a statement must be before
+  a run repairs it).
 - Exactly one of `CORRIDOR_JWT_SIGNING_KEY` (the PEM text) and
   `CORRIDOR_JWT_SIGNING_KEY_FILE` (a path) must be set. The API refuses to start otherwise.
 - A provider with no URL is not configured. The API then answers `503` where that provider
@@ -1394,6 +1434,7 @@ Notes:
 | `corridor_ledger_verifier_last_run_timestamp_seconds` | gauge | worker | When the verifier last finished |
 | `corridor_recon_open_breaks` | gauge | worker | Open breaks as of the last run |
 | `corridor_recon_breaks_total{kind}` | counter | worker | Breaks opened |
+| `corridor_recon_break_changes_total{kind}` | counter | worker | Open breaks whose difference a later run found changed |
 
 - **Where metrics are served.** Each process has its own registry. The API serves its
   metrics at `/metrics` only when `metrics_public` is set, because that port is the public
@@ -1668,10 +1709,11 @@ Stated plainly, so nothing is mistaken for verified.
   leaves the wallet.
 - **An agent's conversion is capped and never sent for approval.**
 - **Tier 0 may withdraw.**
-- **There is no endpoint that lists deposits in suspense** or reads the audit log. An
-  operator uses SQL for both; the [runbook](runbook.md) has the queries.
-- **The first administrator is made with SQL.** After that, administrators are made through
-  the API.
+- **The first administrator is made from a shell**, with `corridor users make-admin` and
+  the owner connection. After that, administrators are made through the API.
+- **Some of what an operator looks at is read with SQL**: the outbox, the ledger's postings,
+  stored webhooks and a single withdrawal or deposit by id. The [runbook](runbook.md) has
+  the queries. Deposits in suspense and the audit log have endpoints.
 - **Rotating `api_key_hash_key` invalidates every agent key**, and rotating
   `fx_cache_mac_key` only empties a five-second cache. The runbook covers both.
 - **No distributed tracing, alert rules or dashboards.**

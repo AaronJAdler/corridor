@@ -3,10 +3,11 @@
 Other modules use the names exported here and nothing else from this package.
 """
 
-from corridor.audit.service import list_events, record
+from corridor.audit.service import MAX_PAGE_SIZE, list_events, record
 from corridor.audit.types import Actor, ActorType, AuditEvent, Outcome
 
 __all__ = [
+    "MAX_PAGE_SIZE",
     "Actor",
     "ActorType",
     "AuditEvent",

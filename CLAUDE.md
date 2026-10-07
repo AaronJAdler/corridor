@@ -29,11 +29,12 @@ uv run poe e2e              API, worker and simulators as processes; a scripted 
 uv run poe demo             the same stack, narrating a deposit, conversion, transfer, withdrawal
 uv run poe audit            pip-audit over the installed dependencies
 uv run poe lint-docs        links, diagrams and docs/openapi.json against the code
-uv run poe lint-docker      also lint-compose (needs Docker), lint-ci, lint-infra (needs Terraform)
+uv run poe lint-docker      also lint-compose (needs the Docker CLI), lint-ci, lint-infra (needs Terraform)
 uv run corridor serve       run the API (needs CORRIDOR_DATABASE_URL, CORRIDOR_REDIS_URL, a signing key)
 uv run corridor worker      run the worker
 uv run corridor db migrate  apply migrations (needs CORRIDOR_DATABASE_OWNER_URL)
-uv run corridor keys generate --out DIR     generate a signing key pair
+uv run corridor keys generate --out DIR     generate a signing key pair (--mode 644 for the compose stack)
+uv run corridor users make-admin --email ADDRESS --yes    the first administrator (owner URL)
 uv run corridor verify-ledger               recompute the ledger's invariants; exit 1 on a finding
 uv run python scripts/lint_docs.py --write-openapi    regenerate docs/openapi.json after an API change
 ```
@@ -107,7 +108,8 @@ CORRIDOR_TEST_POSTGRES_CLONE_STRATEGY   optional: FILE_COPY is faster on a throw
   role must not do, and grant `UPDATE` on named columns only.
 - **Authorisation.** Routes take `require(scope)`, `CurrentPrincipal` or `AdminPrincipal`;
   only `require` admits an agent key. Services check the scope again and answer another
-  user's resource as not found.
+  user's resource as not found. A new route goes into the route tables of the tests, and
+  what an admin reads or changes is audited in the transaction that serves it.
 - **Logging.** `corridor.platform.logging.get_logger(__name__)`, dotted event names, never
   a secret, token, password, hash, body or full account number.
 - **Tests.** Real PostgreSQL and Redis; each test gets its own database. Test names are

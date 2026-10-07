@@ -493,7 +493,7 @@ async def test_twenty_cancellations_at_once_release_the_funds_once(
 
 @pytest.mark.parametrize(
     "status",
-    ["under_review", "submitting", "submitted", "completed", "failed", "canceled", "released"],
+    ["submitting", "submitted", "completed", "failed", "canceled"],
 )
 async def test_only_a_held_withdrawal_can_be_cancelled(
     db: Database, settings: Settings, bank: SimBank, maria: User, status: str

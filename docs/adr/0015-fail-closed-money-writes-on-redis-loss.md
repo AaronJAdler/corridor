@@ -23,15 +23,20 @@ exactly when part of the system is unhealthy.
 - Rate limits by client address fail **open**. So does the per-actor limit on money reads.
 - The per-actor limit on money writes fails **closed**: the request is refused with
   `503 rate_limiter_unavailable` and `Retry-After`, and nothing is done.
+- Canceling a withdrawal is the exception among the writes. It is counted with the reads
+  and so fails open: a user must be able to stop a payout while Redis is down, and a
+  cancellation sends no money and calls no provider. Repeating it finds the withdrawal
+  canceled and is refused.
 - The FX cache falls back to asking the rate source. The revocation mark is skipped, and
   the per-request check against PostgreSQL still refuses closed accounts and ended tokens.
 
 ## Consequences
 
 - Losing Redis loses no money and corrupts nothing.
-- Losing Redis makes transfers, withdrawals, conversions and beneficiary creation
-  unavailable until it is back. Reads, logins and webhook intake keep working, and the
-  worker, which does not use Redis, keeps settling what is in flight.
+- Losing Redis makes transfers, new withdrawals, quotes, conversions, beneficiary creation
+  and the approval of an agent's request unavailable until it is back. Reads, logins,
+  canceling a held withdrawal and webhook intake keep working, and the worker, which does
+  not use Redis, keeps settling what is in flight.
 - `/readyz` reports `degraded`, not down, when Redis is unreachable. An operator has to
   know that `degraded` means money-moving requests are being refused.
 - Refused requests are safe to retry with the same idempotency key.

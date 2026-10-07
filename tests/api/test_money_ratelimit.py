@@ -13,11 +13,11 @@ from prometheus_client import REGISTRY
 from pydantic import SecretStr
 from sqlalchemy import text
 
-from corridor import wallets
+from corridor import payments, wallets
 from corridor.api.app import create_app
 from corridor.api.errors import PROBLEM_CONTENT_TYPE
-from corridor.api.ratelimit import money_rate_limit
-from corridor.identity import Scope
+from corridor.api.ratelimit import money_rate_limit, money_recall_rate_limit
+from corridor.identity import Principal, Scope
 from corridor.platform.clock import ManualClock
 from corridor.platform.config import Settings
 from corridor.platform.db import Database
@@ -26,6 +26,7 @@ from corridor.platform.redis import RedisStore
 from tests.agents.support import an_agent
 from tests.support.auth import RegisteredUser, register_user, served_routes
 from tests.support.ledger import fund
+from tests.support.providers import EXTERNAL_ADDRESS
 
 TRANSFERS = "/v1/transfers"
 # Nothing listens on port 1, so a connection there is refused immediately.
@@ -115,7 +116,6 @@ def test_the_money_routes_are_the_ones_that_carry_the_limit(app: FastAPI) -> Non
         ("POST", "/v1/withdrawals"),
         ("GET", "/v1/withdrawals"),
         ("GET", "/v1/withdrawals/{withdrawal_id}"),
-        ("POST", "/v1/withdrawals/{withdrawal_id}/cancel"),
         ("POST", "/v1/fx/quotes"),
         ("POST", "/v1/fx/conversions"),
         ("GET", "/v1/fx/conversions/{conversion_id}"),
@@ -125,6 +125,17 @@ def test_the_money_routes_are_the_ones_that_carry_the_limit(app: FastAPI) -> Non
         # Approving what an agent asked for makes the movement.
         ("POST", "/v1/approvals/{approval_id}/approve"),
     }
+
+
+def test_canceling_a_withdrawal_carries_the_limit_that_does_not_need_redis(app: FastAPI) -> None:
+    recall = {
+        (route.method, route.path)
+        for route in served_routes(app)
+        if money_recall_rate_limit in route.calls
+    }
+
+    # This one route and no other: it is the only write that is served uncounted.
+    assert recall == {("POST", "/v1/withdrawals/{withdrawal_id}/cancel")}
 
 
 def test_the_defaults_leave_room_for_a_person_and_stop_a_loop() -> None:
@@ -273,3 +284,72 @@ async def test_with_rate_limiting_switched_off_redis_is_not_asked(
         served = [(await send(http, maria.headers, joao)).status_code for _ in range(WRITES + 1)]
 
     assert served == [201] * (WRITES + 1)
+
+
+# --- calling a withdrawal back -----------------------------------------------------------------
+
+
+async def a_held_withdrawal(db: Database, settings: Settings, user: RegisteredUser) -> str:
+    """One withdrawal of the user's, held, made without going through the API or its limit."""
+    user_id = uuid.UUID(user.id)
+    async with db.transaction() as session:
+        wallet = await wallets.get_wallet(session, user_id, "USDC")
+        await fund(session, wallet.available_account_id, 50_000_000, "USDC")
+    async with db.transaction() as session:
+        withdrawal = await payments.request_withdrawal(
+            session,
+            Principal.for_user(user_id, "user", new_id()),
+            withdrawal_id=new_id(),
+            asset="USDC",
+            amount=1_000_000,
+            beneficiary_id=None,
+            to_address=EXTERNAL_ADDRESS,
+            settings=settings,
+        )
+    return f"/v1/withdrawals/{withdrawal.id}/cancel"
+
+
+async def status_of_the_withdrawal(db: Database) -> str:
+    async with db.transaction() as session:
+        return str((await session.execute(text("SELECT status FROM withdrawals"))).scalar_one())
+
+
+async def test_with_redis_unreachable_a_withdrawal_can_still_be_called_back(
+    settings: Settings, db: Database
+) -> None:
+    async with serving(settings.model_copy(update={"redis_url": DEAD_REDIS})) as http:
+        maria = await register_user(http)
+        cancel = await a_held_withdrawal(db, settings, maria)
+
+        # A payout cannot be asked for while its limit cannot be counted. One that was
+        # asked for before can be stopped.
+        refused = await http.post(
+            "/v1/withdrawals",
+            json={"asset": "USDC", "amount": "1.00", "to_address": EXTERNAL_ADDRESS},
+            headers={**maria.headers, "Idempotency-Key": f"limit-{new_id()}"},
+        )
+        canceled = await http.post(cancel, headers=maria.headers)
+
+    assert_problem(refused, 503, "rate_limiter_unavailable")
+    assert canceled.status_code == 200, canceled.text
+    assert canceled.json()["status"] == "canceled"
+    assert await status_of_the_withdrawal(db) == "canceled"
+
+
+async def test_canceling_is_counted_with_the_reads_and_takes_nothing_from_the_writes(
+    client: httpx.AsyncClient, db: Database, settings: Settings
+) -> None:
+    maria, joao = await a_user_with_money(client, db), await register_user(client)
+    cancel = await a_held_withdrawal(db, settings, maria)
+    before = rejections("money_read")
+
+    answers = [
+        (await client.post(cancel, headers=maria.headers)).status_code for _ in range(READS + 1)
+    ]
+    written = [(await send(client, maria.headers, joao)).status_code for _ in range(WRITES)]
+
+    # Canceled once, refused as canceled already, and then refused as too many: it is
+    # limited, by the allowance of the reads.
+    assert answers == [200] + [409] * (READS - 1) + [429]
+    assert written == [201] * WRITES
+    assert rejections("money_read") == before + 1

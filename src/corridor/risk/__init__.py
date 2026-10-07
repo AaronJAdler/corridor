@@ -16,6 +16,7 @@ from corridor.risk.limits import list_limits, release_usage, set_limit, usd_valu
 from corridor.risk.screening import (
     add_to_denylist,
     find_review,
+    find_reviews,
     get_review,
     is_cleared,
     list_denylist,
@@ -62,6 +63,7 @@ __all__ = [
     "add_to_denylist",
     "authorize",
     "find_review",
+    "find_reviews",
     "get_review",
     "is_cleared",
     "list_denylist",

@@ -20,16 +20,9 @@ DepositStatus = Literal["pending", "completed", "suspense", "failed", "returned"
 # ``submitting`` is the state between deciding to ask the provider and knowing its answer:
 # the provider may or may not have the payout, so the funds stay reserved and the user can
 # no longer call the withdrawal back.
-WithdrawalStatus = Literal[
-    "held",
-    "under_review",
-    "submitting",
-    "submitted",
-    "completed",
-    "failed",
-    "canceled",
-    "released",
-]
+# A withdrawal that waits for an operator's review stays ``held``: the review is risk's row,
+# not a state of the withdrawal.
+WithdrawalStatus = Literal["held", "submitting", "submitted", "completed", "failed", "canceled"]
 
 
 @dataclass(frozen=True, slots=True)

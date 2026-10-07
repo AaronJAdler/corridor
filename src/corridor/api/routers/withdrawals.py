@@ -18,7 +18,7 @@ from corridor import agents, payments
 from corridor.api.deps import Db, SettingsDep, require
 from corridor.api.idempotency import IdempotencyKey, StoredResponse, run_idempotent, to_response
 from corridor.api.middleware import route_template
-from corridor.api.ratelimit import money_rate_limit
+from corridor.api.ratelimit import money_rate_limit, money_recall_rate_limit
 from corridor.api.routers.approvals import AwaitingApprovalResponse, awaiting_approval
 from corridor.api.schemas import Text
 from corridor.identity import Principal, Scope
@@ -30,9 +30,9 @@ from corridor.platform.pagination import DEFAULT_LIMIT, Page
 log = get_logger(__name__)
 
 # Every route here is limited by who is acting, as well as by where the request came from.
-router = APIRouter(
-    prefix="/v1/withdrawals", tags=["withdrawals"], dependencies=[Depends(money_rate_limit)]
-)
+# The limit is named on each route because canceling has one of its own.
+router = APIRouter(prefix="/v1/withdrawals", tags=["withdrawals"])
+_LIMITED = [Depends(money_rate_limit)]
 
 WithdrawalCreator = Annotated[Principal, Depends(require(Scope.WITHDRAWALS_CREATE))]
 WithdrawalReader = Annotated[Principal, Depends(require(Scope.WITHDRAWALS_READ))]
@@ -100,6 +100,7 @@ class WithdrawalPageResponse(BaseModel):
     status_code=202,
     response_model=WithdrawalResponse,
     summary="Withdraw to a saved bank account or to an address",
+    dependencies=_LIMITED,
     responses={
         202: {
             "model": WithdrawalResponse | AwaitingApprovalResponse,
@@ -165,7 +166,7 @@ async def request_withdrawal(
     return to_response(stored, replayed, request)
 
 
-@router.get("", summary="The withdrawals requested, newest first")
+@router.get("", summary="The withdrawals requested, newest first", dependencies=_LIMITED)
 async def list_withdrawals(
     principal: WithdrawalReader,
     db: Db,
@@ -182,7 +183,7 @@ async def list_withdrawals(
     )
 
 
-@router.get("/{withdrawal_id}", summary="One withdrawal")
+@router.get("/{withdrawal_id}", summary="One withdrawal", dependencies=_LIMITED)
 async def get_withdrawal(
     withdrawal_id: uuid.UUID, principal: WithdrawalReader, db: Db
 ) -> WithdrawalResponse:
@@ -192,7 +193,12 @@ async def get_withdrawal(
     return WithdrawalResponse.of(withdrawal)
 
 
-@router.post("/{withdrawal_id}/cancel", summary="Call back a withdrawal that has not been sent")
+@router.post(
+    "/{withdrawal_id}/cancel",
+    summary="Call back a withdrawal that has not been sent",
+    # Not the limit of the routes above: that one refuses a write while Redis is down.
+    dependencies=[Depends(money_recall_rate_limit)],
+)
 async def cancel_withdrawal(
     withdrawal_id: uuid.UUID, principal: WithdrawalCreator, db: Db
 ) -> WithdrawalResponse:

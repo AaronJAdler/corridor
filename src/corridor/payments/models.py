@@ -1,8 +1,9 @@
 """The payments tables. Private to this module: nothing outside ``corridor.payments`` imports them.
 
 The authoritative definitions, with grants, are ``migrations/versions/0008_payments.py``
-(transfers), ``0011_money_flows.py`` (everything else) and ``0018_review_c.py`` (who asked
-for a withdrawal). A test compares them with these.
+(transfers), ``0011_money_flows.py`` (everything else), ``0018_review_c.py`` (who asked
+for a withdrawal) and ``0019_operators.py`` (the states a withdrawal is ever in, and the
+index the list of deposits in suspense is read by). A test compares them with these.
 """
 
 import uuid
@@ -72,6 +73,7 @@ class DepositRow(Base):
             "status IN ('pending', 'completed', 'suspense', 'failed', 'returned')", name="status"
         ),
         Index("ix_deposits_user_id_id", "user_id", "id"),
+        Index("ix_deposits_status_id", "status", "id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
@@ -118,8 +120,7 @@ class WithdrawalRow(Base):
         CheckConstraint("provider_fee >= 0", name="provider_fee"),
         CheckConstraint("kind IN ('bank', 'chain')", name="kind"),
         CheckConstraint(
-            "status IN ('held', 'under_review', 'submitting', 'submitted', 'completed',"
-            " 'failed', 'canceled', 'released')",
+            "status IN ('held', 'submitting', 'submitted', 'completed', 'failed', 'canceled')",
             name="status",
         ),
         CheckConstraint(

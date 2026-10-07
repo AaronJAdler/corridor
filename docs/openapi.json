@@ -84,6 +84,18 @@
             ],
             "title": "Decided At"
           },
+          "deposit_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deposit Id"
+          },
           "entry_id": {
             "anyOf": [
               {
@@ -99,6 +111,15 @@
           "id": {
             "format": "uuid",
             "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "manual",
+              "suspense_release",
+              "suspense_return"
+            ],
+            "title": "Kind",
             "type": "string"
           },
           "legs": {
@@ -125,11 +146,26 @@
             ],
             "title": "Status",
             "type": "string"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "User Id"
           }
         },
         "required": [
           "id",
           "status",
+          "kind",
+          "deposit_id",
+          "user_id",
           "reason",
           "legs",
           "requested_by",
@@ -350,6 +386,148 @@
           "created_at"
         ],
         "title": "ApprovalResponse",
+        "type": "object"
+      },
+      "AuditEventPageResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AuditEventResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "AuditEventPageResponse",
+        "type": "object"
+      },
+      "AuditEventResponse": {
+        "properties": {
+          "action": {
+            "title": "Action",
+            "type": "string"
+          },
+          "actor_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actor Id"
+          },
+          "actor_type": {
+            "enum": [
+              "user",
+              "agent",
+              "admin",
+              "system",
+              "provider"
+            ],
+            "title": "Actor Type",
+            "type": "string"
+          },
+          "details": {
+            "additionalProperties": true,
+            "title": "Details",
+            "type": "object"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "outcome": {
+            "enum": [
+              "success",
+              "denied",
+              "failed"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "principal_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Principal Id"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          },
+          "resource_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resource Id"
+          },
+          "resource_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resource Type"
+          }
+        },
+        "required": [
+          "id",
+          "occurred_at",
+          "actor_type",
+          "actor_id",
+          "principal_id",
+          "action",
+          "resource_type",
+          "resource_id",
+          "outcome",
+          "request_id",
+          "details"
+        ],
+        "title": "AuditEventResponse",
         "type": "object"
       },
       "AwaitingApprovalResponse": {
@@ -1899,6 +2077,22 @@
         "title": "QuoteResponse",
         "type": "object"
       },
+      "ReasonRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "ReasonRequest",
+        "type": "object"
+      },
       "ReceivedResponse": {
         "properties": {
           "received": {
@@ -2176,6 +2370,24 @@
         "title": "ReviewResponse",
         "type": "object"
       },
+      "RoleRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "role": {
+            "enum": [
+              "user",
+              "admin"
+            ],
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "title": "RoleRequest",
+        "type": "object"
+      },
       "RunPageResponse": {
         "properties": {
           "items": {
@@ -2261,17 +2473,88 @@
         "title": "RunResponse",
         "type": "object"
       },
-      "SuspenseReleaseRequest": {
-        "additionalProperties": false,
+      "SuspenseDepositPageResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SuspenseDepositResponse"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "title": "SuspenseDepositPageResponse",
+        "type": "object"
+      },
+      "SuspenseDepositResponse": {
         "properties": {
           "amount": {
-            "maxLength": 320,
             "title": "Amount",
             "type": "string"
           },
           "asset": {
-            "maxLength": 320,
             "title": "Asset",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          },
+          "review_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review Id"
+          }
+        },
+        "required": [
+          "id",
+          "provider",
+          "asset",
+          "amount",
+          "received_at",
+          "review_id"
+        ],
+        "title": "SuspenseDepositResponse",
+        "type": "object"
+      },
+      "SuspenseReleaseRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "deposit_id": {
+            "format": "uuid",
+            "title": "Deposit Id",
             "type": "string"
           },
           "reason": {
@@ -2287,8 +2570,7 @@
         },
         "required": [
           "reason",
-          "asset",
-          "amount",
+          "deposit_id",
           "user_id"
         ],
         "title": "SuspenseReleaseRequest",
@@ -2297,14 +2579,9 @@
       "SuspenseReturnRequest": {
         "additionalProperties": false,
         "properties": {
-          "amount": {
-            "maxLength": 320,
-            "title": "Amount",
-            "type": "string"
-          },
-          "asset": {
-            "maxLength": 320,
-            "title": "Asset",
+          "deposit_id": {
+            "format": "uuid",
+            "title": "Deposit Id",
             "type": "string"
           },
           "reason": {
@@ -2315,8 +2592,7 @@
         },
         "required": [
           "reason",
-          "asset",
-          "amount"
+          "deposit_id"
         ],
         "title": "SuspenseReturnRequest",
         "type": "object"
@@ -2753,13 +3029,11 @@
           "status": {
             "enum": [
               "held",
-              "under_review",
               "submitting",
               "submitted",
               "completed",
               "failed",
-              "canceled",
-              "released"
+              "canceled"
             ],
             "title": "Status",
             "type": "string"
@@ -3097,7 +3371,7 @@
             "HTTPBearer": []
           }
         ],
-        "summary": "Ask for money in suspense to be credited to a user",
+        "summary": "Ask for a deposit in suspense to be credited to a user",
         "tags": [
           "admin"
         ]
@@ -3161,7 +3435,7 @@
             "HTTPBearer": []
           }
         ],
-        "summary": "Ask for money in suspense to be booked as sent back",
+        "summary": "Ask for a deposit in suspense to be booked as sent back",
         "tags": [
           "admin"
         ]
@@ -3338,6 +3612,230 @@
           }
         ],
         "summary": "Turn a pending adjustment down",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/audit": {
+      "get": {
+        "operationId": "list_audit_events_v1_admin_audit_get",
+        "parameters": [
+          {
+            "description": "The id of whoever acted.",
+            "in": "query",
+            "name": "actor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The id of whoever acted.",
+              "title": "Actor"
+            }
+          },
+          {
+            "description": "What the action begins with: `user.` or `adjustment.approved`.",
+            "in": "query",
+            "name": "action",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "pattern": "^[a-z][a-z0-9_.]*$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What the action begins with: `user.` or `adjustment.approved`.",
+              "title": "Action"
+            }
+          },
+          {
+            "description": "The id of what was acted on, or of the user it was done for.",
+            "in": "query",
+            "name": "subject",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The id of what was acted on, or of the user it was done for.",
+              "title": "Subject"
+            }
+          },
+          {
+            "description": "The first moment included, with its offset.",
+            "in": "query",
+            "name": "since",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The first moment included, with its offset.",
+              "title": "Since"
+            }
+          },
+          {
+            "description": "The first moment not included.",
+            "in": "query",
+            "name": "until",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The first moment not included.",
+              "title": "Until"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditEventPageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "The audit log, newest first",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/deposits/suspense": {
+      "get": {
+        "operationId": "list_suspense_deposits_v1_admin_deposits_suspense_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuspenseDepositPageResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Deposits in suspense, newest first",
         "tags": [
           "admin"
         ]
@@ -4031,7 +4529,55 @@
             "HTTPBearer": []
           }
         ],
-        "summary": "Set the limits of a tier, a user or an agent",
+        "summary": "Set the limits of a tier or a user",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/users/{user_id}/close": {
+      "post": {
+        "operationId": "close_v1_admin_users__user_id__close_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Close a user's account, for good",
         "tags": [
           "admin"
         ]
@@ -4090,6 +4636,180 @@
           }
         ],
         "summary": "Set a user's KYC tier",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/users/{user_id}/lift-restriction": {
+      "post": {
+        "operationId": "lift_restriction_v1_admin_users__user_id__lift_restriction_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReasonRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Let a restricted user move money again",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/users/{user_id}/restrict": {
+      "post": {
+        "operationId": "restrict_v1_admin_users__user_id__restrict_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReasonRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Stop a user moving money out",
+        "tags": [
+          "admin"
+        ]
+      }
+    },
+    "/v1/admin/users/{user_id}/role": {
+      "post": {
+        "operationId": "set_role_v1_admin_users__user_id__role_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "user_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "User Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RoleRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Make a user an administrator, or stop them being one",
         "tags": [
           "admin"
         ]

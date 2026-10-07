@@ -20,8 +20,9 @@ work.
 
 - The transaction first takes an advisory lock on the actor and the key, so a concurrent
   duplicate waits and then replays.
-- The key row is inserted with a fingerprint of the request: the method, the concrete path
-  and the canonical JSON body.
+- The key row is inserted with a fingerprint of the request: the method, the route
+  template, the canonical JSON body and, for a route with parameters, the path that was
+  asked for, so that a key used on one resource is refused on another.
 - The work runs inside a savepoint. If it raises a domain refusal, the savepoint undoes the
   work and the refusal is stored as the response.
 - The response is written onto the key row, and everything commits together.

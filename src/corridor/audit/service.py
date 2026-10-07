@@ -7,9 +7,10 @@ here commits, so an event exists if and only if the work it describes was commit
 import re
 import uuid
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any, Final, cast
 
-from sqlalchemy import RowMapping, Table, insert, select
+from sqlalchemy import RowMapping, Table, insert, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from corridor.audit.models import AuditEventRow
@@ -91,10 +92,20 @@ async def list_events(
     resource_type: str | None = None,
     resource_id: str | uuid.UUID | None = None,
     action: str | None = None,
+    action_prefix: str | None = None,
+    actor_id: str | None = None,
+    subject: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
     before: uuid.UUID | None = None,
     limit: int = 50,
 ) -> list[AuditEvent]:
     """Events that match every filter given, newest first, starting below ``before``.
+
+    ``action_prefix`` matches the actions that begin with it, read as it is written and
+    not as a pattern. ``subject`` is an id, and matches the events about it either way an
+    event can be: as the resource acted on, or as the user it was done for. ``since`` is
+    the first moment included and ``until`` the first that is not.
 
     Ids are UUIDv7, so id order is time order, and the id of the last event on one page is
     the cursor for the next. A page holds at most ``MAX_PAGE_SIZE`` events, however many
@@ -114,10 +125,31 @@ async def list_events(
         query = query.where(_events.c.resource_id == str(resource_id))
     if action is not None:
         query = query.where(_events.c.action == action)
+    if action_prefix is not None:
+        query = query.where(_events.c.action.startswith(action_prefix, autoescape=True))
+    if actor_id is not None:
+        query = query.where(_events.c.actor_id == actor_id)
+    if subject is not None:
+        about = _events.c.resource_id == subject
+        user_id = _as_uuid(subject)
+        query = query.where(
+            about if user_id is None else or_(about, _events.c.principal_id == user_id)
+        )
+    if since is not None:
+        query = query.where(_events.c.occurred_at >= since)
+    if until is not None:
+        query = query.where(_events.c.occurred_at < until)
     if before is not None:
         query = query.where(_events.c.id < before)
     rows = await session.execute(query)
     return [_event(row) for row in rows.mappings()]
+
+
+def _as_uuid(text: str) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(text)
+    except ValueError:
+        return None
 
 
 def _event(row: RowMapping) -> AuditEvent:

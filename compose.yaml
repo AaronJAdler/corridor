@@ -122,6 +122,12 @@ services:
       <<: *corridor-environment
       CORRIDOR_JWT_SIGNING_KEY_FILE: /run/corridor/keys/${JWT_SIGNING_KEY_FILE:?set JWT_SIGNING_KEY_FILE in .env}
     volumes:
+      # The container runs as user id 10001, and a bind mount keeps the permission bits
+      # the file has on this machine. A key generated with the default mode is readable
+      # by its owner alone, which on a Linux host is not that user: generate the key for
+      # this stack with `--mode 644` (.env.example says how). A Compose `secrets:` entry
+      # would not help: outside a swarm it is the same bind mount, and its `uid`, `gid`
+      # and `mode` are not applied to a secret that is read from a file.
       - ./.local/keys:/run/corridor/keys:ro
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000"

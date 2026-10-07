@@ -19,7 +19,7 @@ from pydantic import (
     StringConstraints,
 )
 
-from corridor import identity
+from corridor import identity, ops
 
 # Far above any real value. These bound the work an anonymous request can ask for; what a
 # password or a token may be is decided by the code that checks it.
@@ -49,6 +49,15 @@ Text = Annotated[str, _NO_CONTROL_CHARACTERS]
 DisplayName = Annotated[
     str,
     StringConstraints(strip_whitespace=True, min_length=1, max_length=100),
+    _NO_CONTROL_CHARACTERS,
+]
+
+
+# Why an operator did something, for whoever reads the audit log later. Blank space is not
+# a reason.
+Reason = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=ops.MAX_REASON_LENGTH),
     _NO_CONTROL_CHARACTERS,
 ]
 

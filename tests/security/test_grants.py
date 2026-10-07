@@ -38,7 +38,18 @@ UPDATABLE: dict[str, set[str]] = {
     "deposits": {"status", "user_id", "entry_id", "updated_at"},
     "fx_quotes": {"status"},
     "webhook_events": {"processed_at", "outcome", "payload", "redacted_at"},
+    "users": {
+        "role",
+        "kyc_tier",
+        "status",
+        "restricted_reason",
+        "tokens_valid_after",
+        "updated_at",
+    },
 }
+
+# Not a password hash: a value of the column's type that protects nothing.
+PLACEHOLDER_HASH = "not-a-hash"  # pragma: allowlist secret
 
 # One row of each table, as plain SQL, and for each a column the application has no
 # reason to change and one it changes in the ordinary course of things.
@@ -67,6 +78,12 @@ ROWS: dict[str, tuple[str, dict[str, Any]]] = {
         " VALUES (:id, 'simbank', 'evt_1', 'deposit.received', CAST('{}' AS jsonb), :now)",
         {},
     ),
+    "users": (
+        "INSERT INTO users (id, email, handle, display_name, password_hash, role, kyc_tier,"
+        " status, created_at, updated_at) VALUES (:id, 'maria@example.com', 'maria', 'Maria',"
+        " :hash, 'user', 0, 'active', :now, :now)",
+        {"hash": PLACEHOLDER_HASH},
+    ),
 }
 
 FORBIDDEN = [
@@ -87,6 +104,12 @@ FORBIDDEN = [
     ("webhook_events", "UPDATE webhook_events SET type = 'payout.completed'"),
     ("webhook_events", "UPDATE webhook_events SET event_id = 'evt_2'"),
     ("webhook_events", "UPDATE webhook_events SET provider = 'simcustody'"),
+    ("users", "UPDATE users SET password_hash = :hash"),
+    ("users", "UPDATE users SET email = 'someone@example.com'"),
+    ("users", "UPDATE users SET handle = 'someone'"),
+    ("users", "UPDATE users SET display_name = 'Someone'"),
+    ("users", "UPDATE users SET created_at = :far"),
+    ("users", "UPDATE users SET id = :other"),
 ]
 
 ALLOWED = [
@@ -97,9 +120,18 @@ ALLOWED = [
         "webhook_events",
         "UPDATE webhook_events SET processed_at = :far, outcome = 'processed', redacted_at = :far",
     ),
+    (
+        "users",
+        "UPDATE users SET role = 'admin', kyc_tier = 2, status = 'restricted',"
+        " restricted_reason = 'under review', tokens_valid_after = :far, updated_at = :far",
+    ),
 ]
 
-PARAMETERS = {"other": uuid.UUID(int=7), "far": datetime(2026, 2, 1, tzinfo=UTC)}
+PARAMETERS = {
+    "other": uuid.UUID(int=7),
+    "far": datetime(2026, 2, 1, tzinfo=UTC),
+    "hash": PLACEHOLDER_HASH,
+}
 
 
 async def a_row(db: Database, table: str) -> None:

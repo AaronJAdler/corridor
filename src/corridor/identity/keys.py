@@ -100,9 +100,18 @@ def generate_private_key_pem() -> str:
     return _private_pem(ec.generate_private_key(ec.SECP256R1()))
 
 
-def write_keypair(directory: Path) -> tuple[str, Path]:
+# Readable by the owner alone.
+PRIVATE_KEY_MODE: Final = 0o600
+
+
+def write_keypair(directory: Path, *, mode: int = PRIVATE_KEY_MODE) -> tuple[str, Path]:
     """Generate a signing key and write it to ``directory`` as ``<kid>.pem``, with its
-    public half beside it as ``<kid>.pub.pem``. Returns the key id and the private path."""
+    public half beside it as ``<kid>.pub.pem``. Returns the key id and the private path.
+
+    ``mode`` is the private key's permission bits. Anything wider than the default is for
+    a key that a process running as another user has to read, such as a container that
+    is given the file through a bind mount.
+    """
     key = ec.generate_private_key(ec.SECP256R1())
     kid = key_id(key.public_key())
     directory.mkdir(parents=True, exist_ok=True)
@@ -111,7 +120,11 @@ def write_keypair(directory: Path) -> tuple[str, Path]:
     # Created with its final mode, readable by the owner alone where the platform has such
     # a thing, rather than created open and narrowed afterwards. An existing file is never
     # overwritten.
-    descriptor = os.open(private_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    descriptor = os.open(private_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    # The mode given at creation is narrowed by the process's umask. Set again, so that
+    # the file has the mode that was asked for and not one that depends on the shell.
+    if hasattr(os, "fchmod"):
+        os.fchmod(descriptor, mode)
     with os.fdopen(descriptor, "w", encoding="ascii", newline="\n") as handle:
         handle.write(_private_pem(key))
     (directory / f"{kid}.pub.pem").write_text(

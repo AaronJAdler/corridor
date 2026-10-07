@@ -240,7 +240,9 @@ async def test_the_application_role_holds_exactly_the_privileges_it_needs(db: Da
         granted = {row.table_name: row.privileges for row in rows}
 
     assert granted == {
-        "users": "INSERT,SELECT,UPDATE",
+        # No UPDATE on the table as a whole: the columns it may change are named one by
+        # one, and tests/security/test_grants.py says which.
+        "users": "INSERT,SELECT",
         # DELETE stays, so that expired tokens can be pruned.
         "refresh_tokens": "DELETE,INSERT,SELECT,UPDATE",
         # And here, so that a count is dropped when its owner logs in or it has gone stale.

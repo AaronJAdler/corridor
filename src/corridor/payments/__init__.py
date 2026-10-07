@@ -13,6 +13,7 @@ from corridor.payments.deposits import (
     get_deposit,
     get_suspense_deposit,
     list_deposits,
+    list_suspense_deposits,
     release_from_suspense,
 )
 from corridor.payments.errors import (
@@ -153,6 +154,7 @@ __all__ = [
     "get_withdrawal",
     "list_beneficiaries",
     "list_deposits",
+    "list_suspense_deposits",
     "list_transfers",
     "list_withdrawals",
     "reject_held_withdrawal",

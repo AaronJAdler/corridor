@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Literal
 
 from corridor.ledger import Direction
+from corridor.payments import Deposit
 
 AdjustmentStatus = Literal["pending", "approved", "rejected"]
 # ``manual`` is postings typed by an admin. The other two take one deposit out of suspense:
@@ -47,3 +48,13 @@ class Adjustment:
     entry_id: uuid.UUID | None
     created_at: datetime
     decided_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class SuspenseDeposit:
+    """A deposit that is in suspense, as an operator looks for it."""
+
+    deposit: Deposit
+    # The review screening opened on it, whatever became of that review. None for a
+    # deposit that is in suspense because it arrived at nobody's account.
+    review_id: uuid.UUID | None

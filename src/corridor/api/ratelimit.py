@@ -142,11 +142,26 @@ async def money_rate_limit(
     uncounted could be repeated without limit, and a write here moves money or calls a
     provider.
     """
+    await _count_money_request(request, principal, writing=request.method not in _READ_METHODS)
+
+
+async def money_recall_rate_limit(
+    request: Request, principal: Annotated[Principal, Depends(get_principal)]
+) -> None:
+    """The limit on calling a withdrawal back: counted with the reads, though it writes.
+
+    A user must be able to stop a payout while Redis is down, so this is served uncounted
+    then, as a read is. Nothing is risked by that: a cancellation sends no money and calls
+    no provider, and repeating it finds the withdrawal canceled and is refused.
+    """
+    await _count_money_request(request, principal, writing=False)
+
+
+async def _count_money_request(request: Request, principal: Principal, *, writing: bool) -> None:
     container = get_container(request)
     settings = container.settings
     if not settings.rate_limit_enabled:
         return
-    writing = request.method not in _READ_METHODS
     decision = await _limiter_for(container.redis).check(
         _MONEY_WRITE_GROUP if writing else _MONEY_READ_GROUP,
         f"{principal.actor_type}:{principal.actor_id}",

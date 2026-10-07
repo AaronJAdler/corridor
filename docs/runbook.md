@@ -47,14 +47,33 @@ Invoke-RestMethod -Headers $admin -Uri "$api/v1/admin/outbox/dead"
 The token lives 15 minutes. Log in again when a call answers `401`.
 
 **The first administrator.** The role endpoint needs an administrator, so the first one is
-made with SQL, connected as the owner role. After that, use
-`POST /v1/admin/users/{user_id}/role`.
+made from a shell, by someone who holds the owner connection
+(`CORRIDOR_DATABASE_OWNER_URL`, the one migrations use). The user registers through the
+API first. Then:
 
-```sql
-UPDATE users SET role = 'admin', updated_at = now() WHERE email = 'operator@example.com';
+```powershell
+uv run corridor users make-admin --email operator@example.com --yes
 ```
 
-The user must log in again afterwards: a token that carries the old role is refused.
+Without `--yes` the command says what it would do, changes nothing and exits with code 1.
+It finds the account by its email address only, refuses a closed one, and does nothing to
+a user who is an administrator already. The change is written to the audit log as
+`user.role_changed`, with the actor `system` / `cli.users.make_admin`. The user must log
+in again afterwards: a token that carries the old role is refused. After that, use
+`POST /v1/admin/users/{user_id}/role`. In the compose stack, where only the migration
+service is given the owner connection:
+
+```powershell
+docker compose run --rm migrate corridor users make-admin --email operator@example.com --yes
+```
+
+**The audit log.** `GET /v1/admin/audit` reads it, newest first, filtered by `actor`,
+`action` (what the action begins with), `subject` (the id of what was acted on, or of the
+user it was done for), `since` and `until`. Each read is itself one audit event.
+
+```powershell
+(Invoke-RestMethod -Headers $admin -Uri "$api/v1/admin/audit?subject=<id>").items | Format-List occurred_at, actor_type, actor_id, action, outcome, request_id, details
+```
 
 **SQL.** Read-only queries in this document can be run as any role that can read the
 tables. In the local compose stack:
@@ -94,6 +113,7 @@ what the simulated providers hold. See [provider-api.md](provider-api.md#simulat
 | `corridor_outbox_oldest_pending_seconds` | Above a threshold such as 60 | [Outbox backlog](#outbox-backlog) |
 | `corridor_outbox_dead` | Above 0 | [Dead letters](#dead-letters) |
 | `corridor_recon_open_breaks` | Above 0 | [Reconciliation breaks](#reconciliation-breaks) |
+| `corridor_recon_break_changes_total` | Increasing | An open break whose difference keeps changing. Same section |
 | `corridor_redis_unavailable_total` | Increasing | [Redis is unavailable](#redis-is-unavailable) |
 | `corridor_provider_calls_total` | A rising share with an outcome other than `ok` | [Provider errors](#provider-errors) |
 | `corridor_scheduled_job_runs_total{outcome="error"}` | Increasing | Read `job_runs.last_error` for the job (below) |
@@ -132,7 +152,7 @@ someone changed data outside the application. Treat it as serious until explaine
 | `broken_balance_chain` | account id | A posting whose `balance_after` is not what the postings before it give |
 | `stale_balance_pointer` | account id | A balance row that does not point at the account's latest posting |
 | `missing_balance_row`, `unexpected_balance_row`, `stray_balance_after` | account id | A cached balance where there should be none, or none where there should be one |
-| A negative suspense balance | the suspense account | More was taken out of suspense than was put in |
+| `negative_suspense` | account id | More was taken out of a suspense account than was put in |
 
 2. Find what the subject is.
 
@@ -153,18 +173,17 @@ SELECT p.seq, p.entry_id, e.kind, p.direction, p.amount, p.balance_after, e.post
 
 3. `source_type` and `source_id` on the entry name the business object (a transfer, a
    withdrawal, a deposit by provider and provider id, a conversion, an adjustment). Read
-   its audit trail:
+   its audit trail, with the id of the transfer, withdrawal, deposit, conversion or
+   adjustment as the subject:
 
-```sql
-SELECT occurred_at, actor_type, actor_id, action, outcome, request_id, details
-  FROM audit_events
- WHERE resource_type = '<type>' AND resource_id = '<id>' ORDER BY occurred_at;
+```powershell
+(Invoke-RestMethod -Headers $admin -Uri "$api/v1/admin/audit?subject=<id>").items | Format-List occurred_at, actor_type, actor_id, action, outcome, request_id, details
 ```
 
 **What to do.**
 
 - If the finding involves a user's balance, consider stopping that user from moving money
-  while you investigate. There is no endpoint that restricts a user on request; see
+  while you investigate: `POST /v1/admin/users/{user_id}/restrict` with a reason. See
   [A restricted user](#a-restricted-user).
 - A wrong amount in the books is corrected with an adjustment
   (`POST /v1/admin/adjustments`), requested by one administrator and approved by another.
@@ -172,8 +191,10 @@ SELECT occurred_at, actor_type, actor_id, action, outcome, request_id, details
   adjustment, because an adjustment adds postings. There is no tool that rebuilds a cached
   balance. It needs a change to `account_balances` made as the owner role, with a second
   person watching, after the cause is understood. Report the cause as a defect.
-- A negative suspense balance means suspense money was paid out twice. Find the entries
-  that debited suspense and compare them with the deposits:
+- `negative_suspense` means suspense money was paid out twice. Every way out of suspense
+  checks the deposit's status under a lock and an adjustment written by hand cannot debit
+  suspense, so this should not happen through the application. Find the entries that
+  debited suspense and compare them with the deposits:
 
 ```sql
 SELECT e.id, e.kind, e.source_type, e.source_id, e.posted_at, p.direction, p.amount
@@ -275,6 +296,8 @@ open breaks.
 balance). A run with status `incomplete` could not read a provider for everything it
 asked; the log line `recon.provider_failed` says which. An open break is refreshed by
 every later run that still sees it, so `expected` and `actual` are current.
+`corridor_recon_break_changes_total` counts, by kind, each time a run found the difference
+of an open break changed: a break that keeps moving is one whose cause is still at work.
 
 **Each kind.**
 
@@ -309,10 +332,17 @@ Invoke-RestMethod -Method Post -Headers $admin -Uri "$api/v1/admin/recon/breaks/
 
 A break you resolve while the disagreement still exists is opened again by the next run.
 
-**After an outage.** The reconciliation window normally covers the last hour. If the last
+**After an outage.** A run is made every `CORRIDOR_RECONCILIATION_INTERVAL_SECONDS` (5
+minutes) over the last `CORRIDOR_RECONCILIATION_WINDOW_SECONDS` (an hour). If the last
 completed run ended longer ago than that, the next run starts where that run ended, up to 7
 days back, so a worker that was down for a few hours still reconciles the gap. A gap
 longer than 7 days needs the statements compared by hand.
+
+**A deposit that is not repaired at once.** A deposit on a statement that the provider
+received less than `CORRIDOR_RECONCILIATION_GRACE_SECONDS` ago (2 minutes) is left for its
+webhook, and is repaired by a later run if the webhook never comes. A deposit that the
+statement shows as received and then returned, and that Corridor never booked, is not
+credited: it is recorded as `returned` with nothing posted, and its break is closed.
 
 ## Redis is unavailable
 
@@ -323,7 +353,7 @@ cannot be counted against its rate limit is refused.
 
 | Still works | Does not work |
 |---|---|
-| Logins, registration, reading wallets, deposits, transfers and withdrawals | `POST` on transfers, withdrawals (including cancel), beneficiaries, FX quotes and conversions, and approving an agent's request |
+| Logins, registration, reading wallets, deposits, transfers and withdrawals. Canceling a withdrawal that is still `held` | `POST` on transfers, withdrawals, beneficiaries, FX quotes and conversions, and approving an agent's request |
 | Webhook intake and everything the worker does: payouts in flight still settle, deposits are still credited | Immediate effect of a logout. A logged-out session's access token works until it expires, at most 15 minutes |
 | Deposit instructions | The shared FX rate cache. Each quote would ask the rate source |
 
@@ -366,13 +396,13 @@ SELECT id, user_id, asset_code, amount, fee, kind, status, provider, provider_re
        failure_reason, created_at, updated_at, submitted_at
   FROM withdrawals WHERE id = '<withdrawal id>';
 
-SELECT occurred_at, actor_type, actor_id, action, details
-  FROM audit_events
- WHERE resource_type = 'withdrawal' AND resource_id = '<withdrawal id>' ORDER BY occurred_at;
-
 -- every withdrawal in flight, oldest first
 SELECT id, status, provider, provider_ref, updated_at
   FROM withdrawals WHERE status IN ('held', 'submitting', 'submitted') ORDER BY id;
+```
+
+```powershell
+(Invoke-RestMethod -Headers $admin -Uri "$api/v1/admin/audit?subject=<withdrawal id>").items | Format-List occurred_at, actor_type, actor_id, action, details
 ```
 
 **`held` for more than a few seconds.**
@@ -383,7 +413,9 @@ SELECT id, status, provider, provider_ref, updated_at
 - Its event is dead with "no bank rail is configured" or "no custodian is configured": the
   worker has no provider settings. Fix them, restart the worker, requeue the dead letter.
 
-A `held` withdrawal has not been sent. Its user can cancel it.
+A `held` withdrawal has not been sent. Its user can cancel it, also while Redis is down.
+An agent can cancel only a withdrawal it asked for itself (`403 withdrawal_not_agents`
+otherwise).
 
 **`submitting`.** The worker marked it and has not recorded the provider's answer. The
 provider may or may not have the payout.
@@ -441,7 +473,7 @@ according to your compliance procedure, which is outside this system.
 
 | Decision | Withdrawal | Deposit |
 |---|---|---|
-| `POST /v1/admin/reviews/{id}/clear` | Sent to the provider | Credited to the user on the review. Refused if the review has no user (`409 review_has_no_user`) or the user's account is closed |
+| `POST /v1/admin/reviews/{id}/clear` | Sent to the provider | Credited to the user on the review. Refused if the review has no user (`409 review_has_no_user`) or the user's account is closed (`409 deposit_owner_closed`) |
 | `POST /v1/admin/reviews/{id}/reject` | Funds returned to the user; the withdrawal ends as `failed` with `review_rejected` | Stays in suspense. Send it back as described under [Funds in suspense](#funds-in-suspense) |
 
 A review can outlive its subject. If the user cancels a held withdrawal before the review
@@ -456,19 +488,24 @@ the review to take it off the queue; rejecting a deposit's review moves nothing.
 credited: a deposit to an account or address Corridor did not issue, or a deposit held for
 review. No user sees them.
 
-**Diagnose.** There is no endpoint that lists suspense deposits.
+**Diagnose.** List them, newest first. Each has its id, provider, asset, amount, when it
+was received and, if screening opened a review on it, the review's id.
 
-```sql
-SELECT d.id, d.provider, d.provider_ref, d.asset_code, d.amount, d.created_at,
-       r.id AS review_id, r.user_id AS review_user, r.status AS review_status
-  FROM deposits d
-  LEFT JOIN risk_reviews r ON r.subject_type = 'deposit' AND r.subject_id = d.id
- WHERE d.status = 'suspense' ORDER BY d.id;
+```powershell
+(Invoke-RestMethod -Headers $admin -Uri "$api/v1/admin/deposits/suspense").items
 ```
 
-The sender's name and reference are in the stored webhook for 30 days:
+A deposit with a `review_id` is, or was, in [the review queue](#the-review-queue): the
+open reviews there say which user it arrived for. One without arrived at an account or
+address Corridor never issued. What has happened to a deposit so far is in the audit log
+under its id (`GET /v1/admin/audit?subject=<deposit id>`).
+
+The list does not show the provider's id for the deposit or who sent it. Those are read
+with SQL; the sender's name and reference are in the stored webhook for 30 days:
 
 ```sql
+SELECT provider, provider_ref FROM deposits WHERE id = '<deposit id>';
+
 SELECT received_at, payload -> 'data' AS data
   FROM webhook_events
  WHERE type IN ('deposit.received', 'deposit.confirmed')
@@ -480,13 +517,24 @@ SELECT received_at, payload -> 'data' AS data
 | Situation | Action |
 |---|---|
 | It has an open review with a user, and it should be credited | Clear the review |
-| It belongs to a user (no review, or a review with no user) | `POST /v1/admin/adjustments/suspense-release` with the deposit's id, the asset, the amount and the user. A second administrator approves it. Reject the deposit's open review afterwards, if it has one |
-| It should go back to the sender | `POST /v1/admin/adjustments/suspense-return` with the deposit's id. A second administrator approves it. Then have the provider send the money back |
+| It belongs to a user (no review, or a review with no user) | `POST /v1/admin/adjustments/suspense-release` with a reason, the deposit's id (`deposit_id`) and the user (`user_id`). The asset and the amount are the deposit's own and are not sent. A second administrator approves it. Reject the deposit's open review afterwards, if it has one |
+| It should go back to the sender | `POST /v1/admin/adjustments/suspense-return` with a reason and the deposit's id. A second administrator approves it. Then have the provider send the money back |
 
-When a suspense adjustment is approved, Corridor locks the deposit and checks that it is
-still in suspense. If it was released, returned or taken back by the bank in the meantime,
-the approval is refused and nothing is posted. Reject the adjustment and look at the
-deposit again.
+```powershell
+$key = @{ "Idempotency-Key" = [guid]::NewGuid().ToString() }
+$body = @{ reason = "Sender confirmed the payee"; deposit_id = "<deposit id>"; user_id = "<user id>" } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Headers ($admin + $key) -Uri "$api/v1/admin/adjustments/suspense-release" -ContentType "application/json" -Body $body
+```
+
+An adjustment written by hand (`POST /v1/admin/adjustments`) cannot be used for this: one
+with a leg that debits a suspense account is refused with `422 invalid_adjustment`.
+
+A suspense adjustment is refused when it is asked for if the deposit is not in suspense
+(`409 deposit_not_in_suspense`) or, for a release, if the user's account is closed
+(`409 deposit_owner_closed`). When it is approved, Corridor locks the deposit and checks
+both again. If the deposit was released, returned or taken back by the bank in the
+meantime, the approval is refused with the same codes, nothing is posted and the
+adjustment stays `pending`. Reject the adjustment and look at the deposit again.
 
 After a suspense return is approved, reconciliation reports a `settlement_balance` break
 for that provider and asset until the provider's statement shows the money leaving. That
@@ -497,11 +545,22 @@ suspense itself and nothing needs doing.
 
 ## A restricted user
 
-**What it means.** A bank took back a deposit after the user had spent some of it. The
-shortfall is recorded in the user's `user_receivable` account and the user's status is
-`restricted`: they can receive money and cannot transfer, convert or withdraw.
+**What it means.** The user's status is `restricted`: they can log in, read and receive
+money, and cannot transfer, convert or withdraw. There are two ways a user gets there.
+Corridor restricts a user itself when a bank takes back a deposit after the user had spent
+some of it; the shortfall is then recorded in the user's `user_receivable` account. And an
+administrator restricts a user on purpose, with a reason.
 
-**Diagnose.**
+**Diagnose.** Who restricted the user, when and why is in the audit log: `user.restricted`
+for an administrator's restriction, `deposit.returned` with a `shortfall` for Corridor's
+own.
+
+```powershell
+(Invoke-RestMethod -Headers $admin -Uri "$api/v1/admin/audit?subject=<user id>&action=user.").items
+(Invoke-RestMethod -Headers $admin -Uri "$api/v1/admin/audit?subject=<user id>&action=deposit.returned").items
+```
+
+The reason on the account, and what is owed:
 
 ```sql
 SELECT id, email, status, restricted_reason FROM users WHERE id = '<user id>';
@@ -516,16 +575,21 @@ has enough to cover what is owed, settle it with an adjustment that debits the u
 `user_available` account and credits their `user_receivable` account for the amount owed.
 Find the two account ids in `ledger_accounts` by `owner_id`, `asset_code` and `kind`.
 
-**What the code does not support.** There is no endpoint that lifts a restriction and none
-that restricts a user on request. The functions exist (`identity.lift_restriction`,
-`risk.restrict_user`) and nothing calls them from the API. Until an endpoint exists,
-lifting a restriction is a change to `users.status` made as the owner role, outside the
-audit log. Record it.
+**Restrict and lift.** Both need a reason of 1 to 500 characters, and both are audited
+with it. Restricting waits for a movement of the user's that is under way and stops every
+one after it; restricting a user who is restricted already replaces the reason.
 
-```sql
-UPDATE users SET status = 'active', restricted_reason = NULL, updated_at = now()
- WHERE id = '<user id>' AND status = 'restricted';
+```powershell
+$body = @{ reason = "Chargeback under investigation" } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Headers $admin -Uri "$api/v1/admin/users/<user id>/restrict" -ContentType "application/json" -Body $body
+
+$body = @{ reason = "Shortfall settled by adjustment <adjustment id>" } | ConvertTo-Json
+Invoke-RestMethod -Method Post -Headers $admin -Uri "$api/v1/admin/users/<user id>/lift-restriction" -ContentType "application/json" -Body $body
 ```
+
+Lifting does not look at what the user owes: settle a shortfall first. An administrator
+cannot restrict their own account or lift their own restriction (`409 own_account`), and a
+closed account is refused (`409 conflict`). Neither endpoint ends the user's sessions.
 
 ## Rotating secrets and keys
 
@@ -555,6 +619,11 @@ there is nothing to keep in step.
    ```powershell
    uv run corridor keys generate --out .local/keys
    ```
+
+   The private key is written readable by its owner alone (mode 600). `--mode 644` writes
+   one that other users of the machine can read, which is what the local compose stack
+   needs on a Linux host, where the API container runs as user id 10001 and reads the key
+   through a bind mount. Do not use it for a key that protects anything.
 
 2. With more than one API instance, add the **new** public key to
    `CORRIDOR_JWT_ADDITIONAL_PUBLIC_KEYS` on every instance and restart them, before any

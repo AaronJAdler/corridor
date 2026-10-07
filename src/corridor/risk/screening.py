@@ -9,6 +9,7 @@ on the list is ``clear``.
 import re
 import unicodedata
 import uuid
+from collections.abc import Collection
 from typing import Any, Final, Literal, cast
 
 from sqlalchemy import RowMapping, Select, Table, select, update
@@ -172,6 +173,21 @@ async def find_review(
     found = await session.execute(_of(subject_type, subject_id))
     row = found.mappings().one_or_none()
     return _review(row) if row is not None else None
+
+
+async def find_reviews(
+    session: AsyncSession, subject_type: SubjectType, subject_ids: Collection[uuid.UUID]
+) -> dict[uuid.UUID, Review]:
+    """The reviews of these subjects, open or resolved, by subject. One that was never
+    put under review is simply absent."""
+    if not subject_ids:
+        return {}
+    found = await session.execute(
+        select(_reviews).where(
+            _reviews.c.subject_type == subject_type, _reviews.c.subject_id.in_(list(subject_ids))
+        )
+    )
+    return {row["subject_id"]: _review(row) for row in found.mappings()}
 
 
 async def get_review(session: AsyncSession, review_id: uuid.UUID) -> Review:

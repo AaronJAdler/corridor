@@ -1,4 +1,5 @@
-"""Admin endpoints for operations: dead letters, and adjustments with dual approval.
+"""Admin endpoints for operations: dead letters, the deposits in suspense, and adjustments
+with dual approval.
 
 Every route here needs an administrator, and the service checks again. An adjustment is
 asked for and decided under an idempotency key, in the transaction that records the key,
@@ -100,6 +101,57 @@ async def requeue_dead_letter(
     event = await db.run(lambda session: ops.requeue_dead_letter(session, principal, event_id))
     log.info("outbox.dead_requeued", event_id=str(event_id), topic=event.topic)
     return DeadLetterResponse.of(event)
+
+
+# --- deposits in suspense --------------------------------------------------------------------
+
+
+class SuspenseDepositResponse(BaseModel):
+    id: uuid.UUID
+    provider: str
+    asset: str
+    # A decimal string in major units, with exactly the asset's decimal places.
+    amount: str
+    # When Corridor recorded it.
+    received_at: datetime
+    # The review screening opened on it, open or decided. Null for a deposit that is in
+    # suspense because it arrived at nobody's account.
+    review_id: uuid.UUID | None
+
+    @classmethod
+    def of(cls, found: ops.SuspenseDeposit) -> Self:
+        deposit = found.deposit
+        return cls(
+            id=deposit.id,
+            provider=deposit.provider,
+            asset=deposit.asset,
+            amount=format_amount(deposit.amount, deposit.asset),
+            received_at=deposit.created_at,
+            review_id=found.review_id,
+        )
+
+
+class SuspenseDepositPageResponse(BaseModel):
+    items: list[SuspenseDepositResponse]
+    # Send it back as ``cursor`` for the next page. Null on the last page.
+    next_cursor: str | None
+
+
+@router.get("/deposits/suspense", summary="Deposits in suspense, newest first")
+async def list_suspense_deposits(
+    principal: AdminPrincipal,
+    db: Db,
+    cursor: str | None = None,
+    limit: int = DEFAULT_LIMIT,
+) -> SuspenseDepositPageResponse:
+    async def work(session: AsyncSession) -> Page[ops.SuspenseDeposit]:
+        return await ops.list_suspense_deposits(session, principal, cursor=cursor, limit=limit)
+
+    page = await db.run(work)
+    return SuspenseDepositPageResponse(
+        items=[SuspenseDepositResponse.of(found) for found in page.items],
+        next_cursor=page.next_cursor,
+    )
 
 
 # --- adjustments -----------------------------------------------------------------------------

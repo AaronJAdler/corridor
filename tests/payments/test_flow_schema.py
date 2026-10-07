@@ -218,13 +218,11 @@ async def test_a_row_that_could_not_be_a_deposit_is_refused(
     "status",
     [
         "held",
-        "under_review",
         "submitting",
         "submitted",
         "completed",
         "failed",
         "canceled",
-        "released",
     ],
 )
 async def test_a_withdrawal_can_be_recorded_in_each_state_of_its_saga(
@@ -245,6 +243,9 @@ async def test_a_withdrawal_can_be_recorded_in_each_state_of_its_saga(
         ({"provider_fee": -1}, "ck_withdrawals_provider_fee"),
         ({"kind": "card"}, "ck_withdrawals_kind"),
         ({"status": "pending"}, "ck_withdrawals_status"),
+        # Allowed once, and never written: a withdrawal under review stays held.
+        ({"status": "under_review"}, "ck_withdrawals_status"),
+        ({"status": "released"}, "ck_withdrawals_status"),
         ({"beneficiary_id": None}, "ck_withdrawals_target"),
         ({"to_address": EXTERNAL_ADDRESS}, "ck_withdrawals_target"),
         ({"kind": "chain"}, "ck_withdrawals_target"),
@@ -307,6 +308,7 @@ async def test_the_lists_and_the_sweeper_have_their_indexes(db: Database) -> Non
             "uq_deposits_provider_provider_ref",
             "uq_deposits_entry_id",
             "ix_deposits_user_id_id",
+            "ix_deposits_status_id",
             "pk_beneficiaries",
             "uq_beneficiaries_provider_provider_ref",
             "ix_beneficiaries_user_id_id",

@@ -123,8 +123,8 @@ _CRASHING_TOPICS: Final = {
     webhooks.RECEIVED_TOPIC: "webhook",
 }
 
-TERMINAL: Final = frozenset({"completed", "failed", "canceled", "released"})
-IN_FLIGHT: Final = frozenset({"held", "under_review", "submitting", "submitted"})
+TERMINAL: Final = frozenset({"completed", "failed", "canceled"})
+IN_FLIGHT: Final = frozenset({"held", "submitting", "submitted"})
 
 
 class Crash(Exception):

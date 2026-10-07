@@ -31,8 +31,8 @@ between any two steps.
 | A transactional outbox, a dispatcher and scheduled jobs | `src/corridor/outbox`, `src/corridor/worker` |
 | Reconciliation against provider statements, with automatic repair of lost webhooks | `src/corridor/recon` |
 | Agents: scoped API keys, spend policies, approval requests | `src/corridor/agents` |
-| Operations: dead letters, review decisions, manual adjustments that need two administrators | `src/corridor/ops` |
-| An append-only audit log | `src/corridor/audit` |
+| Operations: dead letters, review decisions, deposits in suspense, restricting and closing accounts, manual adjustments that need two administrators | `src/corridor/ops` |
+| An append-only audit log, which administrators read through the API | `src/corridor/audit` |
 | Simulated bank rail, custodian and rate source, with failure injection | `src/corridor_sim` |
 | Terraform for AWS (ECS Fargate, RDS, ElastiCache) | `infra` |
 
@@ -108,8 +108,14 @@ validator could not, and see the notes after the steps.
    and the image build ignore.
 
    ```powershell
-   uv run corridor keys generate --out .local/keys
+   uv run corridor keys generate --out .local/keys --mode 644
    ```
+
+   `--mode 644` makes the private key readable by other users of this machine. The API
+   container runs as user id 10001 and reads the key through a bind mount, which keeps the
+   file's permission bits: on a Linux host a key written with the default mode (600, its
+   owner alone) could not be read by it. This key is for the local stack only. On Windows
+   the option changes nothing and is harmless.
 
    The command prints two lines. The first names the private key file, for example
    `CORRIDOR_JWT_SIGNING_KEY_FILE=.local/keys/uY40i3DWKUwoK5fQJ2EQM3wah5YAkQQ4wGuDhqYpHss.pem`.
@@ -140,6 +146,14 @@ validator could not, and see the notes after the steps.
    The API is now at `http://127.0.0.1:8000`, reachable from this machine only. Its
    interactive documentation is at `http://127.0.0.1:8000/docs`.
 
+   The admin endpoints need an administrator, and the first one is made from a shell.
+   Register a user through the API, then give that user the role with the one service
+   that holds the owner connection:
+
+   ```powershell
+   docker compose run --rm migrate corridor users make-admin --email you@example.com --yes
+   ```
+
 5. Run the demo. It narrates a deposit, a conversion, a transfer and a withdrawal, then
    verifies the ledger.
 
@@ -162,9 +176,10 @@ Where a first run is most likely to fail, and what to look at:
   you changed the database passwords after the first start, run
   `docker compose down --volumes` and start again.
 - **The API reading the signing key.** `docker compose logs api`. The key directory is
-  mounted read-only and the container runs as user id 10001. On Docker Desktop for Windows
-  the file is readable. On a Linux host the private key is created readable by its owner
-  only, so give user id 10001 read access to it first.
+  mounted read-only and the container runs as user id 10001. A key generated without
+  `--mode 644` is readable by its owner only, which on a Linux host is not that user:
+  generate another as in step 2 and put its name in `.env`. The directories above the key
+  must also be ones other users can enter, which is what a usual umask gives.
 - **Health checks.** `docker compose ps` shows which service is not healthy.
 
 ## Quick start without Docker
@@ -279,13 +294,14 @@ Unix-only feature.
 | `uv run poe audit` | Check the installed dependencies for known vulnerabilities |
 | `uv run poe lint-docs` | Check the documentation: links, diagrams, `docs/openapi.json` against the code |
 | `uv run poe lint-docker` | Lint the Dockerfile (Linux and macOS) |
-| `uv run poe lint-compose` | Validate `compose.yaml` with the placeholder settings (needs Docker) |
+| `uv run poe lint-compose` | Validate `compose.yaml` with the placeholder settings (needs the Docker command line with the Compose plugin; no daemon) |
 | `uv run poe lint-ci` | Lint the GitHub workflows |
 | `uv run poe lint-infra` | Check the Terraform (needs Terraform) |
 | `uv run corridor serve` | Run the API. Needs `CORRIDOR_DATABASE_URL`, `CORRIDOR_REDIS_URL` and a signing key |
 | `uv run corridor worker` | Run the worker |
 | `uv run corridor db migrate` | Apply migrations. Needs `CORRIDOR_DATABASE_OWNER_URL` |
-| `uv run corridor keys generate --out DIRECTORY` | Generate a signing key pair |
+| `uv run corridor keys generate --out DIRECTORY` | Generate a signing key pair. `--mode 644` writes a private key that another user, such as a container's, can read |
+| `uv run corridor users make-admin --email ADDRESS --yes` | Make a registered user an administrator. Needs `CORRIDOR_DATABASE_OWNER_URL`. Without `--yes` it changes nothing |
 | `uv run corridor verify-ledger` | Recompute the ledger's invariants. Exits 1 on any finding |
 | `uv run corridor demo` | Run the demo against a stack that is already running |
 
@@ -315,7 +331,8 @@ sockets.
 src/corridor/        the application: one directory per module, plus cli.py and demo.py
 src/corridor_sim/    the provider simulators, a separate application
 migrations/          hand-written Alembic revisions
-tests/               one directory per module, plus chaos, security, assembly, e2e, harness
+tests/               one directory per module, plus chaos, security, assembly, e2e, harness,
+                     simulators and the shared support code
 scripts/             smoke.py, e2e.py, lint_docs.py
 docs/                architecture, API guide, runbook, provider contract, decision records
 infra/               Terraform for AWS

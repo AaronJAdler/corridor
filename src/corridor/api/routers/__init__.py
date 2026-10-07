@@ -3,6 +3,7 @@
 from fastapi import APIRouter
 
 from corridor.api.routers import (
+    admin_audit,
     admin_kyc,
     admin_ops,
     admin_recon,
@@ -43,4 +44,5 @@ ROUTERS: tuple[APIRouter, ...] = (
     admin_reviews.router,
     admin_risk.router,
     admin_users.router,
+    admin_audit.router,
 )

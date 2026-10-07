@@ -1,7 +1,8 @@
 """Identity tables. Private to this module: nothing outside ``corridor.identity`` imports them.
 
 The authoritative definition, with grants, is ``migrations/versions/0003_identity.py``, as
-``0017_hardening.py`` changed it. A test compares them with these.
+``0017_hardening.py`` changed it; ``0019_operators.py`` names the columns of a user the
+application role may update. A test compares them with these.
 """
 
 import uuid

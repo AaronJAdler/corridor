@@ -1,10 +1,11 @@
 """Accounts: what an administrator does to a user's standing. A role is given or taken
-away, and an account is closed for good.
+away, an account is restricted and the restriction lifted, and an account is closed for
+good.
 
 Each function takes the caller's session and runs inside the caller's transaction. Each
-needs an administrator and says so in the audit log. Neither can be done to oneself: the
-last administrator cannot be demoted or closed by a slip of their own hand, and a change
-of office always has a second person in it.
+needs an administrator and says so in the audit log. None can be done to oneself: the
+last administrator cannot be demoted, restricted or closed by a slip of their own hand,
+and a change of standing always has a second person in it.
 """
 
 import uuid
@@ -76,3 +77,48 @@ async def close_user(session: AsyncSession, principal: Principal, user_id: uuid.
         details={"old_status": before.status},
     )
     return closed
+
+
+async def restrict_user(
+    session: AsyncSession, principal: Principal, user_id: uuid.UUID, reason: str
+) -> User:
+    """Restrict a user: nothing of theirs moves out until the restriction is lifted.
+
+    Done through risk, which takes the user's money-out lock first, so that the
+    restriction waits for a movement that is under way and every one after it sees it.
+    Restricting a restricted user replaces the reason. A closed account is refused.
+    """
+    identity.require_admin(principal)
+    if user_id == principal.user_id:
+        raise OwnAccount
+    restricted = await risk.restrict_user(session, user_id, reason)
+    await _record_standing(session, principal, "user.restricted", restricted, reason)
+    return restricted
+
+
+async def lift_restriction(
+    session: AsyncSession, principal: Principal, user_id: uuid.UUID, reason: str
+) -> User:
+    """Make a restricted user active again. The reason is kept in the audit log: the
+    account itself says only that it is active. A closed account is refused."""
+    identity.require_admin(principal)
+    if user_id == principal.user_id:
+        # A restricted administrator is not the one to decide the restriction is over.
+        raise OwnAccount
+    lifted = await identity.lift_restriction(session, user_id)
+    await _record_standing(session, principal, "user.restriction_lifted", lifted, reason)
+    return lifted
+
+
+async def _record_standing(
+    session: AsyncSession, principal: Principal, action: str, user: User, reason: str
+) -> None:
+    await audit.record(
+        session,
+        actor=audit.Actor.admin(principal.user_id),
+        action=action,
+        principal_id=user.id,
+        resource_type="user",
+        resource_id=user.id,
+        details={"reason": reason},
+    )

@@ -150,7 +150,7 @@ WWW-Authenticate: Bearer
 {
   "code": "unauthenticated",
   "detail": "This endpoint needs a bearer credential.",
-  "request_id": "01a11666-5b4a-7378-9196-ccbfd4c342dc",
+  "request_id": "01a116dc-b0ea-70cf-a4ec-bbf0404590ea",
   "status": 401,
   "title": "Authentication required",
   "type": "https://corridor.example/problems/unauthenticated"
@@ -170,7 +170,7 @@ HTTP 403
 {
   "code": "insufficient_scope",
   "detail": "This credential does not have the withdrawals:read scope.",
-  "request_id": "01a11666-b342-7230-8a80-a49aea663502",
+  "request_id": "01a116dd-03b6-7242-9751-9860bd195b55",
   "status": 403,
   "title": "Insufficient scope",
   "type": "https://corridor.example/problems/insufficient-scope"
@@ -190,7 +190,7 @@ HTTP 403
 {
   "code": "insufficient_scope",
   "detail": "This action needs the account owner's own session.",
-  "request_id": "01a11666-b34a-7221-ab0e-782c6a2c3602",
+  "request_id": "01a116dd-03be-72f7-8cde-6bf19b3ab316",
   "status": 403,
   "title": "Insufficient scope",
   "type": "https://corridor.example/problems/insufficient-scope"
@@ -201,7 +201,7 @@ A resource that belongs to another user is answered exactly like one that does n
 so an id cannot be probed:
 
 ```http
-GET /v1/deposits/01a11666-67fd-74d2-a9ca-ae7288c0687a
+GET /v1/deposits/01a116dc-bdd0-712c-a9ac-9aed171618db
 Authorization: Bearer <access token>
 ```
 
@@ -211,7 +211,7 @@ HTTP 404
 {
   "code": "deposit_not_found",
   "detail": "There is no such deposit.",
-  "request_id": "01a11666-6857-751f-b481-3248b0f8c50a",
+  "request_id": "01a116dc-be11-7219-b076-7cfad4702d7e",
   "status": 404,
   "title": "Deposit not found",
   "type": "https://corridor.example/problems/deposit-not-found"
@@ -238,12 +238,12 @@ A refusal by a business rule:
 ```http
 POST /v1/transfers
 Authorization: Bearer <access token>
-Idempotency-Key: docs-62e578c6-fd32-4929-81a6-a7f39827e6ec
+Idempotency-Key: docs-373636c7-b935-4e5e-ab80-b75bf661f57d
 
 {
   "amount": "900.00",
   "asset": "USD",
-  "recipient": "01a11666-5390-7735-ac92-2e5f3ca67233"
+  "recipient": "01a116dc-a089-7087-b906-78afceb61920"
 }
 ```
 
@@ -253,7 +253,7 @@ HTTP 402
 {
   "code": "insufficient_funds",
   "detail": "Available balance is 350.00 USD; 900.00 USD is required.",
-  "request_id": "01a11666-80a4-7228-9ce7-a31b7d847617",
+  "request_id": "01a116dc-d120-712f-b815-719e35e56de2",
   "status": 402,
   "title": "Insufficient funds",
   "type": "https://corridor.example/problems/insufficient-funds"
@@ -292,7 +292,7 @@ HTTP 422
       "type": "string_too_short"
     }
   ],
-  "request_id": "01a11666-5c22-7584-8273-77dc4c41fab7",
+  "request_id": "01a116dc-b18e-777c-b5b2-ca7af85e0a50",
   "status": 422,
   "title": "Invalid request",
   "type": "https://corridor.example/problems/invalid-request"
@@ -308,7 +308,7 @@ HTTP 422
   "code": "limit_exceeded",
   "detail": "This is more than the limit of 1000.00 USD for one movement.",
   "limit": "per_transaction",
-  "request_id": "01a11666-80b7-773c-ac46-49aa50bf254d",
+  "request_id": "01a116dc-d136-726e-952f-e8e35ec275ff",
   "scope": "account",
   "status": 422,
   "title": "Limit exceeded",
@@ -323,7 +323,7 @@ HTTP 404
 
 {
   "code": "not_found",
-  "request_id": "01a11666-c104-74e5-a773-691a1c7a8dc6",
+  "request_id": "01a116dd-0c4c-717f-9995-70468dad06b5",
   "status": 404,
   "title": "Not Found",
   "type": "https://corridor.example/problems/not-found"
@@ -335,7 +335,7 @@ HTTP 405
 
 {
   "code": "method_not_allowed",
-  "request_id": "01a11666-c106-761c-ba23-ee9e202502f2",
+  "request_id": "01a116dd-0c4e-73ca-861f-cdf64c2cd9b1",
   "status": 405,
   "title": "Method Not Allowed",
   "type": "https://corridor.example/problems/method-not-allowed"
@@ -352,11 +352,13 @@ layer assigns to framework errors.
 
 | Code | Status | Title | Raised by |
 |---|---|---|---|
+| `account_holds_funds` | 409 | Account holds funds | ops |
 | `adjustment_not_found` | 404 | Adjustment not found | ops |
 | `adjustment_not_pending` | 409 | Adjustment is not pending | ops |
 | `agent_key_limit_reached` | 409 | Agent key limit reached | agents |
 | `agent_key_not_found` | 404 | Agent key not found | agents |
 | `agent_keys_unavailable` | 503 | Agent keys unavailable | agents |
+| `agent_limit_not_settable` | 409 | Agent limits are set by the owner | api |
 | `agent_limit_reached` | 409 | Agent limit reached | agents |
 | `agent_not_active` | 409 | Agent not active | agents |
 | `agent_not_found` | 404 | Agent not found | agents |
@@ -376,6 +378,7 @@ layer assigns to framework errors.
 | `dead_letter_not_found` | 404 | Dead letter not found | ops |
 | `deposit_not_found` | 404 | Deposit not found | payments |
 | `deposit_not_in_suspense` | 409 | Deposit is not in suspense | payments |
+| `deposit_owner_closed` | 409 | Account is closed | payments |
 | `email_taken` | 409 | Email already registered | identity |
 | `handle_taken` | 409 | Handle already taken | identity |
 | `http_error` | varies | Any other HTTP status the framework raises | api |
@@ -405,9 +408,11 @@ layer assigns to framework errors.
 | `malformed_event` | 422 | Malformed event | webhooks |
 | `method_not_allowed` | 405 | (the HTTP status phrase) | api |
 | `not_found` | 404 | Not found | api, platform, webhooks |
+| `own_account` | 409 | Not on your own account | ops |
 | `party_not_allowed` | 403 | Not allowed | risk |
 | `payload_too_large` | 413 | Payload too large | api, webhooks |
 | `permission_denied` | 403 | Permission denied | api, platform |
+| `policy_not_set` | 403 | Agent has no policy | agents |
 | `provider_unavailable` | 503 | Provider unavailable | payments |
 | `quote_already_used` | 409 | Quote already used | fx |
 | `quote_expired` | 409 | Quote expired | fx |
@@ -437,6 +442,7 @@ layer assigns to framework errors.
 | `user_restricted` | 403 | Account restricted | payments, risk |
 | `wallet_not_found` | 404 | Wallet not found | wallets |
 | `weak_password` | 422 | Weak password | identity |
+| `withdrawal_not_agents` | 403 | Withdrawal is not this agent's | payments |
 | `withdrawal_not_cancelable` | 409 | Withdrawal cannot be canceled | payments |
 | `withdrawal_not_found` | 404 | Withdrawal not found | payments |
 
@@ -462,16 +468,20 @@ with the same key gets the first one's answer.
 `/v1/admin/adjustments`. Other state-changing endpoints (cancel a withdrawal, approve or
 reject an approval request, decide a review, requeue a dead letter, resolve a break) do not
 take a key. Each of them changes a row from one state to another exactly once, and a
-repeat finds the row already changed and is refused.
+repeat finds the row already changed and is refused. The endpoints that change a user's
+standing (role, restriction, closing, KYC tier) take no key either: repeating one leaves
+the user as the first request left them.
 
 **The rules.**
 
 - A key is 1 to 255 visible ASCII characters with no spaces. A UUID is a good key.
 - A key belongs to the actor that sent it: a user, or one agent. Two actors can use the
   same key without affecting each other.
-- The key is bound to a fingerprint of the request: a SHA-256 over the method, the path
-  (including the ids in it) and the JSON body in canonical form. Whitespace and key order
-  in the body do not matter.
+- The key is bound to a fingerprint of the request: a SHA-256 over the method, the route
+  template (`/v1/admin/adjustments/{adjustment_id}/approve`), the JSON body in canonical
+  form and, when the route has parameters, the path that was asked for. Whitespace and
+  key order in the body do not matter. A key that was used for one adjustment is therefore
+  refused for another, although both requests have the same template and an empty body.
 - The key row and the effect of the request are written in one database transaction.
   There is no moment at which one exists without the other.
 - The stored answer is the status code and body of the first completed attempt. That
@@ -498,10 +508,10 @@ conversion was made:
 ```http
 POST /v1/fx/conversions
 Authorization: Bearer <access token>
-Idempotency-Key: docs-ebfcc673-b77a-4446-bab2-a463d894bf6b
+Idempotency-Key: docs-453534ac-9feb-4091-a0e8-41d58aede001
 
 {
-  "quote_id": "01a11666-8014-74a0-92d2-884ee0b6abce"
+  "quote_id": "01a116dc-d096-766e-aadb-b8847e17e173"
 }
 ```
 
@@ -511,9 +521,9 @@ HTTP 201
 {
   "buy_amount": "1714.48",
   "buy_asset": "MXN",
-  "created_at": "2026-10-07T12:46:18.661512Z",
-  "id": "01a11666-8023-73c6-9132-11ca8a50c939",
-  "quote_id": "01a11666-8014-74a0-92d2-884ee0b6abce",
+  "created_at": "2026-10-07T14:55:32.521941Z",
+  "id": "01a116dc-d0a7-71e5-8dfd-60f34777716d",
+  "quote_id": "01a116dc-d096-766e-aadb-b8847e17e173",
   "rate": "17.144877835",
   "sell_amount": "100.00",
   "sell_asset": "USD"
@@ -523,10 +533,10 @@ HTTP 201
 ```http
 POST /v1/fx/conversions
 Authorization: Bearer <access token>
-Idempotency-Key: docs-ebfcc673-b77a-4446-bab2-a463d894bf6b
+Idempotency-Key: docs-453534ac-9feb-4091-a0e8-41d58aede001
 
 {
-  "quote_id": "01a11666-8014-74a0-92d2-884ee0b6abce"
+  "quote_id": "01a116dc-d096-766e-aadb-b8847e17e173"
 }
 ```
 
@@ -537,9 +547,9 @@ Idempotent-Replayed: true
 {
   "buy_amount": "1714.48",
   "buy_asset": "MXN",
-  "created_at": "2026-10-07T12:46:18.661512Z",
-  "id": "01a11666-8023-73c6-9132-11ca8a50c939",
-  "quote_id": "01a11666-8014-74a0-92d2-884ee0b6abce",
+  "created_at": "2026-10-07T14:55:32.521941Z",
+  "id": "01a116dc-d0a7-71e5-8dfd-60f34777716d",
+  "quote_id": "01a116dc-d096-766e-aadb-b8847e17e173",
   "rate": "17.144877835",
   "sell_amount": "100.00",
   "sell_asset": "USD"
@@ -551,10 +561,10 @@ The same key with a different body:
 ```http
 POST /v1/fx/conversions
 Authorization: Bearer <access token>
-Idempotency-Key: docs-ebfcc673-b77a-4446-bab2-a463d894bf6b
+Idempotency-Key: docs-453534ac-9feb-4091-a0e8-41d58aede001
 
 {
-  "quote_id": "ad400fe2-446f-4968-95cb-4eb0f692bcf9"
+  "quote_id": "623fbda2-2b42-4c45-be7d-80ad95b1edc4"
 }
 ```
 
@@ -564,7 +574,7 @@ HTTP 422
 {
   "code": "idempotency_key_reused",
   "detail": "This idempotency key was already used for a different request.",
-  "request_id": "01a11666-8058-73e2-bf3c-bcdf84ec4376",
+  "request_id": "01a116dc-d0de-7036-b5b1-1f1b9159e406",
   "status": 422,
   "title": "Idempotency key reused",
   "type": "https://corridor.example/problems/idempotency-key-reused"
@@ -578,7 +588,7 @@ POST /v1/fx/conversions
 Authorization: Bearer <access token>
 
 {
-  "quote_id": "01a11666-8014-74a0-92d2-884ee0b6abce"
+  "quote_id": "01a116dc-d096-766e-aadb-b8847e17e173"
 }
 ```
 
@@ -588,7 +598,7 @@ HTTP 400
 {
   "code": "idempotency_key_required",
   "detail": "This request needs an Idempotency-Key header.",
-  "request_id": "01a11666-8066-762a-9ce5-4a82bdfa8166",
+  "request_id": "01a116dc-d0e5-7399-8737-0af24de14d2a",
   "status": 400,
   "title": "Idempotency key required",
   "type": "https://corridor.example/problems/idempotency-key-required"
@@ -628,18 +638,18 @@ HTTP 200
       "asset": "USD",
       "balance_after": "350.00",
       "direction": "debit",
-      "id": "01a11666-8097-701d-91a1-f164851a07d6",
+      "id": "01a116dc-d111-7672-8052-3f9c6a9eada5",
       "kind": "transfer",
-      "posted_at": "2026-10-07T12:46:18.775323Z"
+      "posted_at": "2026-10-07T14:55:32.625295Z"
     },
     {
       "amount": "100.00",
       "asset": "USD",
       "balance_after": "400.00",
       "direction": "debit",
-      "id": "01a11666-8037-71b5-a1a3-0c3a7fe34cca",
+      "id": "01a116dc-d0c0-72ce-9bea-7d17cfb58790",
       "kind": "conversion",
-      "posted_at": "2026-10-07T12:46:18.679394Z"
+      "posted_at": "2026-10-07T14:55:32.544738Z"
     }
   ],
   "next_cursor": "eyJrIjoid2FsbGV0…"
@@ -661,9 +671,9 @@ HTTP 200
       "asset": "USD",
       "balance_after": "500.00",
       "direction": "credit",
-      "id": "01a11666-6809-72c5-8c06-9a7402a093f2",
+      "id": "01a116dc-bdd7-7298-9518-ca4685b5da3c",
       "kind": "deposit",
-      "posted_at": "2026-10-07T12:46:12.489466Z"
+      "posted_at": "2026-10-07T14:55:27.703605Z"
     }
   ],
   "next_cursor": null
@@ -678,7 +688,7 @@ HTTP 422
 {
   "code": "invalid_cursor",
   "detail": "The cursor is not valid for this list. Start again without one.",
-  "request_id": "01a11666-80f9-7073-8ee3-b469864bfca2",
+  "request_id": "01a116dc-d18a-7387-8a6c-af6c5d1ad999",
   "status": 422,
   "title": "Invalid cursor",
   "type": "https://corridor.example/problems/invalid-cursor"
@@ -696,8 +706,8 @@ a `Retry-After` header in seconds.
 | `global` | Client address | 600 per minute | Every request except `/healthz`, `/readyz` and `/metrics` |
 | `auth` | Client address | 10 per minute | Every endpoint under `/v1/auth` |
 | `webhooks` | Client address | 600 per minute | `POST /v1/webhooks/{provider}` |
-| `money_write` | Actor (the user, or one agent) | 120 per minute | `POST` on `/v1/transfers`, `/v1/withdrawals`, `/v1/beneficiaries`, `/v1/fx` and `POST /v1/approvals/{approval_id}/approve` |
-| `money_read` | Actor | 600 per minute | `GET` on `/v1/transfers`, `/v1/withdrawals`, `/v1/beneficiaries`, `/v1/fx` and `/v1/deposit-instructions` |
+| `money_write` | Actor (the user, or one agent) | 120 per minute | `POST /v1/transfers`, `POST /v1/withdrawals`, `POST /v1/beneficiaries`, `POST /v1/fx/quotes`, `POST /v1/fx/conversions` and `POST /v1/approvals/{approval_id}/approve` |
+| `money_read` | Actor | 600 per minute | `GET` on `/v1/transfers`, `/v1/withdrawals`, `/v1/beneficiaries`, `/v1/fx/conversions/{conversion_id}` and `/v1/deposit-instructions`, and `POST /v1/withdrawals/{withdrawal_id}/cancel` |
 
 A client address is an IPv4 address or an IPv6 /64 network. The address comes from the
 connection, or from `X-Forwarded-For` when the request arrived through a proxy listed in
@@ -721,7 +731,7 @@ Retry-After: 1
 
 {
   "code": "rate_limited",
-  "request_id": "01a11666-e2e2-7376-be5b-c16e8bc2027a",
+  "request_id": "01a116dd-23ad-75f7-82e7-e6b946f6f04e",
   "status": 429,
   "title": "Too many requests",
   "type": "https://corridor.example/problems/rate-limited"
@@ -731,7 +741,9 @@ Retry-After: 1
 **When Redis is unavailable.** The limits counted by client address fail open: the request
 is served and a metric counts the failure. The `money_read` limit also fails open. The
 `money_write` limit fails closed: a request that moves money is refused, because a request
-that cannot be counted could be repeated without limit. The refusal looks like this (this
+that cannot be counted could be repeated without limit. Canceling a withdrawal is counted
+under `money_read` for this reason: a user must be able to stop a payout while Redis is
+down, and a cancellation sends no money anywhere. The refusal looks like this (this
 example is written from the code, not recorded, because the shared Redis server could not
 be stopped):
 
@@ -814,7 +826,7 @@ HTTP 404
 
 {
   "code": "not_found",
-  "request_id": "01a11666-5106-73c8-be72-6e6e5827181e",
+  "request_id": "01a116dc-9eb3-7102-b724-6f3ac99f3ec7",
   "status": 404,
   "title": "Not Found",
   "type": "https://corridor.example/problems/not-found"
@@ -838,11 +850,11 @@ HTTP 200
     {
       "alg": "ES256",
       "crv": "P-256",
-      "kid": "uY40i3DWKUwoK5fQ…",
+      "kid": "3VA7cHwYHNgqi61L…",
       "kty": "EC",
       "use": "sig",
-      "x": "Ii034lGctYB3VrLq…",
-      "y": "Z-09M8G6sKT-TPXT…"
+      "x": "ikrESjRXreLHkmee…",
+      "y": "pID0AKBqOdeUiOBh…"
     }
   ]
 }
@@ -866,8 +878,8 @@ POST /v1/auth/register
 
 {
   "display_name": "Ana Lima",
-  "email": "ana_829dd0@example.com",
-  "handle": "ana_829dd0",
+  "email": "ana_6b21b0@example.com",
+  "handle": "ana_6b21b0",
   "password": "<password>"
 }
 ```
@@ -876,11 +888,11 @@ POST /v1/auth/register
 HTTP 201
 
 {
-  "created_at": "2026-10-07T12:46:06.777751Z",
+  "created_at": "2026-10-07T14:55:19.871069Z",
   "display_name": "Ana Lima",
-  "email": "ana_829dd0@example.com",
-  "handle": "ana_829dd0",
-  "id": "01a11666-51b9-767b-ad38-024269d5c766",
+  "email": "ana_6b21b0@example.com",
+  "handle": "ana_6b21b0",
+  "id": "01a116dc-9f3f-7471-9a2e-1f15b77928e5",
   "kyc_tier": 0,
   "role": "user",
   "status": "active"
@@ -899,8 +911,8 @@ POST /v1/auth/register
 
 {
   "display_name": "Someone Else",
-  "email": "someone_829dd0@example.com",
-  "handle": "ana_829dd0",
+  "email": "someone_6b21b0@example.com",
+  "handle": "ana_6b21b0",
   "password": "<password>"
 }
 ```
@@ -911,7 +923,7 @@ HTTP 409
 {
   "code": "handle_taken",
   "detail": "That handle is already taken.",
-  "request_id": "01a11666-5c2d-7232-8dfa-ac7cb7ec5cbd",
+  "request_id": "01a116dc-b192-726f-b749-e5fce6ec3745",
   "status": 409,
   "title": "Handle already taken",
   "type": "https://corridor.example/problems/handle-taken"
@@ -926,7 +938,7 @@ Exchanges an email address and a password for a token pair.
 POST /v1/auth/login
 
 {
-  "email": "ana_829dd0@example.com",
+  "email": "ana_6b21b0@example.com",
   "password": "<password>"
 }
 ```
@@ -949,7 +961,7 @@ account and a locked-out client cannot be told apart.
 POST /v1/auth/login
 
 {
-  "email": "ana_829dd0@example.com",
+  "email": "ana_6b21b0@example.com",
   "password": "<password>"
 }
 ```
@@ -961,7 +973,7 @@ WWW-Authenticate: Bearer
 {
   "code": "invalid_credentials",
   "detail": "The email address or the password is not correct.",
-  "request_id": "01a11666-5b4d-75ca-a2aa-394e49499192",
+  "request_id": "01a116dc-b0ed-7304-a49a-1b26415c1e3e",
   "status": 401,
   "title": "Invalid credentials",
   "type": "https://corridor.example/problems/invalid-credentials"
@@ -1024,7 +1036,7 @@ WWW-Authenticate: Bearer
 {
   "code": "invalid_token",
   "detail": "The refresh token is not valid.",
-  "request_id": "01a11666-5cff-772d-8a3f-61f90a3b05fe",
+  "request_id": "01a116dc-b23c-77f3-9b9a-4a7d4090ce4e",
   "status": 401,
   "title": "Invalid token",
   "type": "https://corridor.example/problems/invalid-token"
@@ -1058,7 +1070,7 @@ WWW-Authenticate: Bearer
 {
   "code": "invalid_token",
   "detail": "The access token is not valid.",
-  "request_id": "01a11666-5de0-75a5-9c8d-07dd0c2368bb",
+  "request_id": "01a116dc-b2f4-760d-aac3-eccc3480de93",
   "status": 401,
   "title": "Invalid token",
   "type": "https://corridor.example/problems/invalid-token"
@@ -1078,11 +1090,11 @@ Authorization: Bearer <access token>
 HTTP 200
 
 {
-  "created_at": "2026-10-07T12:46:06.777751Z",
+  "created_at": "2026-10-07T14:55:19.871069Z",
   "display_name": "Ana Lima",
-  "email": "ana_829dd0@example.com",
-  "handle": "ana_829dd0",
-  "id": "01a11666-51b9-767b-ad38-024269d5c766",
+  "email": "ana_6b21b0@example.com",
+  "handle": "ana_6b21b0",
+  "id": "01a116dc-9f3f-7471-9a2e-1f15b77928e5",
   "kyc_tier": 0,
   "role": "user",
   "status": "active"
@@ -1262,22 +1274,22 @@ HTTP 200
     {
       "amount": "120.000000",
       "asset": "USDC",
-      "created_at": "2026-10-07T12:46:12.729903Z",
-      "id": "01a11666-68f9-7592-bac7-8e3ca6345af9",
+      "created_at": "2026-10-07T14:55:27.958034Z",
+      "id": "01a116dc-bed6-709e-848e-a3ed0da3415c",
       "kind": "chain",
       "status": "pending",
       "tx_hash": "88d191ba7dada0cb…",
-      "updated_at": "2026-10-07T12:46:12.729903Z"
+      "updated_at": "2026-10-07T14:55:27.958034Z"
     },
     {
       "amount": "500.00",
       "asset": "USD",
-      "created_at": "2026-10-07T12:46:12.477574Z",
-      "id": "01a11666-67fd-74d2-a9ca-ae7288c0687a",
+      "created_at": "2026-10-07T14:55:27.696450Z",
+      "id": "01a116dc-bdd0-712c-a9ac-9aed171618db",
       "kind": "bank",
       "status": "completed",
       "tx_hash": null,
-      "updated_at": "2026-10-07T12:46:12.500238Z"
+      "updated_at": "2026-10-07T14:55:27.707101Z"
     }
   ],
   "next_cursor": null
@@ -1289,7 +1301,7 @@ HTTP 200
 Scope: `deposits:read`.
 
 ```http
-GET /v1/deposits/01a11666-67fd-74d2-a9ca-ae7288c0687a
+GET /v1/deposits/01a116dc-bdd0-712c-a9ac-9aed171618db
 Authorization: Bearer <access token>
 ```
 
@@ -1299,12 +1311,12 @@ HTTP 200
 {
   "amount": "500.00",
   "asset": "USD",
-  "created_at": "2026-10-07T12:46:12.477574Z",
-  "id": "01a11666-67fd-74d2-a9ca-ae7288c0687a",
+  "created_at": "2026-10-07T14:55:27.696450Z",
+  "id": "01a116dc-bdd0-712c-a9ac-9aed171618db",
   "kind": "bank",
   "status": "completed",
   "tx_hash": null,
-  "updated_at": "2026-10-07T12:46:12.500238Z"
+  "updated_at": "2026-10-07T14:55:27.707101Z"
 }
 ```
 
@@ -1347,8 +1359,8 @@ HTTP 201
 {
   "buy_amount": "1714.48",
   "buy_asset": "MXN",
-  "expires_at": "2026-10-07T12:46:48.644187Z",
-  "id": "01a11666-8014-74a0-92d2-884ee0b6abce",
+  "expires_at": "2026-10-07T14:56:02.502170Z",
+  "id": "01a116dc-d096-766e-aadb-b8847e17e173",
   "rate": "17.144877835",
   "sell_amount": "100.00",
   "sell_asset": "USD"
@@ -1363,10 +1375,10 @@ quote in one journal entry. Nothing is recalculated.
 ```http
 POST /v1/fx/conversions
 Authorization: Bearer <access token>
-Idempotency-Key: docs-ebfcc673-b77a-4446-bab2-a463d894bf6b
+Idempotency-Key: docs-453534ac-9feb-4091-a0e8-41d58aede001
 
 {
-  "quote_id": "01a11666-8014-74a0-92d2-884ee0b6abce"
+  "quote_id": "01a116dc-d096-766e-aadb-b8847e17e173"
 }
 ```
 
@@ -1376,9 +1388,9 @@ HTTP 201
 {
   "buy_amount": "1714.48",
   "buy_asset": "MXN",
-  "created_at": "2026-10-07T12:46:18.661512Z",
-  "id": "01a11666-8023-73c6-9132-11ca8a50c939",
-  "quote_id": "01a11666-8014-74a0-92d2-884ee0b6abce",
+  "created_at": "2026-10-07T14:55:32.521941Z",
+  "id": "01a116dc-d0a7-71e5-8dfd-60f34777716d",
+  "quote_id": "01a116dc-d096-766e-aadb-b8847e17e173",
   "rate": "17.144877835",
   "sell_amount": "100.00",
   "sell_asset": "USD"
@@ -1397,10 +1409,10 @@ HTTP 201
 ```http
 POST /v1/fx/conversions
 Authorization: Bearer <access token>
-Idempotency-Key: docs-879cf34c-48cb-4e8a-ad64-cfc9672334e9
+Idempotency-Key: docs-118c9fce-952b-4046-9146-6b313096f617
 
 {
-  "quote_id": "01a11666-8014-74a0-92d2-884ee0b6abce"
+  "quote_id": "01a116dc-d096-766e-aadb-b8847e17e173"
 }
 ```
 
@@ -1410,7 +1422,7 @@ HTTP 409
 {
   "code": "quote_already_used",
   "detail": "This quote has already been converted.",
-  "request_id": "01a11666-8070-7395-a9ad-763b2ff57e2b",
+  "request_id": "01a116dc-d0eb-75f5-bc6a-358778171883",
   "status": 409,
   "title": "Quote already used",
   "type": "https://corridor.example/problems/quote-already-used"
@@ -1418,14 +1430,76 @@ HTTP 409
 ```
 
 An agent can convert only if its owner has set a policy for it, and only up to the
-policy's per-transaction cap. Conversions by an agent are never sent for approval.
+policy's per-transaction cap. Conversions by an agent are never sent for approval: one
+above the approval threshold and under the cap is made. The examples below are an agent
+with the scope `fx:convert`, before its owner set a policy and after the owner set one with
+a cap of 100.00 USD for one movement.
+
+Before any policy, `403 policy_not_set`:
+
+```http
+POST /v1/fx/conversions
+Authorization: Bearer <agent key>
+Idempotency-Key: docs-65f832e0-7a97-4246-b1f3-c173be4afbfd
+
+{
+  "quote_id": "01a116dd-0374-72fe-b633-8872b58dca37"
+}
+```
+
+```http
+HTTP 403
+
+{
+  "code": "policy_not_set",
+  "detail": "This agent has no policy, so it cannot convert.",
+  "request_id": "01a116dd-0377-7350-8b13-73d4ee2f566b",
+  "status": 403,
+  "title": "Agent has no policy",
+  "type": "https://corridor.example/problems/policy-not-set"
+}
+```
+
+Selling 150.00 USD under a cap of 100.00, `422 limit_exceeded` with `scope` set to `agent`:
+
+```http
+HTTP 422
+
+{
+  "code": "limit_exceeded",
+  "detail": "This is more than the limit of 100.00 USD for one movement.",
+  "limit": "per_transaction",
+  "request_id": "01a116dd-03ce-7164-be37-aa429b8c84e0",
+  "scope": "agent",
+  "status": 422,
+  "title": "Limit exceeded",
+  "type": "https://corridor.example/problems/limit-exceeded"
+}
+```
+
+Selling 20.00 USD:
+
+```http
+HTTP 201
+
+{
+  "buy_amount": "342.94",
+  "buy_asset": "MXN",
+  "created_at": "2026-10-07T14:55:45.651494Z",
+  "id": "01a116dd-03f2-7589-9ab1-1758d7300a5a",
+  "quote_id": "01a116dd-03e2-71ca-af05-a6f7b0c8e3e8",
+  "rate": "17.14701808",
+  "sell_amount": "20.00",
+  "sell_asset": "USD"
+}
+```
 
 ### `GET /v1/fx/conversions/{conversion_id}`
 
 Scope: `fx:read`.
 
 ```http
-GET /v1/fx/conversions/01a11666-8023-73c6-9132-11ca8a50c939
+GET /v1/fx/conversions/01a116dc-d0a7-71e5-8dfd-60f34777716d
 Authorization: Bearer <access token>
 ```
 
@@ -1435,9 +1509,9 @@ HTTP 200
 {
   "buy_amount": "1714.48",
   "buy_asset": "MXN",
-  "created_at": "2026-10-07T12:46:18.661512Z",
-  "id": "01a11666-8023-73c6-9132-11ca8a50c939",
-  "quote_id": "01a11666-8014-74a0-92d2-884ee0b6abce",
+  "created_at": "2026-10-07T14:55:32.521941Z",
+  "id": "01a116dc-d0a7-71e5-8dfd-60f34777716d",
+  "quote_id": "01a116dc-d096-766e-aadb-b8847e17e173",
   "rate": "17.144877835",
   "sell_amount": "100.00",
   "sell_asset": "USD"
@@ -1462,13 +1536,13 @@ Scope: `transfers:create`. Needs an `Idempotency-Key`.
 ```http
 POST /v1/transfers
 Authorization: Bearer <access token>
-Idempotency-Key: docs-9014502b-9356-4aed-8e58-edf1bbd7dde0
+Idempotency-Key: docs-00b0a767-3aed-48aa-aabc-405bd9b6d985
 
 {
   "amount": "50.00",
   "asset": "USD",
   "memo": "Lunch",
-  "recipient": "@bruno_829dd0"
+  "recipient": "@bruno_6b21b0"
 }
 ```
 
@@ -1478,17 +1552,17 @@ HTTP 201
 {
   "amount": "50.00",
   "asset": "USD",
-  "created_at": "2026-10-07T12:46:18.778556Z",
+  "created_at": "2026-10-07T14:55:32.629378Z",
   "fee": "0.00",
-  "id": "01a11666-808e-73bd-aba0-2f3607764f0f",
+  "id": "01a116dc-d104-70bd-b387-f60ec2ba8d3f",
   "memo": "Lunch",
   "recipient": {
-    "handle": "bruno_829dd0",
-    "id": "01a11666-5390-7735-ac92-2e5f3ca67233"
+    "handle": "bruno_6b21b0",
+    "id": "01a116dc-a089-7087-b906-78afceb61920"
   },
   "sender": {
-    "handle": "ana_829dd0",
-    "id": "01a11666-51b9-767b-ad38-024269d5c766"
+    "handle": "ana_6b21b0",
+    "id": "01a116dc-9f3f-7471-9a2e-1f15b77928e5"
   },
   "status": "completed"
 }
@@ -1506,7 +1580,7 @@ HTTP 201
 ```http
 POST /v1/transfers
 Authorization: Bearer <access token>
-Idempotency-Key: docs-dd744d2d-58d6-483e-93f5-01059e1a44f2
+Idempotency-Key: docs-278e31ae-3460-41d9-8c99-b78f3d9c6afe
 
 {
   "amount": "1.00",
@@ -1521,7 +1595,7 @@ HTTP 404
 {
   "code": "recipient_not_found",
   "detail": "There is no such recipient.",
-  "request_id": "01a11666-80c2-7234-ab5c-0c1c4ff6c337",
+  "request_id": "01a116dc-d143-753c-b459-e1aebc05ee8d",
   "status": 404,
   "title": "Recipient not found",
   "type": "https://corridor.example/problems/recipient-not-found"
@@ -1533,12 +1607,12 @@ An amount sent as a JSON number, and an amount with too many decimal places:
 ```http
 POST /v1/transfers
 Authorization: Bearer <access token>
-Idempotency-Key: docs-872ea34c-bcd6-4d9b-9911-b19ad17be4d6
+Idempotency-Key: docs-85174fcc-6c87-440d-af21-3ce94c9b0cb3
 
 {
   "amount": 12.5,
   "asset": "USD",
-  "recipient": "01a11666-5390-7735-ac92-2e5f3ca67233"
+  "recipient": "01a116dc-a089-7087-b906-78afceb61920"
 }
 ```
 
@@ -1555,7 +1629,7 @@ HTTP 422
       "type": "string_type"
     }
   ],
-  "request_id": "01a11666-80ca-7123-8aa0-796e649eae61",
+  "request_id": "01a116dc-d14e-77b6-aec4-ebdce1a67a11",
   "status": 422,
   "title": "Invalid request",
   "type": "https://corridor.example/problems/invalid-request"
@@ -1565,12 +1639,12 @@ HTTP 422
 ```http
 POST /v1/transfers
 Authorization: Bearer <access token>
-Idempotency-Key: docs-78decc55-45bf-47a1-8ac7-f0e233759b97
+Idempotency-Key: docs-bfa57a2c-85a8-492e-83e9-3d33d0e0dd84
 
 {
   "amount": "1.005",
   "asset": "USD",
-  "recipient": "01a11666-5390-7735-ac92-2e5f3ca67233"
+  "recipient": "01a116dc-a089-7087-b906-78afceb61920"
 }
 ```
 
@@ -1580,7 +1654,7 @@ HTTP 422
 {
   "code": "invalid_amount",
   "detail": "USD has 2 decimal places.",
-  "request_id": "01a11666-80cf-71ff-9f9b-403fe93673fc",
+  "request_id": "01a116dc-d154-7675-ae3f-b05c0a01693f",
   "status": 422,
   "title": "Invalid amount",
   "type": "https://corridor.example/problems/invalid-amount"
@@ -1607,17 +1681,17 @@ HTTP 200
     {
       "amount": "50.00",
       "asset": "USD",
-      "created_at": "2026-10-07T12:46:18.778556Z",
+      "created_at": "2026-10-07T14:55:32.629378Z",
       "fee": "0.00",
-      "id": "01a11666-808e-73bd-aba0-2f3607764f0f",
+      "id": "01a116dc-d104-70bd-b387-f60ec2ba8d3f",
       "memo": "Lunch",
       "recipient": {
-        "handle": "bruno_829dd0",
-        "id": "01a11666-5390-7735-ac92-2e5f3ca67233"
+        "handle": "bruno_6b21b0",
+        "id": "01a116dc-a089-7087-b906-78afceb61920"
       },
       "sender": {
-        "handle": "ana_829dd0",
-        "id": "01a11666-51b9-767b-ad38-024269d5c766"
+        "handle": "ana_6b21b0",
+        "id": "01a116dc-9f3f-7471-9a2e-1f15b77928e5"
       },
       "status": "completed"
     }
@@ -1631,7 +1705,7 @@ HTTP 200
 Scope: `transfers:read`. Either party can read a transfer.
 
 ```http
-GET /v1/transfers/01a11666-808e-73bd-aba0-2f3607764f0f
+GET /v1/transfers/01a116dc-d104-70bd-b387-f60ec2ba8d3f
 Authorization: Bearer <access token>
 ```
 
@@ -1641,17 +1715,17 @@ HTTP 200
 {
   "amount": "50.00",
   "asset": "USD",
-  "created_at": "2026-10-07T12:46:18.778556Z",
+  "created_at": "2026-10-07T14:55:32.629378Z",
   "fee": "0.00",
-  "id": "01a11666-808e-73bd-aba0-2f3607764f0f",
+  "id": "01a116dc-d104-70bd-b387-f60ec2ba8d3f",
   "memo": "Lunch",
   "recipient": {
-    "handle": "bruno_829dd0",
-    "id": "01a11666-5390-7735-ac92-2e5f3ca67233"
+    "handle": "bruno_6b21b0",
+    "id": "01a116dc-a089-7087-b906-78afceb61920"
   },
   "sender": {
-    "handle": "ana_829dd0",
-    "id": "01a11666-51b9-767b-ad38-024269d5c766"
+    "handle": "ana_6b21b0",
+    "id": "01a116dc-9f3f-7471-9a2e-1f15b77928e5"
   },
   "status": "completed"
 }
@@ -1674,7 +1748,7 @@ bank's token for the account and a masked value. `routing_number` is for `USD` o
 ```http
 POST /v1/beneficiaries
 Authorization: Bearer <access token>
-Idempotency-Key: docs-86fe2109-aa9e-4f61-a651-eb7d0ce318a4
+Idempotency-Key: docs-d8de3c5f-2818-41da-a654-d128cb7057b3
 
 {
   "account_number": "000123456789",
@@ -1690,9 +1764,9 @@ HTTP 201
 {
   "account_mask": "••••6789",
   "asset": "USD",
-  "created_at": "2026-10-07T12:46:18.893648Z",
+  "created_at": "2026-10-07T14:55:32.768893Z",
   "holder_name": "Bruno Costa",
-  "id": "01a11666-810d-73e0-aa79-a6123eefddf8"
+  "id": "01a116dc-d1a0-7721-88f4-27962bfa12df"
 }
 ```
 
@@ -1717,9 +1791,9 @@ HTTP 200
     {
       "account_mask": "••••6789",
       "asset": "USD",
-      "created_at": "2026-10-07T12:46:18.893648Z",
+      "created_at": "2026-10-07T14:55:32.768893Z",
       "holder_name": "Bruno Costa",
-      "id": "01a11666-810d-73e0-aa79-a6123eefddf8"
+      "id": "01a116dc-d1a0-7721-88f4-27962bfa12df"
     }
   ],
   "next_cursor": null
@@ -1740,12 +1814,12 @@ afterwards. Read the withdrawal to learn what became of it.
 ```http
 POST /v1/withdrawals
 Authorization: Bearer <access token>
-Idempotency-Key: docs-8996898b-bfc5-41d0-917d-6f3c68d8b181
+Idempotency-Key: docs-10ab0373-c710-4855-801f-857cf1daf17d
 
 {
   "amount": "40.00",
   "asset": "USD",
-  "beneficiary_id": "01a11666-810d-73e0-aa79-a6123eefddf8"
+  "beneficiary_id": "01a116dc-d1a0-7721-88f4-27962bfa12df"
 }
 ```
 
@@ -1755,15 +1829,15 @@ HTTP 202
 {
   "amount": "40.00",
   "asset": "USD",
-  "beneficiary_id": "01a11666-810d-73e0-aa79-a6123eefddf8",
-  "created_at": "2026-10-07T12:46:18.924693Z",
+  "beneficiary_id": "01a116dc-d1a0-7721-88f4-27962bfa12df",
+  "created_at": "2026-10-07T14:55:32.807378Z",
   "failure_reason": null,
   "fee": "0.25",
-  "id": "01a11666-8120-7111-bca0-974a4781667b",
+  "id": "01a116dc-d1ba-7201-8a69-771bbcd8b0c0",
   "kind": "bank",
   "status": "held",
   "to_address": null,
-  "updated_at": "2026-10-07T12:46:18.924693Z"
+  "updated_at": "2026-10-07T14:55:32.807378Z"
 }
 ```
 
@@ -1772,7 +1846,7 @@ An on-chain withdrawal:
 ```http
 POST /v1/withdrawals
 Authorization: Bearer <access token>
-Idempotency-Key: docs-f1cd2f61-20aa-472f-a5e7-7fef60d1ac57
+Idempotency-Key: docs-6b691a53-3894-46c4-9cb9-4c159183f97d
 
 {
   "amount": "25.000000",
@@ -1788,14 +1862,14 @@ HTTP 202
   "amount": "25.000000",
   "asset": "USDC",
   "beneficiary_id": null,
-  "created_at": "2026-10-07T12:46:21.341166Z",
+  "created_at": "2026-10-07T14:55:35.243320Z",
   "failure_reason": null,
   "fee": "0.150000",
-  "id": "01a11666-8a8c-76fc-a0f9-e14206cf8079",
+  "id": "01a116dc-db3e-77c9-803a-c471e1643a62",
   "kind": "chain",
   "status": "held",
   "to_address": "sim1ddddddddddddddddddddddddddddddddfbbbb6de",
-  "updated_at": "2026-10-07T12:46:21.341166Z"
+  "updated_at": "2026-10-07T14:55:35.243320Z"
 }
 ```
 
@@ -1822,7 +1896,7 @@ The statuses a withdrawal goes through:
 ```http
 POST /v1/withdrawals
 Authorization: Bearer <access token>
-Idempotency-Key: docs-2ed1d588-5b1e-4803-a2f0-06c894948412
+Idempotency-Key: docs-e5f65153-c463-4378-bf8d-9f722294be92
 
 {
   "amount": "5.00",
@@ -1838,7 +1912,7 @@ HTTP 422
   "code": "invalid_withdrawal_target",
   "detail": "A withdrawal of this asset goes to a saved beneficiary.",
   "field": "beneficiary_id",
-  "request_id": "01a11666-8a7b-7099-9a2d-67bf0ac392d7",
+  "request_id": "01a116dc-db24-703d-a6f9-5da4013520be",
   "status": 422,
   "title": "Invalid withdrawal target",
   "type": "https://corridor.example/problems/invalid-withdrawal-target"
@@ -1851,7 +1925,7 @@ HTTP 403
 {
   "code": "party_not_allowed",
   "detail": "Money cannot be sent to this destination.",
-  "request_id": "01a11666-b2d7-72b5-a76b-8bfd71477e34",
+  "request_id": "01a116dd-0319-7361-9ff0-e5aee5f742ca",
   "status": 403,
   "title": "Not allowed",
   "type": "https://corridor.example/problems/party-not-allowed"
@@ -1863,7 +1937,7 @@ HTTP 403
 Scope: `withdrawals:read`. The same withdrawal as above, after the bank paid it out:
 
 ```http
-GET /v1/withdrawals/01a11666-8120-7111-bca0-974a4781667b
+GET /v1/withdrawals/01a116dc-d1ba-7201-8a69-771bbcd8b0c0
 Authorization: Bearer <access token>
 ```
 
@@ -1873,15 +1947,15 @@ HTTP 200
 {
   "amount": "40.00",
   "asset": "USD",
-  "beneficiary_id": "01a11666-810d-73e0-aa79-a6123eefddf8",
-  "created_at": "2026-10-07T12:46:18.924693Z",
+  "beneficiary_id": "01a116dc-d1a0-7721-88f4-27962bfa12df",
+  "created_at": "2026-10-07T14:55:32.807378Z",
   "failure_reason": null,
   "fee": "0.25",
-  "id": "01a11666-8120-7111-bca0-974a4781667b",
+  "id": "01a116dc-d1ba-7201-8a69-771bbcd8b0c0",
   "kind": "bank",
   "status": "completed",
   "to_address": null,
-  "updated_at": "2026-10-07T12:46:21.025779Z"
+  "updated_at": "2026-10-07T14:55:34.998800Z"
 }
 ```
 
@@ -1894,14 +1968,14 @@ HTTP 200
   "amount": "25.000000",
   "asset": "USDC",
   "beneficiary_id": null,
-  "created_at": "2026-10-07T12:46:21.341166Z",
+  "created_at": "2026-10-07T14:55:35.243320Z",
   "failure_reason": null,
   "fee": "0.150000",
-  "id": "01a11666-8a8c-76fc-a0f9-e14206cf8079",
+  "id": "01a116dc-db3e-77c9-803a-c471e1643a62",
   "kind": "chain",
   "status": "completed",
   "to_address": "sim1ddddddddddddddddddddddddddddddddfbbbb6de",
-  "updated_at": "2026-10-07T12:46:28.316769Z"
+  "updated_at": "2026-10-07T14:55:42.267408Z"
 }
 ```
 
@@ -1922,15 +1996,15 @@ HTTP 200
     {
       "amount": "40.00",
       "asset": "USD",
-      "beneficiary_id": "01a11666-810d-73e0-aa79-a6123eefddf8",
-      "created_at": "2026-10-07T12:46:18.924693Z",
+      "beneficiary_id": "01a116dc-d1a0-7721-88f4-27962bfa12df",
+      "created_at": "2026-10-07T14:55:32.807378Z",
       "failure_reason": null,
       "fee": "0.25",
-      "id": "01a11666-8120-7111-bca0-974a4781667b",
+      "id": "01a116dc-d1ba-7201-8a69-771bbcd8b0c0",
       "kind": "bank",
       "status": "completed",
       "to_address": null,
-      "updated_at": "2026-10-07T12:46:21.025779Z"
+      "updated_at": "2026-10-07T14:55:34.998800Z"
     }
   ],
   "next_cursor": null
@@ -1941,15 +2015,17 @@ HTTP 200
 
 Scope: `withdrawals:create`. No idempotency key. Cancels a withdrawal that is still `held`
 and returns the amount and the fee to the available balance. An agent can cancel only a
-withdrawal that it started itself; the user's own session can cancel any of the user's
-withdrawals.
+withdrawal that it started itself: for the owner's own withdrawal, or another agent's, it
+gets `403 withdrawal_not_agents`. The user's own session can cancel any of the user's
+withdrawals. Canceling works while Redis is unavailable, when asking for a new withdrawal
+does not (see [Rate limits](#rate-limits)).
 
 A withdrawal is `held` only for a moment unless it is waiting for a review. This one was
 held for review because its beneficiary's holder name is on the deny list with the outcome
 `review`:
 
 ```http
-POST /v1/withdrawals/01a11666-a87c-77d6-9df4-56667c097c0c/cancel
+POST /v1/withdrawals/01a116dc-f8cc-72e6-9143-947b8d9fd0d5/cancel
 Authorization: Bearer <access token>
 ```
 
@@ -1959,22 +2035,22 @@ HTTP 200
 {
   "amount": "20.00",
   "asset": "USD",
-  "beneficiary_id": "01a11666-a864-7205-8143-c49204859c33",
-  "created_at": "2026-10-07T12:46:29.011071Z",
+  "beneficiary_id": "01a116dc-f8c2-7630-b0f0-4fd976106616",
+  "created_at": "2026-10-07T14:55:42.809653Z",
   "failure_reason": null,
   "fee": "0.25",
-  "id": "01a11666-a87c-77d6-9df4-56667c097c0c",
+  "id": "01a116dc-f8cc-72e6-9143-947b8d9fd0d5",
   "kind": "bank",
   "status": "canceled",
   "to_address": null,
-  "updated_at": "2026-10-07T12:46:30.547610Z"
+  "updated_at": "2026-10-07T14:55:44.344207Z"
 }
 ```
 
 Once the worker has started sending a withdrawal it cannot be canceled:
 
 ```http
-POST /v1/withdrawals/01a11666-8120-7111-bca0-974a4781667b/cancel
+POST /v1/withdrawals/01a116dc-d1ba-7201-8a69-771bbcd8b0c0/cancel
 Authorization: Bearer <access token>
 ```
 
@@ -1984,7 +2060,7 @@ HTTP 409
 {
   "code": "withdrawal_not_cancelable",
   "detail": "This withdrawal can no longer be canceled.",
-  "request_id": "01a11666-8a73-7345-bd52-e481cf26361b",
+  "request_id": "01a116dc-db1a-758f-b0be-6a877e5839ab",
   "status": 409,
   "title": "Withdrawal cannot be canceled",
   "type": "https://corridor.example/problems/withdrawal-not-cancelable"
@@ -2002,7 +2078,8 @@ How an agent's request is decided, in order:
 1. **Scope.** The key must hold the scope of the endpoint.
 2. **Policy.** For a transfer or a withdrawal, the destination must be on the policy's
    list of allowed recipients, unless the policy allows any recipient. An agent with no
-   policy can pay nobody and cannot convert.
+   policy can pay nobody (`403 recipient_not_allowed`) and cannot convert
+   (`403 policy_not_set`).
 3. **Per-transaction cap.** The amount, valued in US dollars, must not exceed the policy's
    `per_tx_usd`.
 4. **Approval threshold.** If the amount is above `approval_threshold_usd`, nothing moves.
@@ -2031,8 +2108,8 @@ Authorization: Bearer <access token>
 HTTP 201
 
 {
-  "created_at": "2026-10-07T12:46:31.658816Z",
-  "id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
+  "created_at": "2026-10-07T14:55:45.451895Z",
+  "id": "01a116dd-032b-7784-befd-2d5892667a97",
   "keys": [],
   "name": "Bill payer",
   "status": "active"
@@ -2047,14 +2124,15 @@ The `key` field of the response is the only time the key is shown. An agent can 
 working keys (`CORRIDOR_MAX_KEYS_PER_AGENT`).
 
 ```http
-POST /v1/agents/01a11666-b2ea-76a1-84d3-422060f8f61e/keys
+POST /v1/agents/01a116dd-032b-7784-befd-2d5892667a97/keys
 Authorization: Bearer <access token>
 
 {
   "scopes": [
     "wallet:read",
     "transfers:create",
-    "transfers:read"
+    "transfers:read",
+    "fx:convert"
   ]
 }
 ```
@@ -2063,15 +2141,16 @@ Authorization: Bearer <access token>
 HTTP 201
 
 {
-  "agent_id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
-  "created_at": "2026-10-07T12:46:31.666309Z",
+  "agent_id": "01a116dd-032b-7784-befd-2d5892667a97",
+  "created_at": "2026-10-07T14:55:45.459641Z",
   "expires_at": null,
-  "id": "01a11666-b2f6-7221-bd5f-f0ae258f8eef",
+  "id": "01a116dd-0337-731d-a991-b69d60adf79a",
   "key": "<agent key, shown once>",
   "last_used_at": null,
-  "prefix": "gwgtkqd5tvjx",
+  "prefix": "xiy1o4pf828n",
   "revoked_at": null,
   "scopes": [
+    "fx:convert",
     "transfers:create",
     "transfers:read",
     "wallet:read"
@@ -2088,7 +2167,7 @@ Refusals: `422 invalid_scopes`, `422 invalid_expiry`, `409 agent_key_limit_reach
 Revokes one key for good. The response has no body.
 
 ```http
-DELETE /v1/agents/01a11666-b2ea-76a1-84d3-422060f8f61e/keys/01a11666-b2ff-7031-843a-f2817a179bda
+DELETE /v1/agents/01a116dd-032b-7784-befd-2d5892667a97/keys/01a116dd-0341-769f-83ae-29a535e3393b
 Authorization: Bearer <access token>
 ```
 
@@ -2102,7 +2181,7 @@ The agent's policy. Before the owner has set one, the policy allows nothing and
 `updated_at` is `null`:
 
 ```http
-GET /v1/agents/01a11666-b2ea-76a1-84d3-422060f8f61e/policy
+GET /v1/agents/01a116dd-032b-7784-befd-2d5892667a97/policy
 Authorization: Bearer <access token>
 ```
 
@@ -2110,7 +2189,7 @@ Authorization: Bearer <access token>
 HTTP 200
 
 {
-  "agent_id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
+  "agent_id": "01a116dd-032b-7784-befd-2d5892667a97",
   "allowed_recipients": [],
   "any_recipient": false,
   "approval_threshold_usd": null,
@@ -2125,12 +2204,12 @@ With that policy the agent is refused whatever it asks to pay:
 ```http
 POST /v1/transfers
 Authorization: Bearer <agent key>
-Idempotency-Key: docs-6a8522db-d20c-4b9a-af66-bac8553eff76
+Idempotency-Key: docs-18bf853a-6a74-4f8c-8560-643f06b6cd58
 
 {
   "amount": "5.00",
   "asset": "USD",
-  "recipient": "01a11666-5390-7735-ac92-2e5f3ca67233"
+  "recipient": "01a116dc-a089-7087-b906-78afceb61920"
 }
 ```
 
@@ -2140,7 +2219,7 @@ HTTP 403
 {
   "code": "recipient_not_allowed",
   "detail": "This agent's policy does not allow it to pay this recipient.",
-  "request_id": "01a11666-b314-73b3-87bd-763483c7afca",
+  "request_id": "01a116dd-035a-74f7-ac01-db08107ff280",
   "status": 403,
   "title": "Recipient not allowed",
   "type": "https://corridor.example/problems/recipient-not-allowed"
@@ -2161,13 +2240,13 @@ Replaces the policy as a whole.
   of these limits.
 
 ```http
-PUT /v1/agents/01a11666-b2ea-76a1-84d3-422060f8f61e/policy
+PUT /v1/agents/01a116dd-032b-7784-befd-2d5892667a97/policy
 Authorization: Bearer <access token>
 
 {
   "allowed_recipients": [
     {
-      "id": "01a11666-5390-7735-ac92-2e5f3ca67233",
+      "id": "01a116dc-a089-7087-b906-78afceb61920",
       "kind": "user"
     }
   ],
@@ -2181,10 +2260,10 @@ Authorization: Bearer <access token>
 HTTP 200
 
 {
-  "agent_id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
+  "agent_id": "01a116dd-032b-7784-befd-2d5892667a97",
   "allowed_recipients": [
     {
-      "id": "01a11666-5390-7735-ac92-2e5f3ca67233",
+      "id": "01a116dc-a089-7087-b906-78afceb61920",
       "kind": "user"
     }
   ],
@@ -2192,7 +2271,7 @@ HTTP 200
   "approval_threshold_usd": "20.00",
   "daily_usd": "200.00",
   "per_tx_usd": "100.00",
-  "updated_at": "2026-10-07T12:46:31.715824Z"
+  "updated_at": "2026-10-07T14:55:45.547430Z"
 }
 ```
 
@@ -2211,44 +2290,46 @@ HTTP 200
 {
   "items": [
     {
-      "created_at": "2026-10-07T12:46:31.658816Z",
-      "id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
+      "created_at": "2026-10-07T14:55:45.451895Z",
+      "id": "01a116dd-032b-7784-befd-2d5892667a97",
       "keys": [
         {
-          "agent_id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
-          "created_at": "2026-10-07T12:46:31.666309Z",
+          "agent_id": "01a116dd-032b-7784-befd-2d5892667a97",
+          "created_at": "2026-10-07T14:55:45.459641Z",
           "expires_at": null,
-          "id": "01a11666-b2f6-7221-bd5f-f0ae258f8eef",
+          "id": "01a116dd-0337-731d-a991-b69d60adf79a",
           "last_used_at": null,
-          "prefix": "gwgtkqd5tvjx",
+          "prefix": "xiy1o4pf828n",
           "revoked_at": null,
           "scopes": [
+            "fx:convert",
             "transfers:create",
             "transfers:read",
             "wallet:read"
           ]
         },
         {
-          "agent_id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
-          "created_at": "2026-10-07T12:46:31.678031Z",
+          "agent_id": "01a116dd-032b-7784-befd-2d5892667a97",
+          "created_at": "2026-10-07T14:55:45.471877Z",
           "expires_at": null,
-          "id": "01a11666-b2ff-7031-843a-f2817a179bda",
+          "id": "01a116dd-0341-769f-83ae-29a535e3393b",
           "last_used_at": null,
-          "prefix": "9ftnupxknn11",
+          "prefix": "pyyk59uxk292",
           "revoked_at": null,
           "scopes": [
             "wallet:read"
           ]
         },
         {
-          "agent_id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
-          "created_at": "2026-10-07T12:46:31.686931Z",
+          "agent_id": "01a116dd-032b-7784-befd-2d5892667a97",
+          "created_at": "2026-10-07T14:55:45.481718Z",
           "expires_at": null,
-          "id": "01a11666-b309-7510-b52c-3bc711f02050",
-          "last_used_at": "2026-10-07T12:46:31.702966Z",
-          "prefix": "q3otmlm2y1z9",
+          "id": "01a116dd-034c-7783-8266-16c585d32084",
+          "last_used_at": "2026-10-07T14:55:45.501787Z",
+          "prefix": "cfzjj64uw5l4",
           "revoked_at": null,
           "scopes": [
+            "fx:convert",
             "transfers:create",
             "transfers:read",
             "wallet:read"
@@ -2294,12 +2375,12 @@ A transfer under the threshold moves at once:
 ```http
 POST /v1/transfers
 Authorization: Bearer <agent key>
-Idempotency-Key: docs-648139ef-3787-4867-b89f-5a9d5eaa1bb7
+Idempotency-Key: docs-56497730-6e9d-4af8-bc92-c527d0f76ae7
 
 {
   "amount": "10.00",
   "asset": "USD",
-  "recipient": "01a11666-5390-7735-ac92-2e5f3ca67233"
+  "recipient": "01a116dc-a089-7087-b906-78afceb61920"
 }
 ```
 
@@ -2309,17 +2390,17 @@ HTTP 201
 {
   "amount": "10.00",
   "asset": "USD",
-  "created_at": "2026-10-07T12:46:31.780080Z",
+  "created_at": "2026-10-07T14:55:45.716784Z",
   "fee": "0.00",
-  "id": "01a11666-b358-7358-8529-83644950daca",
+  "id": "01a116dd-0423-7514-a57e-7b36344d4f43",
   "memo": null,
   "recipient": {
-    "handle": "bruno_829dd0",
-    "id": "01a11666-5390-7735-ac92-2e5f3ca67233"
+    "handle": "bruno_6b21b0",
+    "id": "01a116dc-a089-7087-b906-78afceb61920"
   },
   "sender": {
-    "handle": "ana_829dd0",
-    "id": "01a11666-51b9-767b-ad38-024269d5c766"
+    "handle": "ana_6b21b0",
+    "id": "01a116dc-9f3f-7471-9a2e-1f15b77928e5"
   },
   "status": "completed"
 }
@@ -2333,7 +2414,7 @@ HTTP 403
 {
   "code": "recipient_not_allowed",
   "detail": "This agent's policy does not allow it to pay this recipient.",
-  "request_id": "01a11666-b369-7380-af23-c5cf3b52549d",
+  "request_id": "01a116dd-0440-7784-9220-7610ebd2257a",
   "status": 403,
   "title": "Recipient not allowed",
   "type": "https://corridor.example/problems/recipient-not-allowed"
@@ -2349,7 +2430,7 @@ HTTP 422
   "code": "limit_exceeded",
   "detail": "This is more than the limit of 100.00 USD for one movement.",
   "limit": "per_transaction",
-  "request_id": "01a11666-b375-743e-b14c-571ebc554266",
+  "request_id": "01a116dd-044e-75bd-b5d7-0033cd1fafb0",
   "scope": "agent",
   "status": 422,
   "title": "Limit exceeded",
@@ -2365,13 +2446,13 @@ request that the owner will see. The agent has at most 20 requests waiting at a 
 ```http
 POST /v1/transfers
 Authorization: Bearer <agent key>
-Idempotency-Key: docs-4c69eeeb-a3aa-4b1b-925b-48f20bd8eeee
+Idempotency-Key: docs-bb90ea05-7fa4-477d-9ad9-c70452c7d28d
 
 {
   "amount": "30.00",
   "asset": "USD",
   "memo": "Electricity",
-  "recipient": "01a11666-5390-7735-ac92-2e5f3ca67233"
+  "recipient": "01a116dc-a089-7087-b906-78afceb61920"
 }
 ```
 
@@ -2380,12 +2461,12 @@ HTTP 202
 
 {
   "approval_request": {
-    "agent_id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
-    "created_at": "2026-10-07T12:46:31.820212Z",
+    "agent_id": "01a116dd-032b-7784-befd-2d5892667a97",
+    "created_at": "2026-10-07T14:55:45.774988Z",
     "decided_at": null,
-    "expires_at": "2026-10-08T12:46:31.820212Z",
+    "expires_at": "2026-10-08T14:55:45.774988Z",
     "failure_code": null,
-    "id": "01a11666-b38c-7616-aa15-833a159d46b0",
+    "id": "01a116dd-046e-7342-9308-91d7ea5adfc3",
     "kind": "transfer",
     "movement_id": null,
     "request": {
@@ -2393,7 +2474,7 @@ HTTP 202
       "asset": "USD",
       "beneficiary_id": null,
       "memo": "Electricity",
-      "recipient_id": "01a11666-5390-7735-ac92-2e5f3ca67233",
+      "recipient_id": "01a116dc-a089-7087-b906-78afceb61920",
       "to_address": null
     },
     "status": "pending"
@@ -2406,7 +2487,7 @@ HTTP 202
 Stops every key of the agent from working until it is resumed.
 
 ```http
-POST /v1/agents/01a11666-b2ea-76a1-84d3-422060f8f61e/pause
+POST /v1/agents/01a116dd-032b-7784-befd-2d5892667a97/pause
 Authorization: Bearer <access token>
 ```
 
@@ -2414,44 +2495,46 @@ Authorization: Bearer <access token>
 HTTP 200
 
 {
-  "created_at": "2026-10-07T12:46:31.658816Z",
-  "id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
+  "created_at": "2026-10-07T14:55:45.451895Z",
+  "id": "01a116dd-032b-7784-befd-2d5892667a97",
   "keys": [
     {
-      "agent_id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
-      "created_at": "2026-10-07T12:46:31.666309Z",
+      "agent_id": "01a116dd-032b-7784-befd-2d5892667a97",
+      "created_at": "2026-10-07T14:55:45.459641Z",
       "expires_at": null,
-      "id": "01a11666-b2f6-7221-bd5f-f0ae258f8eef",
+      "id": "01a116dd-0337-731d-a991-b69d60adf79a",
       "last_used_at": null,
-      "prefix": "gwgtkqd5tvjx",
+      "prefix": "xiy1o4pf828n",
       "revoked_at": null,
       "scopes": [
+        "fx:convert",
         "transfers:create",
         "transfers:read",
         "wallet:read"
       ]
     },
     {
-      "agent_id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
-      "created_at": "2026-10-07T12:46:31.678031Z",
+      "agent_id": "01a116dd-032b-7784-befd-2d5892667a97",
+      "created_at": "2026-10-07T14:55:45.471877Z",
       "expires_at": null,
-      "id": "01a11666-b2ff-7031-843a-f2817a179bda",
+      "id": "01a116dd-0341-769f-83ae-29a535e3393b",
       "last_used_at": null,
-      "prefix": "9ftnupxknn11",
+      "prefix": "pyyk59uxk292",
       "revoked_at": null,
       "scopes": [
         "wallet:read"
       ]
     },
     {
-      "agent_id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
-      "created_at": "2026-10-07T12:46:31.686931Z",
+      "agent_id": "01a116dd-032b-7784-befd-2d5892667a97",
+      "created_at": "2026-10-07T14:55:45.481718Z",
       "expires_at": null,
-      "id": "01a11666-b309-7510-b52c-3bc711f02050",
-      "last_used_at": "2026-10-07T12:46:31.702966Z",
-      "prefix": "q3otmlm2y1z9",
+      "id": "01a116dd-034c-7783-8266-16c585d32084",
+      "last_used_at": "2026-10-07T14:55:45.501787Z",
+      "prefix": "cfzjj64uw5l4",
       "revoked_at": null,
       "scopes": [
+        "fx:convert",
         "transfers:create",
         "transfers:read",
         "wallet:read"
@@ -2477,7 +2560,7 @@ WWW-Authenticate: Bearer
 {
   "code": "unauthenticated",
   "detail": "This credential is not accepted.",
-  "request_id": "01a11666-b3f4-74a8-ae1e-70b6cd1c2cd8",
+  "request_id": "01a116dd-04e0-7260-b4a8-dca824d25101",
   "status": 401,
   "title": "Authentication required",
   "type": "https://corridor.example/problems/unauthenticated"
@@ -2487,7 +2570,7 @@ WWW-Authenticate: Bearer
 ### `POST /v1/agents/{agent_id}/resume`
 
 ```http
-POST /v1/agents/01a11666-b2ea-76a1-84d3-422060f8f61e/resume
+POST /v1/agents/01a116dd-032b-7784-befd-2d5892667a97/resume
 Authorization: Bearer <access token>
 ```
 
@@ -2495,18 +2578,19 @@ Authorization: Bearer <access token>
 HTTP 200
 
 {
-  "created_at": "2026-10-07T12:46:31.658816Z",
-  "id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
+  "created_at": "2026-10-07T14:55:45.451895Z",
+  "id": "01a116dd-032b-7784-befd-2d5892667a97",
   "keys": [
     {
-      "agent_id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
-      "created_at": "2026-10-07T12:46:31.666309Z",
+      "agent_id": "01a116dd-032b-7784-befd-2d5892667a97",
+      "created_at": "2026-10-07T14:55:45.459641Z",
       "expires_at": null,
-      "id": "01a11666-b2f6-7221-bd5f-f0ae258f8eef",
+      "id": "01a116dd-0337-731d-a991-b69d60adf79a",
       "last_used_at": null,
-      "prefix": "gwgtkqd5tvjx",
+      "prefix": "xiy1o4pf828n",
       "revoked_at": null,
       "scopes": [
+        "fx:convert",
         "transfers:create",
         "transfers:read",
         "wallet:read"
@@ -2525,7 +2609,7 @@ The response had 3 entries in `keys`; the first 1 are shown.
 Stops the agent for good. It cannot be resumed.
 
 ```http
-POST /v1/agents/01a11666-b2ea-76a1-84d3-422060f8f61e/revoke
+POST /v1/agents/01a116dd-032b-7784-befd-2d5892667a97/revoke
 Authorization: Bearer <access token>
 ```
 
@@ -2533,18 +2617,19 @@ Authorization: Bearer <access token>
 HTTP 200
 
 {
-  "created_at": "2026-10-07T12:46:31.658816Z",
-  "id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
+  "created_at": "2026-10-07T14:55:45.451895Z",
+  "id": "01a116dd-032b-7784-befd-2d5892667a97",
   "keys": [
     {
-      "agent_id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
-      "created_at": "2026-10-07T12:46:31.666309Z",
+      "agent_id": "01a116dd-032b-7784-befd-2d5892667a97",
+      "created_at": "2026-10-07T14:55:45.459641Z",
       "expires_at": null,
-      "id": "01a11666-b2f6-7221-bd5f-f0ae258f8eef",
+      "id": "01a116dd-0337-731d-a991-b69d60adf79a",
       "last_used_at": null,
-      "prefix": "gwgtkqd5tvjx",
+      "prefix": "xiy1o4pf828n",
       "revoked_at": null,
       "scopes": [
+        "fx:convert",
         "transfers:create",
         "transfers:read",
         "wallet:read"
@@ -2559,7 +2644,7 @@ HTTP 200
 The response had 3 entries in `keys`; the first 1 are shown.
 
 ```http
-POST /v1/agents/01a11666-b2ea-76a1-84d3-422060f8f61e/resume
+POST /v1/agents/01a116dd-032b-7784-befd-2d5892667a97/resume
 Authorization: Bearer <access token>
 ```
 
@@ -2569,7 +2654,7 @@ HTTP 409
 {
   "code": "agent_revoked",
   "detail": "This agent has been revoked, and that cannot be undone.",
-  "request_id": "01a11666-b40e-7341-bcc9-81bb9b6c5964",
+  "request_id": "01a116dd-0500-768e-a215-cf7a31a590a5",
   "status": 409,
   "title": "Agent revoked",
   "type": "https://corridor.example/problems/agent-revoked"
@@ -2601,12 +2686,12 @@ HTTP 200
 {
   "items": [
     {
-      "agent_id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
-      "created_at": "2026-10-07T12:46:31.840177Z",
+      "agent_id": "01a116dd-032b-7784-befd-2d5892667a97",
+      "created_at": "2026-10-07T14:55:45.798008Z",
       "decided_at": null,
-      "expires_at": "2026-10-08T12:46:31.840177Z",
+      "expires_at": "2026-10-08T14:55:45.798008Z",
       "failure_code": null,
-      "id": "01a11666-b3a0-73cd-a201-fd25d89028b9",
+      "id": "01a116dd-0486-7201-a1a0-d0899490a5a7",
       "kind": "transfer",
       "movement_id": null,
       "request": {
@@ -2614,18 +2699,18 @@ HTTP 200
         "asset": "USD",
         "beneficiary_id": null,
         "memo": null,
-        "recipient_id": "01a11666-5390-7735-ac92-2e5f3ca67233",
+        "recipient_id": "01a116dc-a089-7087-b906-78afceb61920",
         "to_address": null
       },
       "status": "pending"
     },
     {
-      "agent_id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
-      "created_at": "2026-10-07T12:46:31.820212Z",
+      "agent_id": "01a116dd-032b-7784-befd-2d5892667a97",
+      "created_at": "2026-10-07T14:55:45.774988Z",
       "decided_at": null,
-      "expires_at": "2026-10-08T12:46:31.820212Z",
+      "expires_at": "2026-10-08T14:55:45.774988Z",
       "failure_code": null,
-      "id": "01a11666-b38c-7616-aa15-833a159d46b0",
+      "id": "01a116dd-046e-7342-9308-91d7ea5adfc3",
       "kind": "transfer",
       "movement_id": null,
       "request": {
@@ -2633,7 +2718,7 @@ HTTP 200
         "asset": "USD",
         "beneficiary_id": null,
         "memo": "Electricity",
-        "recipient_id": "01a11666-5390-7735-ac92-2e5f3ca67233",
+        "recipient_id": "01a116dc-a089-7087-b906-78afceb61920",
         "to_address": null
       },
       "status": "pending"
@@ -2657,7 +2742,7 @@ refusal. If the agent has been paused or revoked the refusal is `409 agent_not_a
 the request has expired it is `409 approval_expired`.
 
 ```http
-POST /v1/approvals/01a11666-b38c-7616-aa15-833a159d46b0/approve
+POST /v1/approvals/01a116dd-046e-7342-9308-91d7ea5adfc3/approve
 Authorization: Bearer <access token>
 ```
 
@@ -2665,20 +2750,20 @@ Authorization: Bearer <access token>
 HTTP 200
 
 {
-  "agent_id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
-  "created_at": "2026-10-07T12:46:31.820212Z",
-  "decided_at": "2026-10-07T12:46:31.869072Z",
-  "expires_at": "2026-10-08T12:46:31.820212Z",
+  "agent_id": "01a116dd-032b-7784-befd-2d5892667a97",
+  "created_at": "2026-10-07T14:55:45.774988Z",
+  "decided_at": "2026-10-07T14:55:45.831212Z",
+  "expires_at": "2026-10-08T14:55:45.774988Z",
   "failure_code": null,
-  "id": "01a11666-b38c-7616-aa15-833a159d46b0",
+  "id": "01a116dd-046e-7342-9308-91d7ea5adfc3",
   "kind": "transfer",
-  "movement_id": "01a11666-b38c-7616-aa15-833b6c6a9b64",
+  "movement_id": "01a116dd-046f-7649-b0ec-4a8e657db77f",
   "request": {
     "amount": "30.00",
     "asset": "USD",
     "beneficiary_id": null,
     "memo": "Electricity",
-    "recipient_id": "01a11666-5390-7735-ac92-2e5f3ca67233",
+    "recipient_id": "01a116dc-a089-7087-b906-78afceb61920",
     "to_address": null
   },
   "status": "executed"
@@ -2688,7 +2773,7 @@ HTTP 200
 A second approval:
 
 ```http
-POST /v1/approvals/01a11666-b38c-7616-aa15-833a159d46b0/approve
+POST /v1/approvals/01a116dd-046e-7342-9308-91d7ea5adfc3/approve
 Authorization: Bearer <access token>
 ```
 
@@ -2698,7 +2783,7 @@ HTTP 409
 {
   "code": "approval_already_decided",
   "detail": "This approval request has already been decided.",
-  "request_id": "01a11666-b3d5-723c-ac9d-00da7aea7109",
+  "request_id": "01a116dd-04c3-737d-bcca-3493b43106c8",
   "status": 409,
   "title": "Approval request already decided",
   "type": "https://corridor.example/problems/approval-already-decided"
@@ -2708,7 +2793,7 @@ HTTP 409
 An agent trying to approve its own request:
 
 ```http
-POST /v1/approvals/01a11666-b38c-7616-aa15-833a159d46b0/approve
+POST /v1/approvals/01a116dd-046e-7342-9308-91d7ea5adfc3/approve
 Authorization: Bearer <agent key>
 ```
 
@@ -2718,7 +2803,7 @@ HTTP 403
 {
   "code": "insufficient_scope",
   "detail": "This action needs the account owner's own session.",
-  "request_id": "01a11666-b3b0-7676-8ddb-70dcacd21879",
+  "request_id": "01a116dd-0498-745f-968a-46a4f50ea86a",
   "status": 403,
   "title": "Insufficient scope",
   "type": "https://corridor.example/problems/insufficient-scope"
@@ -2730,7 +2815,7 @@ HTTP 403
 Refuses a request for good. Nothing moved, and nothing will.
 
 ```http
-POST /v1/approvals/01a11666-b3a0-73cd-a201-fd25d89028b9/reject
+POST /v1/approvals/01a116dd-0486-7201-a1a0-d0899490a5a7/reject
 Authorization: Bearer <access token>
 ```
 
@@ -2738,12 +2823,12 @@ Authorization: Bearer <access token>
 HTTP 200
 
 {
-  "agent_id": "01a11666-b2ea-76a1-84d3-422060f8f61e",
-  "created_at": "2026-10-07T12:46:31.840177Z",
-  "decided_at": "2026-10-07T12:46:31.908260Z",
-  "expires_at": "2026-10-08T12:46:31.840177Z",
+  "agent_id": "01a116dd-032b-7784-befd-2d5892667a97",
+  "created_at": "2026-10-07T14:55:45.798008Z",
+  "decided_at": "2026-10-07T14:55:45.874204Z",
+  "expires_at": "2026-10-08T14:55:45.798008Z",
   "failure_code": null,
-  "id": "01a11666-b3a0-73cd-a201-fd25d89028b9",
+  "id": "01a116dd-0486-7201-a1a0-d0899490a5a7",
   "kind": "transfer",
   "movement_id": null,
   "request": {
@@ -2751,7 +2836,7 @@ HTTP 200
     "asset": "USD",
     "beneficiary_id": null,
     "memo": null,
-    "recipient_id": "01a11666-5390-7735-ac92-2e5f3ca67233",
+    "recipient_id": "01a116dc-a089-7087-b906-78afceb61920",
     "to_address": null
   },
   "status": "rejected"
@@ -2791,14 +2876,14 @@ X-Signature: t=<unix seconds>,v1=<hex digest>
 
 ```json
 {
-  "created_at": "2026-10-07T12:46:20.992924Z",
+  "created_at": "2026-10-07T14:55:34.967555Z",
   "data": {
     "amount": "40.00",
     "asset": "USD",
     "fee": "0.25",
     "payout_id": "po_9ecb87d927e1",
-    "reference": "01a11666-8120-7111-bca0-974a4781667b",
-    "settled_at": "2026-10-07T12:46:20.992833Z"
+    "reference": "01a116dc-d1ba-7201-8a69-771bbcd8b0c0",
+    "settled_at": "2026-10-07T14:55:34.967455Z"
   },
   "id": "evt_dd29d671dd1e",
   "type": "payout.completed"
@@ -2817,7 +2902,7 @@ A delivery with a wrong signature. The answer never says which part was wrong:
 
 ```http
 POST /v1/webhooks/simbank
-X-Signature: t=1791377191,v1=<hex digest>
+X-Signature: t=1791384945,v1=<hex digest>
 
 {
   "created_at": "2026-01-15T12:00:00Z",
@@ -2832,7 +2917,7 @@ HTTP 401
 
 {
   "code": "invalid_signature",
-  "request_id": "01a11666-b416-702b-bd22-b9d6e510bfe5",
+  "request_id": "01a116dd-050a-779e-b3bf-600997041694",
   "status": 401,
   "title": "Invalid signature",
   "type": "https://corridor.example/problems/invalid-signature"
@@ -2852,7 +2937,7 @@ Every endpoint under `/v1/admin` needs the session of a user whose role is `admi
 other credential gets `403`:
 
 ```http
-PUT /v1/admin/users/01a11666-5390-7735-ac92-2e5f3ca67233/kyc-tier
+PUT /v1/admin/users/01a116dc-a089-7087-b906-78afceb61920/kyc-tier
 Authorization: Bearer <access token>
 
 {
@@ -2866,7 +2951,7 @@ HTTP 403
 {
   "code": "permission_denied",
   "detail": "This action needs an administrator.",
-  "request_id": "01a11666-a648-7442-a4db-5be5afa8f6af",
+  "request_id": "01a116dc-f6de-72a4-98f3-db9996970e3d",
   "status": 403,
   "title": "Permission denied",
   "type": "https://corridor.example/problems/permission-denied"
@@ -2874,7 +2959,12 @@ HTTP 403
 ```
 
 What an administrator reads or changes through these endpoints is written to the audit log
-in the same transaction.
+in the same transaction, and the log itself is read with
+[`GET /v1/admin/audit`](#get-v1adminaudit).
+
+The API makes an administrator only at the word of another one. The first is made from a
+shell, with `corridor users make-admin --email <address> --yes`; see the
+[runbook](runbook.md#tools).
 
 ### `PUT /v1/admin/users/{user_id}/kyc-tier`
 
@@ -2882,7 +2972,7 @@ Sets a user's KYC tier (0, 1 or 2). The tier decides which default limits apply.
 the user's identity happens outside Corridor; this records its result.
 
 ```http
-PUT /v1/admin/users/01a11666-5390-7735-ac92-2e5f3ca67233/kyc-tier
+PUT /v1/admin/users/01a116dc-a089-7087-b906-78afceb61920/kyc-tier
 Authorization: Bearer <access token>
 
 {
@@ -2894,11 +2984,11 @@ Authorization: Bearer <access token>
 HTTP 200
 
 {
-  "created_at": "2026-10-07T12:46:07.248671Z",
+  "created_at": "2026-10-07T14:55:20.201136Z",
   "display_name": "Bruno Costa",
-  "email": "bruno_829dd0@example.com",
-  "handle": "bruno_829dd0",
-  "id": "01a11666-5390-7735-ac92-2e5f3ca67233",
+  "email": "bruno_6b21b0@example.com",
+  "handle": "bruno_6b21b0",
+  "id": "01a116dc-a089-7087-b906-78afceb61920",
   "kyc_tier": 1,
   "role": "user",
   "status": "active"
@@ -2909,16 +2999,172 @@ HTTP 200
 
 Makes a user an administrator, or stops them being one. The role is `user` or `admin`. The
 user's access tokens stop working at once and the next refresh issues a token with the new
-role. An administrator cannot change their own role. The request and response schemas are
-in [openapi.json](openapi.json).
+role. No idempotency key: giving a user the role they have changes nothing.
+
+```http
+POST /v1/admin/users/01a116dd-0b19-74cb-b642-6d6ea4eb4875/role
+Authorization: Bearer <access token>
+
+{
+  "role": "admin"
+}
+```
+
+```http
+HTTP 200
+
+{
+  "created_at": "2026-10-07T14:55:47.481681Z",
+  "display_name": "Dora Reis",
+  "email": "dora_6b21b0@example.com",
+  "handle": "dora_6b21b0",
+  "id": "01a116dd-0b19-74cb-b642-6d6ea4eb4875",
+  "kyc_tier": 0,
+  "role": "admin",
+  "status": "active"
+}
+```
+
+An administrator cannot change their own role (`409 own_account`). The same refusal
+answers an administrator who tries to restrict or close their own account, or to lift
+their own restriction:
+
+```http
+HTTP 409
+
+{
+  "code": "own_account",
+  "detail": "An administrator's own role and account are changed by another.",
+  "request_id": "01a116dd-0be6-71c7-86f9-a4a282fdc35f",
+  "status": 409,
+  "title": "Not on your own account",
+  "type": "https://corridor.example/problems/own-account"
+}
+```
+
+### `POST /v1/admin/users/{user_id}/restrict`
+
+Restricts a user: they can still log in, read and be paid, and cannot transfer, convert or
+withdraw until the restriction is lifted. `reason` is required, 1 to 500 characters, and is
+kept on the account and in the audit log. The restriction waits for a movement of the
+user's that is under way and applies to every one after it. Restricting a restricted user
+replaces the reason. A closed account is refused with `409 conflict`, a user who does not
+exist with `404 user_not_found`.
+
+```http
+POST /v1/admin/users/01a116dc-a089-7087-b906-78afceb61920/restrict
+Authorization: Bearer <access token>
+
+{
+  "reason": "Chargeback under investigation"
+}
+```
+
+```http
+HTTP 200
+
+{
+  "created_at": "2026-10-07T14:55:20.201136Z",
+  "display_name": "Bruno Costa",
+  "email": "bruno_6b21b0@example.com",
+  "handle": "bruno_6b21b0",
+  "id": "01a116dc-a089-7087-b906-78afceb61920",
+  "kyc_tier": 1,
+  "role": "user",
+  "status": "restricted"
+}
+```
+
+What the user then gets for a transfer. The answer does not say why:
+
+```http
+HTTP 403
+
+{
+  "code": "user_restricted",
+  "detail": "This account cannot send money at the moment.",
+  "request_id": "01a116dd-0c06-7322-93d1-d6fea0f9cede",
+  "status": 403,
+  "title": "Account restricted",
+  "type": "https://corridor.example/problems/user-restricted"
+}
+```
+
+Corridor also restricts a user by itself, when a bank takes back a deposit the user has
+already spent part of.
+
+### `POST /v1/admin/users/{user_id}/lift-restriction`
+
+Makes a restricted user active again. `reason` is required and is written to the audit
+log. Lifting the restriction of a user who is not restricted changes nothing. A closed
+account is refused with `409 conflict`.
+
+```http
+POST /v1/admin/users/01a116dc-a089-7087-b906-78afceb61920/lift-restriction
+Authorization: Bearer <access token>
+
+{
+  "reason": "Investigation closed, nothing owed"
+}
+```
+
+```http
+HTTP 200
+
+{
+  "created_at": "2026-10-07T14:55:20.201136Z",
+  "display_name": "Bruno Costa",
+  "email": "bruno_6b21b0@example.com",
+  "handle": "bruno_6b21b0",
+  "id": "01a116dc-a089-7087-b906-78afceb61920",
+  "kyc_tier": 1,
+  "role": "user",
+  "status": "active"
+}
+```
 
 ### `POST /v1/admin/users/{user_id}/close`
 
 Closes an account for good. Every session is revoked and every access token stops working.
 A closed account cannot log in, cannot be paid, and is answered as "not found" to other
-users. Closing is refused with `409` while the user has a balance that is not zero or
-money on hold, and an administrator cannot close their own account. The request and
-response schemas are in [openapi.json](openapi.json).
+users. Closing a closed account changes nothing. There is no request body.
+
+```http
+POST /v1/admin/users/01a116dd-0b19-74cb-b642-6d6ea4eb4875/close
+Authorization: Bearer <access token>
+```
+
+```http
+HTTP 200
+
+{
+  "created_at": "2026-10-07T14:55:47.481681Z",
+  "display_name": "Dora Reis",
+  "email": "dora_6b21b0@example.com",
+  "handle": "dora_6b21b0",
+  "id": "01a116dd-0b19-74cb-b642-6d6ea4eb4875",
+  "kyc_tier": 0,
+  "role": "user",
+  "status": "closed"
+}
+```
+
+Closing is refused while the user has a balance that is not zero or money on hold
+(`409 account_holds_funds`), and an administrator cannot close their own account
+(`409 own_account`):
+
+```http
+HTTP 409
+
+{
+  "code": "account_holds_funds",
+  "detail": "An account is closed once nothing is in it and nothing is on hold.",
+  "request_id": "01a116dd-0c1d-7791-9ea2-4a0329034f69",
+  "status": 409,
+  "title": "Account holds funds",
+  "type": "https://corridor.example/problems/account-holds-funds"
+}
+```
 
 ### `PUT /v1/admin/risk/limits`
 
@@ -2931,9 +3177,6 @@ The most specific rule wins: a user's rule over the tier's, and a rule for one k
 rule for every kind. The seeded tier limits are 1,000 per transaction and 2,500 per 24
 hours for tier 0; 10,000 and 25,000 for tier 1; 100,000 and 250,000 for tier 2.
 
-An agent's limits are not set here. `scope: "agent"` is refused with `409`: the owner's
-policy is the only thing that writes them. A `user_id` that names no user is refused.
-
 ```http
 PUT /v1/admin/risk/limits
 Authorization: Bearer <access token>
@@ -2943,7 +3186,7 @@ Authorization: Bearer <access token>
   "kind": "withdrawal",
   "per_transaction_usd": "200.00",
   "scope": "user",
-  "user_id": "01a11666-551a-76ea-8119-02b7371d8737"
+  "user_id": "01a116dc-a1c5-7063-b579-8e23c5bf3d2e"
 }
 ```
 
@@ -2953,12 +3196,55 @@ HTTP 200
 {
   "agent_id": null,
   "daily_usd": "500.00",
-  "id": "01a11666-a688-749a-bceb-5d36c04c204e",
+  "id": "01a116dc-f712-734d-a276-bbffb9e7921f",
   "kind": "withdrawal",
   "per_transaction_usd": "200.00",
   "scope": "user",
   "tier": null,
-  "user_id": "01a11666-551a-76ea-8119-02b7371d8737"
+  "user_id": "01a116dc-a1c5-7063-b579-8e23c5bf3d2e"
+}
+```
+
+An agent's limits are not set here. `scope: "agent"` is refused with
+`409 agent_limit_not_settable`: the owner's policy is the only thing that writes them.
+
+```http
+PUT /v1/admin/risk/limits
+Authorization: Bearer <access token>
+
+{
+  "agent_id": "052bea56-0c46-4f0b-9837-c65b571ca6ea",
+  "daily_usd": "10.00",
+  "per_transaction_usd": "10.00",
+  "scope": "agent"
+}
+```
+
+```http
+HTTP 409
+
+{
+  "code": "agent_limit_not_settable",
+  "detail": "An agent's limits are set by its owner's policy, and only there.",
+  "request_id": "01a116dc-f719-755a-aa71-9dbda4a205b0",
+  "status": 409,
+  "title": "Agent limits are set by the owner",
+  "type": "https://corridor.example/problems/agent-limit-not-settable"
+}
+```
+
+A `user_id` that names no user is refused with `404 user_not_found`:
+
+```http
+HTTP 404
+
+{
+  "code": "user_not_found",
+  "detail": "There is no such user.",
+  "request_id": "01a116dc-f71f-719f-b8b1-c9475c61e22c",
+  "status": 404,
+  "title": "User not found",
+  "type": "https://corridor.example/problems/user-not-found"
 }
 ```
 
@@ -2979,12 +3265,12 @@ HTTP 200
     {
       "agent_id": null,
       "daily_usd": "500.00",
-      "id": "01a11666-a688-749a-bceb-5d36c04c204e",
+      "id": "01a116dc-f712-734d-a276-bbffb9e7921f",
       "kind": "withdrawal",
       "per_transaction_usd": "200.00",
       "scope": "user",
       "tier": null,
-      "user_id": "01a11666-551a-76ea-8119-02b7371d8737"
+      "user_id": "01a116dc-a1c5-7063-b579-8e23c5bf3d2e"
     },
     {
       "agent_id": null,
@@ -3027,8 +3313,8 @@ Authorization: Bearer <access token>
 HTTP 201
 
 {
-  "created_at": "2026-10-07T12:46:28.521093Z",
-  "id": "01a11666-a6a9-71c1-b81e-30351d8e1512",
+  "created_at": "2026-10-07T14:55:42.389188Z",
+  "id": "01a116dc-f735-77ed-b01c-f4f64fd5e35e",
   "kind": "name",
   "note": "Ask compliance first",
   "outcome": "review",
@@ -3049,16 +3335,16 @@ HTTP 200
 {
   "items": [
     {
-      "created_at": "2026-10-07T12:46:28.537530Z",
-      "id": "01a11666-a6b9-76f7-8092-af893882e67b",
+      "created_at": "2026-10-07T14:55:42.403829Z",
+      "id": "01a116dc-f743-7785-bdae-d64fb968cc7a",
       "kind": "name",
       "note": null,
       "outcome": "deny",
       "value": "blocked person"
     },
     {
-      "created_at": "2026-10-07T12:46:28.521093Z",
-      "id": "01a11666-a6a9-71c1-b81e-30351d8e1512",
+      "created_at": "2026-10-07T14:55:42.389188Z",
+      "id": "01a116dc-f735-77ed-b01c-f4f64fd5e35e",
       "kind": "name",
       "note": "Ask compliance first",
       "outcome": "review",
@@ -3085,14 +3371,14 @@ HTTP 200
 {
   "items": [
     {
-      "created_at": "2026-10-07T12:46:28.815326Z",
-      "id": "01a11666-a7cf-77e0-ad85-dff396d34a94",
+      "created_at": "2026-10-07T14:55:42.536593Z",
+      "id": "01a116dc-f7c8-73a0-a9b5-8ceb3a4d6672",
       "resolved_at": null,
       "screening": "review",
       "status": "open",
-      "subject_id": "01a11666-a7c5-707f-90c1-ac0f176ed058",
+      "subject_id": "01a116dc-f7b8-7023-849a-c1002436e470",
       "subject_type": "deposit",
-      "user_id": "01a11666-551a-76ea-8119-02b7371d8737"
+      "user_id": "01a116dc-a1c5-7063-b579-8e23c5bf3d2e"
     }
   ],
   "next_cursor": null
@@ -3105,11 +3391,13 @@ Clears a review, and its movement goes ahead. A withdrawal is sent to the provid
 deposit is moved from suspense to the wallet of the user it arrived for.
 
 A deposit that arrived at nobody's account has no user on its review and cannot be cleared
-(`409 review_has_no_user`); release it with an adjustment. Clearing is refused with `409`
-when the user's account is closed. A restricted account can still be credited.
+(`409 review_has_no_user`); release it with an adjustment. Clearing is refused with
+`409 deposit_owner_closed` when the user's account is closed, and with
+`409 deposit_not_in_suspense` when the deposit has left suspense some other way; the review
+stays open in both cases. A restricted account can still be credited.
 
 ```http
-POST /v1/admin/reviews/01a11666-a7cf-77e0-ad85-dff396d34a94/clear
+POST /v1/admin/reviews/01a116dc-f7c8-73a0-a9b5-8ceb3a4d6672/clear
 Authorization: Bearer <access token>
 ```
 
@@ -3117,21 +3405,21 @@ Authorization: Bearer <access token>
 HTTP 200
 
 {
-  "created_at": "2026-10-07T12:46:28.815326Z",
-  "id": "01a11666-a7cf-77e0-ad85-dff396d34a94",
-  "resolved_at": "2026-10-07T12:46:28.858323Z",
+  "created_at": "2026-10-07T14:55:42.536593Z",
+  "id": "01a116dc-f7c8-73a0-a9b5-8ceb3a4d6672",
+  "resolved_at": "2026-10-07T14:55:42.728977Z",
   "screening": "review",
   "status": "cleared",
-  "subject_id": "01a11666-a7c5-707f-90c1-ac0f176ed058",
+  "subject_id": "01a116dc-f7b8-7023-849a-c1002436e470",
   "subject_type": "deposit",
-  "user_id": "01a11666-551a-76ea-8119-02b7371d8737"
+  "user_id": "01a116dc-a1c5-7063-b579-8e23c5bf3d2e"
 }
 ```
 
 A review is decided once:
 
 ```http
-POST /v1/admin/reviews/01a11666-a7cf-77e0-ad85-dff396d34a94/clear
+POST /v1/admin/reviews/01a116dc-f7c8-73a0-a9b5-8ceb3a4d6672/clear
 Authorization: Bearer <access token>
 ```
 
@@ -3141,7 +3429,7 @@ HTTP 409
 {
   "code": "review_already_resolved",
   "detail": "This review has already been resolved.",
-  "request_id": "01a11666-a816-73ab-bc4f-d0031f180f02",
+  "request_id": "01a116dc-f89e-71df-8fde-f688395513af",
   "status": 409,
   "title": "Review already resolved",
   "type": "https://corridor.example/problems/review-already-resolved"
@@ -3155,7 +3443,7 @@ Rejects a review. A withdrawal that is still held is released back to its user a
 an adjustment.
 
 ```http
-POST /v1/admin/reviews/01a11666-aea9-75dc-8bcd-1fd6fca11051/reject
+POST /v1/admin/reviews/01a116dc-fef2-722c-8bbc-9e3b0d524b3f/reject
 Authorization: Bearer <access token>
 ```
 
@@ -3163,14 +3451,14 @@ Authorization: Bearer <access token>
 HTTP 200
 
 {
-  "created_at": "2026-10-07T12:46:30.569487Z",
-  "id": "01a11666-aea9-75dc-8bcd-1fd6fca11051",
-  "resolved_at": "2026-10-07T12:46:31.595246Z",
+  "created_at": "2026-10-07T14:55:44.370886Z",
+  "id": "01a116dc-fef2-722c-8bbc-9e3b0d524b3f",
+  "resolved_at": "2026-10-07T14:55:45.395359Z",
   "screening": "review",
   "status": "rejected",
-  "subject_id": "01a11666-ae9e-762a-8831-1e248522e770",
+  "subject_id": "01a116dc-fee4-712b-aa34-7a6527db27fc",
   "subject_type": "withdrawal",
-  "user_id": "01a11666-551a-76ea-8119-02b7371d8737"
+  "user_id": "01a116dc-a1c5-7063-b579-8e23c5bf3d2e"
 }
 ```
 
@@ -3182,15 +3470,15 @@ HTTP 200
 {
   "amount": "30.00",
   "asset": "USD",
-  "beneficiary_id": "01a11666-a864-7205-8143-c49204859c33",
-  "created_at": "2026-10-07T12:46:30.568689Z",
+  "beneficiary_id": "01a116dc-f8c2-7630-b0f0-4fd976106616",
+  "created_at": "2026-10-07T14:55:44.369648Z",
   "failure_reason": "review_rejected",
   "fee": "0.25",
-  "id": "01a11666-ae9e-762a-8831-1e248522e770",
+  "id": "01a116dc-fee4-712b-aa34-7a6527db27fc",
   "kind": "bank",
   "status": "failed",
   "to_address": null,
-  "updated_at": "2026-10-07T12:46:31.608274Z"
+  "updated_at": "2026-10-07T14:55:45.404634Z"
 }
 ```
 
@@ -3213,25 +3501,25 @@ HTTP 200
     {
       "breaks_found": 1,
       "breaks_opened": 1,
-      "finished_at": "2026-10-07T12:46:34.741497Z",
-      "id": "01a11666-bef3-77b9-847a-947f20c20fce",
-      "started_at": "2026-10-07T12:46:34.592947Z",
+      "finished_at": "2026-10-07T14:55:47.112986Z",
+      "id": "01a116dd-09a7-7551-853f-87e2d94795dc",
+      "started_at": "2026-10-07T14:55:47.075240Z",
       "status": "completed",
-      "window_end": "2026-10-07T12:46:34.592939Z",
-      "window_start": "2026-10-07T11:46:34.592939Z"
+      "window_end": "2026-10-07T14:55:47.073530Z",
+      "window_start": "2026-10-07T13:55:47.073530Z"
     },
     {
-      "breaks_found": 1,
-      "breaks_opened": 1,
-      "finished_at": "2026-10-07T12:46:12.138384Z",
-      "id": "01a11666-66a7-70f5-81b0-0fcb61b3430f",
-      "started_at": "2026-10-07T12:46:12.068066Z",
+      "breaks_found": 0,
+      "breaks_opened": 0,
+      "finished_at": "2026-10-07T14:55:46.046406Z",
+      "id": "01a116dd-057e-7675-8fa8-ec6d35ab73a1",
+      "started_at": "2026-10-07T14:55:46.001804Z",
       "status": "completed",
-      "window_end": "2026-10-07T12:46:12.068060Z",
-      "window_start": "2026-10-07T11:46:12.068060Z"
+      "window_end": "2026-10-07T14:55:45.999755Z",
+      "window_start": "2026-10-07T13:55:45.999755Z"
     }
   ],
-  "next_cursor": null
+  "next_cursor": "eyJrIjoicmVjb25f…"
 }
 ```
 
@@ -3259,31 +3547,31 @@ HTTP 200
     {
       "actual": "909.75",
       "asset": "USD",
-      "created_at": "2026-10-07T12:46:34.739795Z",
+      "created_at": "2026-10-07T14:55:47.111439Z",
       "expected": "894.75",
-      "id": "01a11666-bef3-77b9-847a-9480ee4ed793",
+      "id": "01a116dd-09a7-7551-853f-87e387438ed6",
       "kind": "settlement_balance",
       "note": null,
       "provider": "simbank",
       "provider_ref": "USD",
       "resolved_at": null,
       "resolved_by": null,
-      "run_id": "01a11666-bef3-77b9-847a-947f20c20fce",
+      "run_id": "01a116dd-09a7-7551-853f-87e2d94795dc",
       "status": "open"
     },
     {
       "actual": "75.00",
       "asset": "USD",
-      "created_at": "2026-10-07T12:46:12.135383Z",
+      "created_at": "2026-10-07T14:55:27.129980Z",
       "expected": null,
-      "id": "01a11666-66a7-70f5-81b0-0fcc0ef9f007",
+      "id": "01a116dc-bb99-74ba-9b37-096c5e469508",
       "kind": "missing_deposit",
       "note": "The deposit is on the books.",
       "provider": "simbank",
       "provider_ref": "dep_4d6aa163d94e",
-      "resolved_at": "2026-10-07T12:46:12.176647Z",
+      "resolved_at": "2026-10-07T14:55:27.181464Z",
       "resolved_by": "system",
-      "run_id": "01a11666-66a7-70f5-81b0-0fcb61b3430f",
+      "run_id": "01a116dc-bb99-74ba-9b37-096bcdd6176f",
       "status": "resolved"
     }
   ],
@@ -3297,7 +3585,7 @@ Closes an open break with a note of 1 to 500 characters that says why it is sett
 Resolving a break changes no money; it records a decision.
 
 ```http
-POST /v1/admin/recon/breaks/01a11666-bef3-77b9-847a-9480ee4ed793/resolve
+POST /v1/admin/recon/breaks/01a116dd-09a7-7551-853f-87e387438ed6/resolve
 Authorization: Bearer <access token>
 
 {
@@ -3311,16 +3599,16 @@ HTTP 200
 {
   "actual": "909.75",
   "asset": "USD",
-  "created_at": "2026-10-07T12:46:34.739795Z",
+  "created_at": "2026-10-07T14:55:47.111439Z",
   "expected": "894.75",
-  "id": "01a11666-bef3-77b9-847a-9480ee4ed793",
+  "id": "01a116dd-09a7-7551-853f-87e387438ed6",
   "kind": "settlement_balance",
   "note": "The 15.00 USD was sent back by the bank on request; statement to follow.",
   "provider": "simbank",
   "provider_ref": "USD",
-  "resolved_at": "2026-10-07T12:46:34.945485Z",
-  "resolved_by": "01a11666-56e9-7735-83b0-8edadc81b20a",
-  "run_id": "01a11666-bef3-77b9-847a-947f20c20fce",
+  "resolved_at": "2026-10-07T14:55:47.269306Z",
+  "resolved_by": "01a116dc-a2fc-75c4-a9c3-dcd296b6c35e",
+  "run_id": "01a116dd-09a7-7551-853f-87e2d94795dc",
   "status": "resolved"
 }
 ```
@@ -3331,7 +3619,7 @@ HTTP 409
 {
   "code": "recon_break_not_open",
   "detail": "This break has already been resolved.",
-  "request_id": "01a11666-bfc6-7638-b543-2952c0a1d3e1",
+  "request_id": "01a116dd-0a4a-76e0-a70e-888f55ae054f",
   "status": 409,
   "title": "Reconciliation break is not open",
   "type": "https://corridor.example/problems/recon-break-not-open"
@@ -3355,9 +3643,9 @@ HTTP 200
   "items": [
     {
       "attempts": 1,
-      "created_at": "2026-10-07T12:46:34.960375Z",
-      "finished_at": "2026-10-07T12:46:34.969742Z",
-      "id": "01a11666-bfcb-72d3-bfd3-69ff826b9eaf",
+      "created_at": "2026-10-07T14:55:47.284887Z",
+      "finished_at": "2026-10-07T14:55:47.294428Z",
+      "id": "01a116dd-0a50-749a-a484-86b7cb1b8ba6",
       "last_error": "no handler for topic docs.unhandled_example",
       "payload": {
         "note": "no handler is registered for this topic"
@@ -3376,7 +3664,7 @@ Gives a dead event a full set of attempts again, due at once. The worker picks i
 next poll, within 5 seconds by default.
 
 ```http
-POST /v1/admin/outbox/dead/01a11666-bfcb-72d3-bfd3-69ff826b9eaf/requeue
+POST /v1/admin/outbox/dead/01a116dd-0a50-749a-a484-86b7cb1b8ba6/requeue
 Authorization: Bearer <access token>
 ```
 
@@ -3385,9 +3673,9 @@ HTTP 200
 
 {
   "attempts": 0,
-  "created_at": "2026-10-07T12:46:34.960375Z",
+  "created_at": "2026-10-07T14:55:47.284887Z",
   "finished_at": null,
-  "id": "01a11666-bfcb-72d3-bfd3-69ff826b9eaf",
+  "id": "01a116dd-0a50-749a-a484-86b7cb1b8ba6",
   "last_error": "no handler for topic docs.unhandled_example",
   "payload": {
     "note": "no handler is registered for this topic"
@@ -3405,7 +3693,7 @@ HTTP 404
 {
   "code": "dead_letter_not_found",
   "detail": "There is no such dead event.",
-  "request_id": "01a11666-c0fe-7553-bf73-5666d83c8f3e",
+  "request_id": "01a116dd-0a7d-76b2-9584-6940f7e02c53",
   "status": 404,
   "title": "Dead letter not found",
   "type": "https://corridor.example/problems/dead-letter-not-found"
@@ -3421,22 +3709,24 @@ until a different administrator approves it.
 - `legs` is 2 to 50 postings. Each names a ledger account by id, the account's asset, a
   direction and an amount. An account appears once, and debits must equal credits in every
   asset. A request that does not balance is refused with `422 invalid_adjustment`.
+- No leg may debit a suspense account. Money leaves suspense only as the deposit it
+  arrived as, through one of the two endpoints below.
 
 ```http
 POST /v1/admin/adjustments
 Authorization: Bearer <access token>
-Idempotency-Key: docs-0e54d596-3c11-4b76-acec-08541522e37c
+Idempotency-Key: docs-0731317f-26bb-4498-9432-50341adda1dd
 
 {
   "legs": [
     {
-      "account_id": "01a11666-a7c7-7701-80e6-3b55103d361c",
+      "account_id": "01a116dc-bbab-75cb-8215-7106971a3afe",
       "amount": "1.00",
       "asset": "USD",
       "direction": "debit"
     },
     {
-      "account_id": "01a11666-5533-7515-971d-3204f9f2a6cf",
+      "account_id": "01a116dc-a1d4-70b0-aa4a-7485bae36ca6",
       "amount": "1.00",
       "asset": "USD",
       "direction": "credit"
@@ -3451,53 +3741,112 @@ HTTP 201
 
 {
   "approved_by": null,
-  "created_at": "2026-10-07T12:46:34.069499Z",
+  "created_at": "2026-10-07T14:55:46.369649Z",
   "decided_at": null,
+  "deposit_id": null,
   "entry_id": null,
-  "id": "01a11666-bc54-7499-b9db-b62966e4bc92",
+  "id": "01a116dd-06be-74b0-9674-636a4140d3c4",
+  "kind": "manual",
   "legs": [
     {
-      "account_id": "01a11666-a7c7-7701-80e6-3b55103d361c",
+      "account_id": "01a116dc-bbab-75cb-8215-7106971a3afe",
       "amount": "1.00",
       "asset": "USD",
       "direction": "debit"
     },
     {
-      "account_id": "01a11666-5533-7515-971d-3204f9f2a6cf",
+      "account_id": "01a116dc-a1d4-70b0-aa4a-7485bae36ca6",
       "amount": "1.00",
       "asset": "USD",
       "direction": "credit"
     }
   ],
   "reason": "Goodwill credit, to be rejected in this example",
-  "requested_by": "01a11666-56e9-7735-83b0-8edadc81b20a",
-  "status": "pending"
+  "requested_by": "01a116dc-a2fc-75c4-a9c3-dcd296b6c35e",
+  "status": "pending",
+  "user_id": null
+}
+```
+
+A debit of suspense written by hand:
+
+```http
+HTTP 422
+
+{
+  "code": "invalid_adjustment",
+  "detail": "Money leaves suspense by releasing or returning the deposit it arrived as.",
+  "field": "legs",
+  "request_id": "01a116dd-06aa-720c-8131-9d99b8001206",
+  "status": 422,
+  "title": "Invalid adjustment",
+  "type": "https://corridor.example/problems/invalid-adjustment"
+}
+```
+
+### `GET /v1/admin/deposits/suspense`
+
+The deposits that are in suspense now, newest first: money that is on the books and is
+nobody's. `received_at` is when Corridor recorded the deposit. `review_id` is the review
+screening opened on it, whether that review is open or was rejected, and `null` for a
+deposit that is in suspense because it arrived at an account or address Corridor never
+issued. The `id` is what the two endpoints below take as `deposit_id`. Paged like every
+list; each request is audited once.
+
+```http
+GET /v1/admin/deposits/suspense
+Authorization: Bearer <access token>
+```
+
+```http
+HTTP 200
+
+{
+  "items": [
+    {
+      "amount": "15.00",
+      "asset": "USD",
+      "id": "01a116dd-0596-7104-9866-cb0353e2282a",
+      "provider": "simbank",
+      "received_at": "2026-10-07T14:55:46.070214Z",
+      "review_id": null
+    },
+    {
+      "amount": "60.00",
+      "asset": "USD",
+      "id": "01a116dd-057d-7468-9f15-19687e193b8f",
+      "provider": "simbank",
+      "received_at": "2026-10-07T14:55:46.045549Z",
+      "review_id": null
+    }
+  ],
+  "next_cursor": null
 }
 ```
 
 ### `POST /v1/admin/adjustments/suspense-release`
 
 Asks for a deposit in suspense to be credited to a user. Needs an `Idempotency-Key`. The
-request names the deposit, and the legs are worked out by Corridor: a debit of the suspense
-account and a credit of the user's available balance.
+body is `reason`, `deposit_id` and `user_id`, and nothing else: the asset, the amount and
+the legs are the deposit's own, worked out by Corridor as a debit of the suspense account
+and a credit of the user's available balance. The response says so in `kind`,
+`deposit_id` and `user_id`.
 
-When the adjustment is approved, the deposit's row is locked and must still be in
-suspense. The entry is posted and the deposit becomes `completed` and the user's, in one
-transaction. A deposit that was already released, returned or taken back by its bank is
-refused at approval, so the same money cannot be paid out twice. Release to a closed
-account is refused with `409`.
+The deposit must be in suspense when the adjustment is asked for, and again when it is
+approved: its row is locked then and its status looked at. The entry is posted and the
+deposit becomes `completed` and the user's, in one transaction. A deposit that was
+released, returned or taken back by its bank in the meantime is refused at approval, so
+the same money cannot be paid out twice; the adjustment stays `pending`, to be rejected.
 
 ```http
 POST /v1/admin/adjustments/suspense-release
 Authorization: Bearer <access token>
-Idempotency-Key: docs-f94e02d9-73a5-4e36-81f1-cc43d6e83e37
+Idempotency-Key: docs-e5b2cc6d-8dfb-4df0-a050-b12de1d27427
 
 {
-  "amount": "60.00",
-  "asset": "USD",
+  "deposit_id": "01a116dd-057d-7468-9f15-19687e193b8f",
   "reason": "Sender confirmed the payee by phone",
-  "user_id": "01a11666-551a-76ea-8119-02b7371d8737",
-  "deposit_id": "<id of the deposit in suspense>"
+  "user_id": "01a116dc-a1c5-7063-b579-8e23c5bf3d2e"
 }
 ```
 
@@ -3506,48 +3855,74 @@ HTTP 201
 
 {
   "approved_by": null,
-  "created_at": "2026-10-07T12:46:33.981664Z",
+  "created_at": "2026-10-07T14:55:46.236332Z",
   "decided_at": null,
+  "deposit_id": "01a116dd-057d-7468-9f15-19687e193b8f",
   "entry_id": null,
-  "id": "01a11666-bbf8-765e-be29-1a7ccc777771",
+  "id": "01a116dd-0636-70e5-be97-8b9691dfa284",
+  "kind": "suspense_release",
   "legs": [
     {
-      "account_id": "01a11666-a7c7-7701-80e6-3b55103d361c",
+      "account_id": "01a116dc-f7bb-7171-b26c-68371cba3213",
       "amount": "60.00",
       "asset": "USD",
       "direction": "debit"
     },
     {
-      "account_id": "01a11666-5533-7515-971d-3204f9f2a6cf",
+      "account_id": "01a116dc-a1d4-70b0-aa4a-7485bae36ca6",
       "amount": "60.00",
       "asset": "USD",
       "direction": "credit"
     }
   ],
   "reason": "Sender confirmed the payee by phone",
-  "requested_by": "01a11666-56e9-7735-83b0-8edadc81b20a",
-  "status": "pending"
+  "requested_by": "01a116dc-a2fc-75c4-a9c3-dcd296b6c35e",
+  "status": "pending",
+  "user_id": "01a116dc-a1c5-7063-b579-8e23c5bf3d2e"
+}
+```
+
+| Refusal | When |
+|---|---|
+| `404 deposit_not_found` | No such deposit |
+| `409 deposit_not_in_suspense` | The deposit is not in suspense, or is no longer. Asked for or approved |
+| `409 deposit_owner_closed` | The user's account is closed. Asked for or approved |
+| `404 user_not_found` | No such user |
+| `422 invalid_adjustment` | The reason is empty. One longer than 500 characters is `422 invalid_request` |
+
+The deposit above, asked for a second time after it was released:
+
+```http
+HTTP 409
+
+{
+  "code": "deposit_not_in_suspense",
+  "detail": "This deposit is no longer in suspense.",
+  "request_id": "01a116dd-069f-758b-ba6b-7abe2bf305c9",
+  "status": 409,
+  "title": "Deposit is not in suspense",
+  "type": "https://corridor.example/problems/deposit-not-in-suspense"
 }
 ```
 
 ### `POST /v1/admin/adjustments/suspense-return`
 
 Asks for a deposit in suspense to be taken off the books as sent back through the provider
-it arrived at. Needs an `Idempotency-Key`. Approval posts a debit of suspense and a credit
-of the provider's settlement account, and marks the deposit `returned`. Sending the money
-back is the operator's to do with the provider; until the provider's statement shows it,
+it arrived at. Needs an `Idempotency-Key`. The body is `reason` and `deposit_id`. Approval
+posts a debit of suspense and a credit of the provider's settlement account, and marks
+the deposit `returned`, under the same lock and the same status rule as a release, and
+with the same refusals except those about a user. Sending the money back is the
+operator's to do with the provider; until the provider's statement shows it,
 reconciliation reports a `settlement_balance` break.
 
 ```http
 POST /v1/admin/adjustments/suspense-return
 Authorization: Bearer <access token>
-Idempotency-Key: docs-c55c7b02-cfbc-4fe2-a70c-6f08e227e4e6
+Idempotency-Key: docs-9bbb2e32-7900-424a-b2c8-ce8dd7df2d57
 
 {
-  "amount": "15.00",
-  "asset": "USD",
-  "reason": "Sender unknown; returned through the bank",
-  "deposit_id": "<id of the deposit in suspense>"
+  "deposit_id": "01a116dd-0596-7104-9866-cb0353e2282a",
+  "reason": "Sender unknown; returned through the bank"
 }
 ```
 
@@ -3556,27 +3931,30 @@ HTTP 201
 
 {
   "approved_by": null,
-  "created_at": "2026-10-07T12:46:34.040192Z",
+  "created_at": "2026-10-07T14:55:46.301941Z",
   "decided_at": null,
+  "deposit_id": "01a116dd-0596-7104-9866-cb0353e2282a",
   "entry_id": null,
-  "id": "01a11666-bc31-7479-b3d4-ac2808f7ed2e",
+  "id": "01a116dd-0678-750c-ab11-8af32da52a88",
+  "kind": "suspense_return",
   "legs": [
     {
-      "account_id": "01a11666-a7c7-7701-80e6-3b55103d361c",
+      "account_id": "01a116dc-f7bb-7171-b26c-68371cba3213",
       "amount": "15.00",
       "asset": "USD",
       "direction": "debit"
     },
     {
-      "account_id": "01a11666-66b3-72d1-91a8-6ac5703208f8",
+      "account_id": "01a116dc-bbab-75cb-8215-7106971a3afe",
       "amount": "15.00",
       "asset": "USD",
       "direction": "credit"
     }
   ],
   "reason": "Sender unknown; returned through the bank",
-  "requested_by": "01a11666-56e9-7735-83b0-8edadc81b20a",
-  "status": "pending"
+  "requested_by": "01a116dc-a2fc-75c4-a9c3-dcd296b6c35e",
+  "status": "pending",
+  "user_id": null
 }
 ```
 
@@ -3586,9 +3964,9 @@ Approves a pending adjustment and posts its entry. Needs an `Idempotency-Key`. T
 must not be the requester:
 
 ```http
-POST /v1/admin/adjustments/01a11666-bbf8-765e-be29-1a7ccc777771/approve
+POST /v1/admin/adjustments/01a116dd-0636-70e5-be97-8b9691dfa284/approve
 Authorization: Bearer <access token>
-Idempotency-Key: docs-f86bd94a-d444-467a-89bf-88881a56d1cf
+Idempotency-Key: docs-8a13f07f-8e52-4444-ae74-4e05ac12f53f
 ```
 
 ```http
@@ -3597,7 +3975,7 @@ HTTP 403
 {
   "code": "self_approval",
   "detail": "An adjustment is approved by a different administrator.",
-  "request_id": "01a11666-bc05-7376-84a3-2429f3dee568",
+  "request_id": "01a116dd-0644-73bc-8339-57eb187abfc0",
   "status": 403,
   "title": "Self-approval is not allowed",
   "type": "https://corridor.example/problems/self-approval"
@@ -3605,43 +3983,48 @@ HTTP 403
 ```
 
 ```http
-POST /v1/admin/adjustments/01a11666-bbf8-765e-be29-1a7ccc777771/approve
+POST /v1/admin/adjustments/01a116dd-0636-70e5-be97-8b9691dfa284/approve
 Authorization: Bearer <access token>
-Idempotency-Key: docs-c084c355-c0ed-469a-b556-b74cccc34ba0
+Idempotency-Key: docs-953649f9-274d-4e41-9030-a19f4b787157
 ```
 
 ```http
 HTTP 200
 
 {
-  "approved_by": "01a11666-5868-7188-8b00-216a2267ed2d",
-  "created_at": "2026-10-07T12:46:33.981664Z",
-  "decided_at": "2026-10-07T12:46:34.018961Z",
-  "entry_id": "01a11666-bc20-756e-9338-786ca86df502",
-  "id": "01a11666-bbf8-765e-be29-1a7ccc777771",
+  "approved_by": "01a116dc-a435-73f1-8312-2520f5c8a4d8",
+  "created_at": "2026-10-07T14:55:46.236332Z",
+  "decided_at": "2026-10-07T14:55:46.281520Z",
+  "deposit_id": "01a116dd-057d-7468-9f15-19687e193b8f",
+  "entry_id": "01a116dd-0663-703d-92d7-a5aa7dbbfb81",
+  "id": "01a116dd-0636-70e5-be97-8b9691dfa284",
+  "kind": "suspense_release",
   "legs": [
     {
-      "account_id": "01a11666-a7c7-7701-80e6-3b55103d361c",
+      "account_id": "01a116dc-f7bb-7171-b26c-68371cba3213",
       "amount": "60.00",
       "asset": "USD",
       "direction": "debit"
     },
     {
-      "account_id": "01a11666-5533-7515-971d-3204f9f2a6cf",
+      "account_id": "01a116dc-a1d4-70b0-aa4a-7485bae36ca6",
       "amount": "60.00",
       "asset": "USD",
       "direction": "credit"
     }
   ],
   "reason": "Sender confirmed the payee by phone",
-  "requested_by": "01a11666-56e9-7735-83b0-8edadc81b20a",
-  "status": "approved"
+  "requested_by": "01a116dc-a2fc-75c4-a9c3-dcd296b6c35e",
+  "status": "approved",
+  "user_id": "01a116dc-a1c5-7063-b579-8e23c5bf3d2e"
 }
 ```
 
 Refusals: `403 self_approval`, `409 adjustment_not_pending`, `402 insufficient_funds` when
-a debited user balance no longer holds the amount, and `409 deposit_not_in_suspense` for a
-suspense adjustment whose deposit has left suspense.
+a debited user balance no longer holds the amount, `409 deposit_not_in_suspense` for a
+suspense adjustment whose deposit has left suspense, `409 deposit_owner_closed` for a
+release to an account that has been closed since, and `422 invalid_adjustment` for an
+adjustment written by hand that debits suspense. A refused adjustment stays `pending`.
 
 ### `POST /v1/admin/adjustments/{adjustment_id}/reject`
 
@@ -3649,9 +4032,9 @@ Turns a pending adjustment down. Needs an `Idempotency-Key`. Any administrator c
 including the requester.
 
 ```http
-POST /v1/admin/adjustments/01a11666-bc54-7499-b9db-b62966e4bc92/reject
+POST /v1/admin/adjustments/01a116dd-06be-74b0-9674-636a4140d3c4/reject
 Authorization: Bearer <access token>
-Idempotency-Key: docs-3be56e1d-5f38-495d-aedd-d35e5f1cd8ea
+Idempotency-Key: docs-9d6adb8f-fa0f-4856-b99e-9a4a66d98665
 ```
 
 ```http
@@ -3659,34 +4042,37 @@ HTTP 200
 
 {
   "approved_by": null,
-  "created_at": "2026-10-07T12:46:34.069499Z",
-  "decided_at": "2026-10-07T12:46:34.082501Z",
+  "created_at": "2026-10-07T14:55:46.369649Z",
+  "decided_at": "2026-10-07T14:55:46.383639Z",
+  "deposit_id": null,
   "entry_id": null,
-  "id": "01a11666-bc54-7499-b9db-b62966e4bc92",
+  "id": "01a116dd-06be-74b0-9674-636a4140d3c4",
+  "kind": "manual",
   "legs": [
     {
-      "account_id": "01a11666-a7c7-7701-80e6-3b55103d361c",
+      "account_id": "01a116dc-bbab-75cb-8215-7106971a3afe",
       "amount": "1.00",
       "asset": "USD",
       "direction": "debit"
     },
     {
-      "account_id": "01a11666-5533-7515-971d-3204f9f2a6cf",
+      "account_id": "01a116dc-a1d4-70b0-aa4a-7485bae36ca6",
       "amount": "1.00",
       "asset": "USD",
       "direction": "credit"
     }
   ],
   "reason": "Goodwill credit, to be rejected in this example",
-  "requested_by": "01a11666-56e9-7735-83b0-8edadc81b20a",
-  "status": "rejected"
+  "requested_by": "01a116dc-a2fc-75c4-a9c3-dcd296b6c35e",
+  "status": "rejected",
+  "user_id": null
 }
 ```
 
 ### `GET /v1/admin/adjustments/{adjustment_id}`
 
 ```http
-GET /v1/admin/adjustments/01a11666-bbf8-765e-be29-1a7ccc777771
+GET /v1/admin/adjustments/01a116dd-0636-70e5-be97-8b9691dfa284
 Authorization: Bearer <access token>
 ```
 
@@ -3694,28 +4080,31 @@ Authorization: Bearer <access token>
 HTTP 200
 
 {
-  "approved_by": "01a11666-5868-7188-8b00-216a2267ed2d",
-  "created_at": "2026-10-07T12:46:33.981664Z",
-  "decided_at": "2026-10-07T12:46:34.018961Z",
-  "entry_id": "01a11666-bc20-756e-9338-786ca86df502",
-  "id": "01a11666-bbf8-765e-be29-1a7ccc777771",
+  "approved_by": "01a116dc-a435-73f1-8312-2520f5c8a4d8",
+  "created_at": "2026-10-07T14:55:46.236332Z",
+  "decided_at": "2026-10-07T14:55:46.281520Z",
+  "deposit_id": "01a116dd-057d-7468-9f15-19687e193b8f",
+  "entry_id": "01a116dd-0663-703d-92d7-a5aa7dbbfb81",
+  "id": "01a116dd-0636-70e5-be97-8b9691dfa284",
+  "kind": "suspense_release",
   "legs": [
     {
-      "account_id": "01a11666-a7c7-7701-80e6-3b55103d361c",
+      "account_id": "01a116dc-f7bb-7171-b26c-68371cba3213",
       "amount": "60.00",
       "asset": "USD",
       "direction": "debit"
     },
     {
-      "account_id": "01a11666-5533-7515-971d-3204f9f2a6cf",
+      "account_id": "01a116dc-a1d4-70b0-aa4a-7485bae36ca6",
       "amount": "60.00",
       "asset": "USD",
       "direction": "credit"
     }
   ],
   "reason": "Sender confirmed the payee by phone",
-  "requested_by": "01a11666-56e9-7735-83b0-8edadc81b20a",
-  "status": "approved"
+  "requested_by": "01a116dc-a2fc-75c4-a9c3-dcd296b6c35e",
+  "status": "approved",
+  "user_id": "01a116dc-a1c5-7063-b579-8e23c5bf3d2e"
 }
 ```
 
@@ -3735,30 +4124,169 @@ HTTP 200
 {
   "items": [
     {
-      "approved_by": "01a11666-5868-7188-8b00-216a2267ed2d",
-      "created_at": "2026-10-07T12:46:34.040192Z",
-      "decided_at": "2026-10-07T12:46:34.057321Z",
-      "entry_id": "01a11666-bc46-76b3-ace2-dcf72501f4f2",
-      "id": "01a11666-bc31-7479-b3d4-ac2808f7ed2e",
+      "approved_by": "01a116dc-a435-73f1-8312-2520f5c8a4d8",
+      "created_at": "2026-10-07T14:55:46.301941Z",
+      "decided_at": "2026-10-07T14:55:46.328945Z",
+      "deposit_id": "01a116dd-0596-7104-9866-cb0353e2282a",
+      "entry_id": "01a116dd-0693-7157-89e1-9d3d0b286780",
+      "id": "01a116dd-0678-750c-ab11-8af32da52a88",
+      "kind": "suspense_return",
       "legs": [
         {
-          "account_id": "01a11666-a7c7-7701-80e6-3b55103d361c",
+          "account_id": "01a116dc-f7bb-7171-b26c-68371cba3213",
           "amount": "15.00",
           "asset": "USD",
           "direction": "debit"
         },
         {
-          "account_id": "01a11666-66b3-72d1-91a8-6ac5703208f8",
+          "account_id": "01a116dc-bbab-75cb-8215-7106971a3afe",
           "amount": "15.00",
           "asset": "USD",
           "direction": "credit"
         }
       ],
       "reason": "Sender unknown; returned through the bank",
-      "requested_by": "01a11666-56e9-7735-83b0-8edadc81b20a",
-      "status": "approved"
+      "requested_by": "01a116dc-a2fc-75c4-a9c3-dcd296b6c35e",
+      "status": "approved",
+      "user_id": null
     }
   ],
   "next_cursor": "eyJrIjoiYWRqdXN0…"
 }
 ```
+
+### `GET /v1/admin/audit`
+
+The audit log, newest first. Every filter is optional, and an event must match all that
+are given.
+
+| Query parameter | Matches |
+|---|---|
+| `actor` | The id of whoever acted: a user, an administrator or an agent by id, a provider or a job by name |
+| `action` | Actions that begin with this: `user.` for everything done to a user's standing, `adjustment.approved` for one action. Lower-case letters, digits, `_` and `.` |
+| `subject` | The id of what was acted on (`resource_id`), or of the user it was done for (`principal_id`) |
+| `since` | Events from this moment on. A timestamp with its offset, such as `2026-10-07T00:00:00Z` |
+| `until` | Events before this moment |
+| `cursor`, `limit` | As for every list |
+
+A cursor is a place in the whole log, so it can be sent back with other filters than it
+was issued with. A filter that cannot be applied (a timestamp with no offset, an `action`
+with other characters) is refused with `422 invalid_request`.
+
+Reading the log is itself audited: one `audit.listed` event for each request, with the
+filters and the number of events returned, and never one for each event. The event is
+written after the page is read, so a request does not see itself.
+
+What was done to users' standing, three at a time:
+
+```http
+GET /v1/admin/audit?action=user.&limit=3
+Authorization: Bearer <access token>
+```
+
+```http
+HTTP 200
+
+{
+  "items": [
+    {
+      "action": "user.closed",
+      "actor_id": "01a116dc-a2fc-75c4-a9c3-dcd296b6c35e",
+      "actor_type": "admin",
+      "details": {
+        "old_status": "active"
+      },
+      "id": "01a116dd-0c31-703c-9b7a-9bb7c6f6e644",
+      "occurred_at": "2026-10-07T14:55:47.761424Z",
+      "outcome": "success",
+      "principal_id": "01a116dd-0b19-74cb-b642-6d6ea4eb4875",
+      "request_id": "01a116dd-0c27-751c-a104-2a3f5c70e1cc",
+      "resource_id": "01a116dd-0b19-74cb-b642-6d6ea4eb4875",
+      "resource_type": "user"
+    },
+    {
+      "action": "user.restriction_lifted",
+      "actor_id": "01a116dc-a2fc-75c4-a9c3-dcd296b6c35e",
+      "actor_type": "admin",
+      "details": {
+        "reason": "Investigation closed, nothing owed"
+      },
+      "id": "01a116dd-0c19-7526-b025-caa992b12e06",
+      "occurred_at": "2026-10-07T14:55:47.737532Z",
+      "outcome": "success",
+      "principal_id": "01a116dc-a089-7087-b906-78afceb61920",
+      "request_id": "01a116dd-0c13-7793-9eff-7797898e113b",
+      "resource_id": "01a116dc-a089-7087-b906-78afceb61920",
+      "resource_type": "user"
+    },
+    {
+      "action": "user.restricted",
+      "actor_id": "01a116dc-a2fc-75c4-a9c3-dcd296b6c35e",
+      "actor_type": "admin",
+      "details": {
+        "reason": "Chargeback under investigation"
+      },
+      "id": "01a116dd-0c03-71b2-8ed4-7619028ce688",
+      "occurred_at": "2026-10-07T14:55:47.715610Z",
+      "outcome": "success",
+      "principal_id": "01a116dc-a089-7087-b906-78afceb61920",
+      "request_id": "01a116dd-0bf7-7094-a3b5-ef83f2cbb07e",
+      "resource_id": "01a116dc-a089-7087-b906-78afceb61920",
+      "resource_type": "user"
+    }
+  ],
+  "next_cursor": "eyJrIjoiYXVkaXRf…"
+}
+```
+
+Everything about one deposit, which arrived in suspense and was released:
+
+```http
+GET /v1/admin/audit?subject=01a116dd-057d-7468-9f15-19687e193b8f&since=2026-01-01T00%3A00%3A00Z
+Authorization: Bearer <access token>
+```
+
+```http
+HTTP 200
+
+{
+  "items": [
+    {
+      "action": "deposit.released",
+      "actor_id": "01a116dc-a435-73f1-8312-2520f5c8a4d8",
+      "actor_type": "admin",
+      "details": {
+        "amount": "6000",
+        "asset": "USD",
+        "entry_id": "01a116dd-0663-703d-92d7-a5aa7dbbfb81"
+      },
+      "id": "01a116dd-0667-726b-be28-027f8642b067",
+      "occurred_at": "2026-10-07T14:55:46.279420Z",
+      "outcome": "success",
+      "principal_id": "01a116dc-a1c5-7063-b579-8e23c5bf3d2e",
+      "request_id": "01a116dd-0653-7318-a214-7b98ec121c15",
+      "resource_id": "01a116dd-057d-7468-9f15-19687e193b8f",
+      "resource_type": "deposit"
+    },
+    {
+      "action": "deposit.suspended",
+      "actor_id": "simbank",
+      "actor_type": "provider",
+      "details": {
+        "amount": "6000",
+        "asset": "USD",
+        "entry_id": "01a116dd-0584-73dc-8bc9-54edbefdfab9"
+      },
+      "id": "01a116dd-0588-7308-ba5e-7a238f191f40",
+      "occurred_at": "2026-10-07T14:55:46.056139Z",
+      "outcome": "success",
+      "principal_id": null,
+      "request_id": "01a116dd-055f-7685-829a-0eba4a1a7732",
+      "resource_id": "01a116dd-057d-7468-9f15-19687e193b8f",
+      "resource_type": "deposit"
+    }
+  ],
+  "next_cursor": null
+}
+```
+

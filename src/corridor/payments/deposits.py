@@ -65,6 +65,8 @@ SUSPENSE_ENTRY_KIND: Final = "deposit_suspense"
 RELEASE_ENTRY_KIND: Final = "deposit_release"
 DEPOSIT_COMPLETED: Final = "deposit.completed"
 CURSOR_KIND: Final = "deposits"
+SUSPENSE_CURSOR_KIND: Final = "suspense_deposits"
+_ALL: Final = "all"
 
 # Where the money of a deposit is, on Corridor's side of the provider.
 ASSET_ACCOUNT: Final[Mapping[str, AccountKind]] = {
@@ -313,6 +315,31 @@ async def get_suspense_deposit(session: AsyncSession, deposit_id: uuid.UUID) -> 
     if row["status"] != "suspense":
         raise DepositNotInSuspense
     return as_deposit(row)
+
+
+async def list_suspense_deposits(
+    session: AsyncSession, *, cursor: str | None = None, limit: int = DEFAULT_LIMIT
+) -> Page[Deposit]:
+    """One page of the deposits that are in suspense now, newest first, for an operator.
+
+    It takes no principal because it is nobody's own list: the caller has already asked
+    who is reading. Pages are cut on the deposit id, as a user's own list is.
+    """
+    limit = clamp_limit(limit)
+    query = select(_deposits).where(_deposits.c.status == "suspense")
+    if cursor is not None:
+        query = query.where(_deposits.c.id < position_of(cursor, SUSPENSE_CURSOR_KIND, _ALL))
+    rows = await session.execute(query.order_by(_deposits.c.id.desc()).limit(limit + 1))
+    found = [as_deposit(row) for row in rows.mappings()]
+    shown = found[:limit]
+    return Page(
+        items=tuple(shown),
+        next_cursor=(
+            encode_cursor(kind=SUSPENSE_CURSOR_KIND, scope=_ALL, position=str(shown[-1].id))
+            if len(found) > limit
+            else None
+        ),
+    )
 
 
 async def lock_in_suspense(session: AsyncSession, deposit_id: uuid.UUID) -> RowMapping:
