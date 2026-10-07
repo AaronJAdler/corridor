@@ -238,6 +238,12 @@ protected_modules = ["corridor.fx.models"]
 allowed_importers = ["corridor.fx"]
 
 [[tool.importlinter.contracts]]
+name = "Risk tables are private to risk"
+type = "protected"
+protected_modules = ["corridor.risk.models"]
+allowed_importers = ["corridor.risk"]
+
+[[tool.importlinter.contracts]]
 name = "The simulator never imports production code"
 type = "forbidden"
 source_modules = ["corridor_sim"]

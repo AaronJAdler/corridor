@@ -93,6 +93,9 @@ async def request_withdrawal(
         if beneficiary.asset != asset:
             raise BeneficiaryAssetMismatch
         kind, provider = "bank", beneficiary.provider
+        # The account number went to the provider and was not kept: the holder is what
+        # there is to screen.
+        screened = await risk.screen_party(session, kind="name", value=beneficiary.holder_name)
     else:
         if to_address is None or beneficiary_id is not None:
             raise InvalidWithdrawalTarget(
@@ -101,6 +104,10 @@ async def request_withdrawal(
         if not is_valid_address(to_address):
             raise InvalidAddress
         kind, provider = "chain", CUSTODY_PROVIDER
+        screened = await risk.screen_party(session, kind="address", value=to_address)
+    if screened == "deny":
+        # Part of checking the target, and so before any lock and before anything is held.
+        raise risk.PartyDenied
 
     # Balance rows are per asset and limits are not: this is what makes one user's outgoing
     # movements queue, whatever assets they are in.
@@ -162,6 +169,16 @@ async def request_withdrawal(
         .returning(_withdrawals)
     )
     withdrawal = as_withdrawal(inserted.mappings().one())
+    if screened == "review":
+        # Held like any other, with the funds reserved. Whether it may be sent yet is
+        # what ``risk.is_cleared`` answers, and it says no until an operator has cleared it.
+        await risk.open_review(
+            session,
+            subject_type="withdrawal",
+            subject_id=withdrawal.id,
+            outcome="review",
+            user_id=user_id,
+        )
 
     await ask_to_be_sent(session, withdrawal.id)
     await audit.record(

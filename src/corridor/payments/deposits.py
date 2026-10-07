@@ -20,7 +20,7 @@ from sqlalchemy import RowMapping, Table, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from corridor import audit, identity, ledger, outbox, wallets
+from corridor import audit, identity, ledger, outbox, risk, wallets
 from corridor.identity import Principal, Scope
 from corridor.ledger import AccountKind, EntryDraft, credit, debit
 from corridor.payments import instructions
@@ -114,6 +114,7 @@ async def apply_bank_deposit_received(db: Database, data: Mapping[str, Any]) -> 
 
     async def work(session: AsyncSession) -> None:
         user_id = await _attribute(session, BANK_PROVIDER, event.virtual_account_id, event.asset)
+        screened = await risk.screen_party(session, kind="name", value=event.sender_name)
         deposit = await _insert(
             session,
             user_id=user_id,
@@ -128,7 +129,7 @@ async def apply_bank_deposit_received(db: Database, data: Mapping[str, Any]) -> 
         if deposit is None:
             check_same(await _lock(session, BANK_PROVIDER, event.deposit_id), event.asset, amount)
             return
-        await _credit(session, deposit, user_id)
+        await _credit_screened(session, deposit, user_id, screened)
 
     await db.run(work)
 
@@ -164,7 +165,8 @@ async def apply_chain_deposit_confirmed(db: Database, data: Mapping[str, Any]) -
             return
         # Decided now, from the address it arrived at, whatever the detection recorded.
         user_id = await _attribute(session, CUSTODY_PROVIDER, event.address_id, event.asset)
-        await _credit(session, deposit, user_id)
+        screened = await risk.screen_party(session, kind="address", value=event.from_address)
+        await _credit_screened(session, deposit, user_id, screened)
 
     await db.run(work)
 
@@ -427,6 +429,31 @@ async def set_status(session: AsyncSession, deposit_id: uuid.UUID, status: str) 
         update(_deposits)
         .where(_deposits.c.id == deposit_id)
         .values(status=status, updated_at=utcnow())
+    )
+
+
+async def _credit_screened(
+    session: AsyncSession,
+    deposit: RowMapping,
+    user_id: uuid.UUID | None,
+    screened: risk.ScreeningOutcome,
+) -> None:
+    """Credit a pending deposit to its user, unless screening stopped its sender.
+
+    Money from a sender on the deny list did arrive, so it is booked, but to suspense and
+    to nobody, exactly as a deposit that could not be attributed. The review is what
+    remembers whose it would have been, for the operator who releases or returns it.
+    """
+    if screened == "clear":
+        await _credit(session, deposit, user_id)
+        return
+    await _credit(session, deposit, None)
+    await risk.open_review(
+        session,
+        subject_type="deposit",
+        subject_id=deposit["id"],
+        outcome=screened,
+        user_id=user_id,
     )
 
 
