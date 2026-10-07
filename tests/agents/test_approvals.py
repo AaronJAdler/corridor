@@ -37,7 +37,9 @@ from tests.agents.support import (
 )
 from tests.support.auth import RegisteredUser, login, register_user
 from tests.support.providers import (  # noqa: F401
+    ACCOUNT_NUMBER,
     EXTERNAL_ADDRESS,
+    ROUTING_NUMBER,
     bank,
     custody,
     provider_settings,
@@ -762,6 +764,52 @@ async def test_a_withdrawal_above_the_threshold_reserves_nothing_until_it_is_app
     assert str(event["principal_id"]) == maria.id
 
 
+async def test_a_withdrawal_request_is_audited_with_where_it_would_go(
+    api: httpx.AsyncClient, db: Database, clock: ManualClock, maria: RegisteredUser
+) -> None:
+    await fund(db, maria, 100_000_000, "USDC")
+    agent = await an_agent(
+        api, maria, Scope.WITHDRAWALS_CREATE, approval_threshold_usd="20.00", any_recipient=True
+    )
+    beneficiary = await api.post(
+        "/v1/beneficiaries",
+        json={
+            "asset": "USD",
+            "holder_name": "Maria Silva",
+            "account_number": ACCOUNT_NUMBER,
+            "routing_number": ROUTING_NUMBER,
+        },
+        headers={**maria.headers, "Idempotency-Key": f"ben-{new_id()}"},
+    )
+    beneficiary_id = beneficiary.json()["id"]
+    asks = [
+        {"asset": "USDC", "amount": "25", "to_address": EXTERNAL_ADDRESS},
+        {"asset": "USD", "amount": "30.00", "beneficiary_id": beneficiary_id},
+        {"asset": "USDC", "amount": "26", "to_address": EXTERNAL_ADDRESS},
+    ]
+    to_address, to_bank, to_expire = [
+        (await withdraw(api, agent.headers, ask)).json()["approval_request"]["id"] for ask in asks
+    ]
+    await decide(api, maria, to_address)
+    await decide(api, maria, to_bank, "reject")
+    clock.advance(seconds=DAY)
+    late = await decide(api, await logged_in_again(api, maria), to_expire)
+    assert_problem(late, 409, "approval_expired")
+
+    by_address, by_beneficiary, _ = await events(db, "agent.approval_requested")
+    (approved,) = await events(db, "agent.approval_approved")
+    (rejected,) = await events(db, "agent.approval_rejected")
+    (expired,) = await events(db, "agent.approval_expired")
+
+    for event in (by_address, approved, expired):
+        assert event["details"]["to_address"] == EXTERNAL_ADDRESS
+        assert "beneficiary_id" not in event["details"]
+    for event in (by_beneficiary, rejected):
+        assert event["details"]["beneficiary_id"] == beneficiary_id
+        assert "to_address" not in event["details"]
+    assert "recipient_id" not in approved["details"]
+
+
 # --- reading ---------------------------------------------------------------------------------
 
 
@@ -839,6 +887,11 @@ async def test_asking_approving_and_rejecting_are_audited_with_the_agent_and_its
         assert event["details"]["agent_id"] == agent.id
         assert event["details"]["owner_user_id"] == maria.id
         assert (event["details"]["asset"], event["details"]["amount"]) == ("USD", amount)
+    # Asking and each decision say whom the money was for.
+    for event in (*asked_for, approved, rejected):
+        assert event["details"]["recipient_id"] == joao.id
+        assert "beneficiary_id" not in event["details"]
+        assert "to_address" not in event["details"]
     # The payment itself is the agent's, for Maria, under the id the request named.
     assert (moved["actor_type"], moved["actor_id"]) == ("agent", agent.id)
     assert str(moved["principal_id"]) == maria.id
@@ -861,4 +914,5 @@ async def test_an_approval_that_failed_is_audited_as_failed(
     assert event["outcome"] == "failed"
     assert event["details"]["failure_code"] == "insufficient_funds"
     assert event["details"]["agent_id"] == agent.id
+    assert event["details"]["recipient_id"] == joao.id
     assert len(await events(db, "transfer.created")) == 1  # Maria's own, and no other.

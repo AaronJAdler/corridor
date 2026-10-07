@@ -20,7 +20,7 @@ from corridor_sim.api.deps import (
     read_object,
     require_control_token,
 )
-from corridor_sim.bank import deposit_document, payout_inspection
+from corridor_sim.bank import deposit_document, payout_inspection, virtual_account_document
 from corridor_sim.chaos import Fault
 from corridor_sim.clock import format_time
 from corridor_sim.fx import rate_document
@@ -123,6 +123,21 @@ async def advance_clock(request: Request, sim: Sim) -> JSONResponse:
 
 
 # --- the bank ------------------------------------------------------------------------------
+
+
+@router.get("/bank/virtual-accounts")
+async def inspect_virtual_accounts(sim: Sim, customer_reference: str) -> JSONResponse:
+    """The accounts the bank issued to one customer. The bank's id for an account is what
+    a deposit is addressed to here, and nothing in Corridor's own API shows it: this lets
+    whoever plays the outside world find it without holding the provider API key."""
+    return document(
+        {
+            "virtual_accounts": [
+                virtual_account_document(account)
+                for account in sim.bank.virtual_accounts(customer_reference)
+            ]
+        }
+    )
 
 
 @router.post("/bank/deposits")

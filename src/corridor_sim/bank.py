@@ -163,6 +163,18 @@ class BankBooks:
         self._virtual_account_keys.bind(idempotent, account.id)
         return account, existing is None
 
+    def virtual_accounts(self, customer_reference: str) -> list[VirtualAccount]:
+        """The accounts one customer deposits into, in every asset, in asset order. Empty
+        for a customer the bank has never issued one to."""
+        return sorted(
+            (
+                account
+                for account in self._virtual_accounts.values()
+                if account.customer_reference == customer_reference
+            ),
+            key=lambda account: account.asset,
+        )
+
     def create_beneficiary(
         self,
         *,

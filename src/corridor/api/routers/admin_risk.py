@@ -12,10 +12,10 @@ from fastapi import APIRouter
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from corridor import audit, risk
+from corridor import audit, identity, risk
 from corridor.api.deps import AdminPrincipal, Db
 from corridor.api.schemas import Text
-from corridor.platform.errors import InvalidRequest
+from corridor.platform.errors import Conflict, InvalidRequest
 from corridor.platform.logging import get_logger
 from corridor.platform.money import format_amount, parse_amount
 from corridor.platform.pagination import DEFAULT_LIMIT, Page
@@ -29,6 +29,18 @@ _MAX_VALUE_LENGTH = 320
 _MAX_NOTE_LENGTH = 500
 # What limits are written in.
 _USD = "USD"
+
+
+class AgentLimitNotSettable(Conflict):
+    """An admin tried to set an agent's limits. They are the caps of the policy its owner
+    set: a rule written here would be replaced by the owner's next change, and until then
+    the policy the owner sees would not be the one that is enforced."""
+
+    code = "agent_limit_not_settable"
+    title = "Agent limits are set by the owner"
+
+    def __init__(self) -> None:
+        super().__init__("An agent's limits are set by its owner's policy, and only there.")
 
 
 class _Request(BaseModel):
@@ -196,12 +208,18 @@ async def list_denylist(
     )
 
 
-@router.put("/limits", summary="Set the limits of a tier, a user or an agent")
+@router.put("/limits", summary="Set the limits of a tier or a user")
 async def set_limit(body: LimitRequest, principal: AdminPrincipal, db: Db) -> LimitResponse:
     # Before the transaction: an amount that cannot be read changes nothing.
     per_tx_usd, daily_usd = _cents(body.per_transaction_usd), _cents(body.daily_usd)
 
+    if body.scope == "agent":
+        raise AgentLimitNotSettable
+
     async def work(session: AsyncSession) -> risk.Limit:
+        if body.user_id is not None:
+            # A rule for nobody would sit in the table until an id happened to match it.
+            await identity.get_user(session, body.user_id)
         limit = await risk.set_limit(
             session,
             scope=body.scope,

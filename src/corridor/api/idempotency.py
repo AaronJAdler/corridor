@@ -77,15 +77,25 @@ class StoredResponse:
     headers: Mapping[str, str]
 
 
-def fingerprint(method: str, route: str, body: bytes | Mapping[str, Any]) -> str:
-    """SHA-256, in hex, of the method, the route template and the canonical body.
+def fingerprint(
+    method: str, route: str, body: bytes | Mapping[str, Any], path: str | None = None
+) -> str:
+    """SHA-256, in hex, of the method, the route template, the canonical body and the path.
 
-    ``route`` is the template (``/v1/transfers/{transfer_id}``), not the path. Each part is
-    hashed with its length in front, so no two different triples run together into the
-    same bytes.
+    ``route`` is the template (``/v1/transfers/{transfer_id}``) and ``path`` what was
+    asked for (``/v1/transfers/0190...``). The path is what tells two resources of one
+    route apart: without it, a key used to approve one adjustment would answer for
+    another, with the first one's stored response. It is left out where it says nothing
+    the template does not, so a route with no parameters has the fingerprint it always had.
+
+    Each part is hashed with its length in front, so no two different sets of parts run
+    together into the same bytes.
     """
+    parts = [method.upper().encode(), route.encode(), _canonical(body)]
+    if path is not None and path != route:
+        parts.append(path.encode())
     digest = hashlib.sha256()
-    for part in (method.upper().encode(), route.encode(), _canonical(body)):
+    for part in parts:
         digest.update(len(part).to_bytes(8, "big"))
         digest.update(part)
     return digest.hexdigest()
@@ -113,6 +123,7 @@ async def run_idempotent(
     route: str,
     body: bytes | Mapping[str, Any],
     work: Callable[[AsyncSession], Awaitable[StoredResponse]],
+    path: str | None = None,
     lock_timeout_ms: int | None = None,
 ) -> tuple[StoredResponse, bool]:
     """Perform ``work`` once for this actor and key, and say whether this call replayed it.
@@ -125,10 +136,14 @@ async def run_idempotent(
     the refusal is stored as the response and returned, and every retry gets it again. Any
     other exception passes through and takes the key with it, so the client can retry.
 
+    ``path`` is the path that was asked for. A key that was used for one resource and
+    comes back for another of the same route is refused as reused, like any other key
+    that comes back with a different request.
+
     ``lock_timeout_ms`` is how long to wait for another request holding the same key. Left
     out, the wait is the connection's configured ``lock_timeout``.
     """
-    wanted = fingerprint(method, route, body)
+    wanted = fingerprint(method, route, body, path)
 
     async def attempt(session: AsyncSession) -> tuple[StoredResponse, bool]:
         # First lock of the transaction, as the lock order requires. The primary key alone

@@ -90,6 +90,15 @@ class Deposit:
 
 
 @dataclass(frozen=True, slots=True)
+class SuspenseSettlement:
+    """A deposit that has left suspense, to a user or back where it came from, and the
+    journal entry that took it out."""
+
+    deposit: Deposit
+    entry_id: uuid.UUID
+
+
+@dataclass(frozen=True, slots=True)
 class Beneficiary:
     """A user's external bank account, as the provider's token and a masked value. The
     account number is not here because Corridor does not have it."""
@@ -129,6 +138,9 @@ class Withdrawal:
     hold_entry_id: uuid.UUID
     # The entry that ended the hold: the settlement, or the release.
     final_entry_id: uuid.UUID | None
+    # Who asked for it: the user, or an agent acting for the user.
+    initiated_by_type: Literal["user", "agent"]
+    initiated_by_id: uuid.UUID
     created_at: datetime
     updated_at: datetime
     submitted_at: datetime | None

@@ -119,3 +119,9 @@ RECON_BREAKS = Counter(
     "Reconciliation breaks opened, by kind. A break that a later run sees again is not counted again.",
     ["kind"],
 )
+
+RECON_BREAK_CHANGES = Counter(
+    "corridor_recon_break_changes_total",
+    "Open reconciliation breaks whose difference a later run found changed, by kind.",
+    ["kind"],
+)

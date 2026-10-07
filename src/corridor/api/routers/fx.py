@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
 
-from corridor import fx
+from corridor import agents, fx
 from corridor.api.container import Container
 from corridor.api.deps import Db, Redis, SettingsDep, get_container, require
 from corridor.api.idempotency import IdempotencyKey, StoredResponse, run_idempotent, to_response
@@ -155,6 +155,15 @@ async def create_conversion(
     key: IdempotencyKey,
 ) -> JSONResponse:
     async def work(session: AsyncSession) -> StoredResponse:
+        if principal.agent_id is not None:
+            # After the key's lock and before anything moves: an agent converts only if
+            # its owner has set it a policy, and no more at once than the policy allows.
+            # The quote says what would be sold. Nothing waits for approval here, so the
+            # answer is not looked at: a refusal is raised.
+            quote = await fx.get_quote(session, principal, body.quote_id)
+            await agents.check_policy(
+                session, principal, "conversion", quote.sell_asset, quote.sell_amount
+            )
         conversion = await fx.convert(
             session,
             principal,
@@ -171,6 +180,7 @@ async def create_conversion(
         key=key,
         method=request.method,
         route=route_template(request.scope),
+        path=request.url.path,
         body=await request.body(),
         work=work,
     )

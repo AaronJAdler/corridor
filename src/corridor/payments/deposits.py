@@ -27,12 +27,19 @@ from corridor.payments import instructions
 from corridor.payments.errors import (
     DepositNotFound,
     DepositNotInSuspense,
+    DepositOwnerClosed,
     MalformedProviderEvent,
     ProviderEventMismatch,
 )
 from corridor.payments.events import ProviderEvent, amount_of, parse, reason_code
 from corridor.payments.models import DepositRow
-from corridor.payments.types import BANK_PROVIDER, CUSTODY_PROVIDER, Deposit, FlowKind
+from corridor.payments.types import (
+    BANK_PROVIDER,
+    CUSTODY_PROVIDER,
+    Deposit,
+    FlowKind,
+    SuspenseSettlement,
+)
 from corridor.platform.clock import utcnow
 from corridor.platform.db import Database
 from corridor.platform.ids import new_id
@@ -60,7 +67,7 @@ DEPOSIT_COMPLETED: Final = "deposit.completed"
 CURSOR_KIND: Final = "deposits"
 
 # Where the money of a deposit is, on Corridor's side of the provider.
-_ASSET_ACCOUNT: Final[Mapping[str, AccountKind]] = {
+ASSET_ACCOUNT: Final[Mapping[str, AccountKind]] = {
     "bank": AccountKind.BANK_SETTLEMENT,
     "chain": AccountKind.CUSTODY_OMNIBUS,
 }
@@ -293,27 +300,65 @@ async def apply_statement_deposit(
     await db.run(work)
 
 
-async def release_from_suspense(
-    session: AsyncSession, deposit_id: uuid.UUID, user_id: uuid.UUID, *, actor: audit.Actor
-) -> Deposit:
-    """Credit a deposit that is in suspense to ``user_id``, and make it theirs.
+async def get_suspense_deposit(session: AsyncSession, deposit_id: uuid.UUID) -> Deposit:
+    """A deposit that is in suspense now, for an operator who asks to release or return it.
 
-    For an operator who has cleared the review that kept it there. The money moves from
-    suspense to the user's available balance in one entry, the deposit is recorded as
-    completed and as that user's, and from then on it is a deposit like any other of
-    theirs. The row is locked and its status looked at first, so a deposit is released
-    once: one that is no longer in suspense, because it was released already or the bank
-    took it back, is refused.
+    Read without a lock: what is asked for waits for another operator, and whoever carries
+    it out looks at the deposit again, under its lock.
+    """
+    rows = await session.execute(select(_deposits).where(_deposits.c.id == deposit_id))
+    row = rows.mappings().one_or_none()
+    if row is None:
+        raise DepositNotFound
+    if row["status"] != "suspense":
+        raise DepositNotInSuspense
+    return as_deposit(row)
+
+
+async def lock_in_suspense(session: AsyncSession, deposit_id: uuid.UUID) -> RowMapping:
+    """A deposit's row, locked for the rest of the transaction, provided it is in suspense.
+
+    Every way money leaves suspense comes through here first: an operator clearing a
+    review, an approved adjustment that releases a deposit and one that returns it. The
+    caller changes the status in the same transaction, so of any two of them one finds the
+    deposit in suspense and the other is refused, and the money leaves once.
     """
     rows = await session.execute(
         select(_deposits).where(_deposits.c.id == deposit_id).with_for_update()
     )
     deposit = rows.mappings().one_or_none()
     if deposit is None:
-        # The caller got the id from a review of this deposit, so this is a bug.
-        raise LookupError(f"there is no deposit {deposit_id} to release")
+        # The caller got the id from a review or an adjustment of this deposit: a bug.
+        raise LookupError(f"there is no deposit {deposit_id} in suspense")
     if deposit["status"] != "suspense":
         raise DepositNotInSuspense
+    return deposit
+
+
+async def release_from_suspense(
+    session: AsyncSession,
+    deposit_id: uuid.UUID,
+    user_id: uuid.UUID,
+    *,
+    actor: audit.Actor,
+    metadata: Mapping[str, str] | None = None,
+) -> SuspenseSettlement:
+    """Credit a deposit that is in suspense to ``user_id``, and make it theirs.
+
+    For an operator who has cleared the review that kept it there, and for an approved
+    adjustment that releases it. The money moves from suspense to the user's available
+    balance in one entry, the deposit is recorded as completed and as that user's, and
+    from then on it is a deposit like any other of theirs: a bank that takes it back takes
+    it from them. The row is locked and its status looked at first, so a deposit is
+    released once: one that is no longer in suspense, because it was released or returned
+    already or the bank took it back, is refused.
+
+    A closed account receives nothing. A restricted one does: the restriction is on money
+    going out. ``metadata`` is added to the journal entry's.
+    """
+    deposit = await lock_in_suspense(session, deposit_id)
+    if (await identity.get_user(session, user_id)).status == "closed":
+        raise DepositOwnerClosed
     asset, amount, provider = deposit["asset_code"], deposit["amount"], deposit["provider"]
     suspense = await ledger.open_account(session, AccountKind.SUSPENSE, asset)
     wallet = await wallets.resolve(session, user_id, asset)
@@ -324,7 +369,7 @@ async def release_from_suspense(
             source_type=SOURCE_TYPE,
             source_id=ledger_source_id(provider, deposit["provider_ref"]),
             postings=(debit(suspense.id, amount), credit(wallet.available_account_id, amount)),
-            metadata={"provider": provider, "deposit_id": str(deposit_id)},
+            metadata={**(metadata or {}), "provider": provider, "deposit_id": str(deposit_id)},
         ),
     )
     # ``entry_id`` stays the entry that brought the money onto the books: reconciliation
@@ -355,7 +400,7 @@ async def release_from_suspense(
             "entry_id": str(entry.id),
         },
     )
-    return as_deposit(updated.mappings().one())
+    return SuspenseSettlement(deposit=as_deposit(updated.mappings().one()), entry_id=entry.id)
 
 
 async def get_deposit(
@@ -565,12 +610,15 @@ async def _lock(session: AsyncSession, provider: str, provider_ref: str) -> RowM
     return deposit
 
 
-async def set_status(session: AsyncSession, deposit_id: uuid.UUID, status: str) -> None:
-    await session.execute(
+async def set_status(session: AsyncSession, deposit_id: uuid.UUID, status: str) -> RowMapping:
+    updated = await session.execute(
         update(_deposits)
         .where(_deposits.c.id == deposit_id)
         .values(status=status, updated_at=utcnow())
+        .returning(_deposits)
     )
+    row: RowMapping = updated.mappings().one()
+    return row
 
 
 async def _credit_screened(
@@ -616,7 +664,7 @@ async def _credit(
     """
     asset, amount, provider = deposit["asset_code"], deposit["amount"], deposit["provider"]
     received = await ledger.open_account(
-        session, _ASSET_ACCOUNT[deposit["kind"]], asset, provider=provider
+        session, ASSET_ACCOUNT[deposit["kind"]], asset, provider=provider
     )
     if user_id is not None:
         wallet = await wallets.resolve(session, user_id, asset)

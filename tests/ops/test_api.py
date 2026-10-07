@@ -12,8 +12,8 @@ from corridor import ledger, wallets
 from corridor.ledger import AccountKind
 from corridor.platform.config import Settings
 from corridor.platform.db import Database
-from tests.ops.support import admin, audited, keyed
-from tests.ops.test_adjustments import BANK, in_suspense
+from tests.ops.support import admin, audited, deposit_row, keyed, suspended
+from tests.ops.test_adjustments import BANK
 from tests.payments.support import rows
 from tests.support.auth import RegisteredUser, register_user, served_routes
 
@@ -179,19 +179,17 @@ async def test_asking_for_an_adjustment_needs_an_idempotency_key(
 ) -> None:
     ana = await admin(client, db, settings)
     maria = await register_user(client)
-    await in_suspense(db, 75_00)
+    deposit = await suspended(db)
     bodies: dict[str, dict[str, Any]] = {
         ADJUSTMENTS: await goodwill(db, maria),
         f"{ADJUSTMENTS}/suspense-release": {
             "reason": "for maria",
-            "asset": "USD",
-            "amount": "75.00",
+            "deposit_id": str(deposit["id"]),
             "user_id": maria.id,
         },
         f"{ADJUSTMENTS}/suspense-return": {
             "reason": "unclaimed",
-            "asset": "USD",
-            "amount": "75.00",
+            "deposit_id": str(deposit["id"]),
         },
     }
 
@@ -199,6 +197,40 @@ async def test_asking_for_an_adjustment_needs_an_idempotency_key(
 
     assert (response.status_code, response.json()["code"]) == (400, "idempotency_key_required")
     assert await rows(db, "SELECT 1 FROM ops_adjustments") == []
+
+
+async def test_a_key_that_approved_one_adjustment_does_not_answer_for_another(
+    client: httpx.AsyncClient, db: Database, settings: Settings
+) -> None:
+    ana, bruno = await admin(client, db, settings), await admin(client, db, settings)
+    maria = await register_user(client)
+    one, other = [
+        (await client.post(ADJUSTMENTS, json=await goodwill(db, maria), headers=keyed(ana))).json()
+        for _ in range(2)
+    ]
+
+    first = await client.post(
+        f"{ADJUSTMENTS}/{one['id']}/approve", headers=keyed(bruno, "approve-1")
+    )
+    reused = await client.post(
+        f"{ADJUSTMENTS}/{other['id']}/approve", headers=keyed(bruno, "approve-1")
+    )
+    as_rejection = await client.post(
+        f"{ADJUSTMENTS}/{one['id']}/reject", headers=keyed(bruno, "approve-1")
+    )
+
+    assert first.status_code == 200, first.text
+    # Not the first one's stored answer, which would say "approved" of one that is not.
+    assert (reused.status_code, reused.json()["code"]) == (422, "idempotency_key_reused")
+    assert (as_rejection.status_code, as_rejection.json()["code"]) == (
+        422,
+        "idempotency_key_reused",
+    )
+    assert await rows(db, "SELECT status FROM ops_adjustments ORDER BY id") == [
+        {"status": "approved"},
+        {"status": "pending"},
+    ]
+    assert await balance(client, maria) == "25.00"
 
 
 async def test_deciding_an_adjustment_needs_an_idempotency_key(
@@ -236,19 +268,24 @@ async def test_an_admin_rejects_an_adjustment_over_http(
     assert await balance(client, maria) == "0.00"
 
 
-async def test_suspense_is_released_to_a_user_over_http(
+async def test_a_deposit_in_suspense_is_released_to_a_user_over_http(
     client: httpx.AsyncClient, db: Database, settings: Settings
 ) -> None:
     ana, bruno = await admin(client, db, settings), await admin(client, db, settings)
     maria = await register_user(client)
-    await in_suspense(db, 75_00)
+    deposit = await suspended(db)
 
     asked = await client.post(
         f"{ADJUSTMENTS}/suspense-release",
-        json={"reason": "for maria", "asset": "USD", "amount": "75.00", "user_id": maria.id},
+        json={"reason": "for maria", "deposit_id": str(deposit["id"]), "user_id": maria.id},
         headers=keyed(ana),
     )
     assert asked.status_code == 201, asked.text
+    assert (asked.json()["kind"], asked.json()["deposit_id"], asked.json()["user_id"]) == (
+        "suspense_release",
+        str(deposit["id"]),
+        maria.id,
+    )
     approved = await client.post(
         f"{ADJUSTMENTS}/{asked.json()['id']}/approve", headers=keyed(bruno)
     )
@@ -259,17 +296,18 @@ async def test_suspense_is_released_to_a_user_over_http(
         ("credit", "75.00"),
     ]
     assert await balance(client, maria) == "75.00"
+    assert (await deposit_row(db, deposit["provider_ref"]))["status"] == "completed"
 
 
-async def test_suspense_is_booked_as_returned_over_http(
+async def test_a_deposit_in_suspense_is_booked_as_returned_over_http(
     client: httpx.AsyncClient, db: Database, settings: Settings
 ) -> None:
     ana, bruno = await admin(client, db, settings), await admin(client, db, settings)
-    await in_suspense(db, 75_00)
+    deposit = await suspended(db)
 
     asked = await client.post(
         f"{ADJUSTMENTS}/suspense-return",
-        json={"reason": "unclaimed", "asset": "USD", "amount": "75.00"},
+        json={"reason": "unclaimed", "deposit_id": str(deposit["id"])},
         headers=keyed(ana),
     )
     approved = await client.post(
@@ -277,10 +315,55 @@ async def test_suspense_is_booked_as_returned_over_http(
     )
 
     assert (asked.status_code, approved.status_code) == (201, 200)
+    assert (approved.json()["kind"], approved.json()["user_id"]) == ("suspense_return", None)
     async with db.transaction() as session:
         held = await ledger.find_account(session, AccountKind.SUSPENSE, "USD")
         assert held is not None
         assert await ledger.get_balance(session, held.id) == 0
+    assert (await deposit_row(db, deposit["provider_ref"]))["status"] == "returned"
+
+
+async def test_a_second_release_of_one_deposit_is_a_conflict_over_http(
+    client: httpx.AsyncClient, db: Database, settings: Settings
+) -> None:
+    ana, bruno = await admin(client, db, settings), await admin(client, db, settings)
+    maria = await register_user(client)
+    deposit = await suspended(db)
+    body = {"reason": "for maria", "deposit_id": str(deposit["id"]), "user_id": maria.id}
+    first = await client.post(f"{ADJUSTMENTS}/suspense-release", json=body, headers=keyed(ana))
+    second = await client.post(f"{ADJUSTMENTS}/suspense-release", json=body, headers=keyed(ana))
+
+    one = await client.post(f"{ADJUSTMENTS}/{first.json()['id']}/approve", headers=keyed(bruno))
+    two = await client.post(f"{ADJUSTMENTS}/{second.json()['id']}/approve", headers=keyed(bruno))
+    late = await client.post(f"{ADJUSTMENTS}/suspense-release", json=body, headers=keyed(ana))
+
+    assert one.status_code == 200, one.text
+    assert (two.status_code, two.json()["code"]) == (409, "deposit_not_in_suspense")
+    assert (late.status_code, late.json()["code"]) == (409, "deposit_not_in_suspense")
+    assert await balance(client, maria) == "75.00"
+
+
+async def test_a_suspense_adjustment_names_a_deposit_and_not_an_amount(
+    client: httpx.AsyncClient, db: Database, settings: Settings
+) -> None:
+    ana = await admin(client, db, settings)
+    maria = await register_user(client)
+    await suspended(db)
+
+    by_amount = await client.post(
+        f"{ADJUSTMENTS}/suspense-release",
+        json={"reason": "for maria", "asset": "USD", "amount": "75.00", "user_id": maria.id},
+        headers=keyed(ana),
+    )
+    unknown = await client.post(
+        f"{ADJUSTMENTS}/suspense-return",
+        json={"reason": "unclaimed", "deposit_id": str(uuid.uuid4())},
+        headers=keyed(ana),
+    )
+
+    assert by_amount.status_code == 422
+    assert (unknown.status_code, unknown.json()["code"]) == (404, "deposit_not_found")
+    assert await rows(db, "SELECT 1 FROM ops_adjustments") == []
 
 
 def with_legs(body: dict[str, Any], **changes: Any) -> dict[str, Any]:
@@ -362,6 +445,8 @@ async def test_every_admin_route_is_behind_the_admin_dependency(app: FastAPI) ->
         ("GET", "/v1/admin/risk/limits"),
         ("PUT", "/v1/admin/risk/limits"),
         ("PUT", "/v1/admin/users/{user_id}/kyc-tier"),
+        ("POST", "/v1/admin/users/{user_id}/role"),
+        ("POST", "/v1/admin/users/{user_id}/close"),
         ("POST", "/v1/admin/recon/breaks/{break_id}/resolve"),
         ("GET", "/v1/admin/outbox/dead"),
         ("POST", "/v1/admin/outbox/dead/{event_id}/requeue"),

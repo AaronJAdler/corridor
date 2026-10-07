@@ -2,7 +2,13 @@
 
 from typing import Final
 
-from corridor.platform.errors import Conflict, InvalidRequest, NotFound, ServiceUnavailable
+from corridor.platform.errors import (
+    Conflict,
+    InvalidRequest,
+    NotFound,
+    PermissionDenied,
+    ServiceUnavailable,
+)
 from corridor.risk import Denied
 
 # The table's check constraint states the same limit.
@@ -85,6 +91,17 @@ class DepositNotInSuspense(Conflict):
 
     def __init__(self) -> None:
         super().__init__("This deposit is no longer in suspense.")
+
+
+class DepositOwnerClosed(Conflict):
+    """An operator asked for a deposit in suspense to be credited to a closed account.
+    Nothing is paid into one: the money would be out of everybody's reach."""
+
+    code = "deposit_owner_closed"
+    title = "Account is closed"
+
+    def __init__(self) -> None:
+        super().__init__("A deposit cannot be released to a closed account.")
 
 
 class DepositNotFound(NotFound):
@@ -212,6 +229,17 @@ class WithdrawalNotFound(NotFound):
 
     def __init__(self) -> None:
         super().__init__("There is no such withdrawal.")
+
+
+class WithdrawalNotAgents(PermissionDenied):
+    """An agent tried to call back a withdrawal that it did not ask for itself: its
+    owner's own, or another agent's. Those are the owner's to cancel."""
+
+    code = "withdrawal_not_agents"
+    title = "Withdrawal is not this agent's"
+
+    def __init__(self) -> None:
+        super().__init__("An agent can cancel only a withdrawal it asked for.")
 
 
 class WithdrawalNotCancelable(Conflict):

@@ -11,11 +11,12 @@ from corridor.recon.breaks import (
     resolve_break,
 )
 from corridor.recon.errors import BreakNotFound, BreakNotOpen, InvalidNote
-from corridor.recon.service import LOOKBACK, run
+from corridor.recon.service import LOOKBACK, MAX_CATCH_UP, catch_up_start, run
 from corridor.recon.types import SYSTEM, Break, BreakKind, BreakStatus, Run, RunResult, RunStatus
 
 __all__ = [
     "LOOKBACK",
+    "MAX_CATCH_UP",
     "MAX_NOTE_LENGTH",
     "SYSTEM",
     "Break",
@@ -27,6 +28,7 @@ __all__ = [
     "Run",
     "RunResult",
     "RunStatus",
+    "catch_up_start",
     "count_open_breaks",
     "list_breaks",
     "list_runs",

@@ -1,7 +1,7 @@
 """Adjustments: a balanced entry asked for by one admin and posted by another's approval.
 
-The requester cannot approve their own, two approvals at once post one entry, and money in
-suspense is released to a user or sent back through the same path.
+The requester cannot approve their own, and two approvals at once post one entry. Taking a
+deposit out of suspense is in ``test_suspense.py``.
 """
 
 import asyncio
@@ -13,7 +13,7 @@ from sqlalchemy.exc import DBAPIError
 
 from corridor import ledger, ops, risk, wallets
 from corridor.identity import Principal, User
-from corridor.ledger import AccountKind, Direction, EntryDraft, credit, debit
+from corridor.ledger import AccountKind, Direction
 from corridor.ops import Adjustment, Leg
 from corridor.platform.db import (
     LOCK_NOT_AVAILABLE,
@@ -24,11 +24,9 @@ from corridor.platform.db import (
 )
 from corridor.platform.errors import PermissionDenied
 from corridor.platform.ids import new_id
-from corridor.platform.money import UnknownAsset
-from corridor.wallets import WalletNotFound
 from tests.identity.support import add_user
 from tests.ops.support import audited
-from tests.payments.support import acting_as, available, balance_of, entries, rows, suspense
+from tests.payments.support import acting_as, available, balance_of, entries, rows
 
 BANK = "simbank"
 
@@ -63,24 +61,6 @@ async def request(
 async def approve(db: Database, principal: Principal, adjustment: Adjustment) -> Adjustment:
     async with db.transaction() as session:
         return await ops.approve_adjustment(session, principal, adjustment.id)
-
-
-async def in_suspense(db: Database, amount: int, asset: str = "USD") -> None:
-    """Money that arrived at the bank and could not be attributed to anyone."""
-    async with db.transaction() as session:
-        settlement = await ledger.open_account(
-            session, AccountKind.BANK_SETTLEMENT, asset, provider=BANK
-        )
-        held = await ledger.open_account(session, AccountKind.SUSPENSE, asset)
-        await ledger.post_entry(
-            session,
-            EntryDraft(
-                kind="deposit_suspense",
-                source_type="test_deposit",
-                source_id=str(new_id()),
-                postings=(debit(settlement.id, amount), credit(held.id, amount)),
-            ),
-        )
 
 
 async def stored(db: Database) -> list[dict[str, Any]]:
@@ -137,13 +117,12 @@ async def test_only_an_admin_can_ask_for_approve_reject_or_read_an_adjustment(
                 user,
                 adjustment_id=new_id(),
                 reason="for me",
-                asset="USD",
-                amount=1,
+                deposit_id=new_id(),
                 user_id=maria.id,
             )
         with pytest.raises(PermissionDenied):
             await ops.request_suspense_return(
-                session, user, adjustment_id=new_id(), reason="for me", asset="USD", amount=1
+                session, user, adjustment_id=new_id(), reason="for me", deposit_id=new_id()
             )
         with pytest.raises(PermissionDenied):
             await ops.approve_adjustment(session, user, pending.id)
@@ -306,6 +285,7 @@ async def test_another_admins_approval_posts_the_entry(
     assert event["details"] == {
         "entry_id": str(approved.entry_id),
         "requested_by": str(ana.user_id),
+        "kind": "manual",
     }
 
 
@@ -417,117 +397,6 @@ async def test_deciding_an_adjustment_that_does_not_exist_is_not_found(
             await ops.get_adjustment(session, ana, new_id())
 
 
-# --- suspense --------------------------------------------------------------------------------
-
-
-async def test_suspense_is_released_to_a_user_by_a_second_admins_approval(
-    db: Database, ana: Principal, bruno: Principal, maria: User
-) -> None:
-    await in_suspense(db, 75_00)
-    async with db.transaction() as session:
-        pending = await ops.request_suspense_release(
-            session,
-            ana,
-            adjustment_id=new_id(),
-            reason="the sender confirmed it was for maria",
-            asset="USD",
-            amount=75_00,
-            user_id=maria.id,
-        )
-    assert (await suspense(db), await available(db, maria)) == (75_00, 0)
-
-    with pytest.raises(ops.SelfApproval):
-        await approve(db, ana, pending)
-    approved = await approve(db, bruno, pending)
-
-    (posted,) = await entries(db, "adjustment", str(pending.id))
-    assert posted["id"] == approved.entry_id
-    assert posted["postings"] == [("suspense", "D", 75_00), ("user_available", "C", 75_00)]
-    assert (await suspense(db), await available(db, maria)) == (0, 75_00)
-
-
-async def test_suspense_is_booked_as_returned_through_the_provider_it_arrived_at(
-    db: Database, ana: Principal, bruno: Principal
-) -> None:
-    await in_suspense(db, 75_00)
-    async with db.transaction() as session:
-        pending = await ops.request_suspense_return(
-            session,
-            ana,
-            adjustment_id=new_id(),
-            reason="nobody claimed it",
-            asset="USD",
-            amount=30_00,
-        )
-
-    await approve(db, bruno, pending)
-
-    (posted,) = await entries(db, "adjustment", str(pending.id))
-    assert posted["postings"] == [("suspense", "D", 30_00), ("bank_settlement", "C", 30_00)]
-    assert await suspense(db) == 45_00
-    assert await balance_of(db, AccountKind.BANK_SETTLEMENT, provider=BANK) == 45_00
-
-
-@pytest.mark.parametrize("amount", [75_01, 1_000_00])
-async def test_more_than_suspense_holds_cannot_be_asked_for(
-    db: Database, ana: Principal, maria: User, amount: int
-) -> None:
-    await in_suspense(db, 75_00)
-
-    async with db.transaction() as session:
-        with pytest.raises(ops.InvalidAdjustment):
-            await ops.request_suspense_release(
-                session,
-                ana,
-                adjustment_id=new_id(),
-                reason="too much",
-                asset="USD",
-                amount=amount,
-                user_id=maria.id,
-            )
-        with pytest.raises(ops.InvalidAdjustment):
-            await ops.request_suspense_return(
-                session, ana, adjustment_id=new_id(), reason="too much", asset="USD", amount=amount
-            )
-
-    assert await stored(db) == []
-
-
-async def test_a_suspense_release_names_a_supported_asset_and_a_user_with_a_wallet(
-    db: Database, ana: Principal, maria: User
-) -> None:
-    await in_suspense(db, 75_00)
-
-    async with db.transaction() as session:
-        with pytest.raises(ops.InvalidAdjustment):
-            # Nothing was ever put in suspense in pesos.
-            await ops.request_suspense_release(
-                session,
-                ana,
-                adjustment_id=new_id(),
-                reason="wrong asset",
-                asset="MXN",
-                amount=1_00,
-                user_id=maria.id,
-            )
-        with pytest.raises(UnknownAsset):
-            await ops.request_suspense_return(
-                session, ana, adjustment_id=new_id(), reason="no such", asset="EUR", amount=1_00
-            )
-        with pytest.raises(WalletNotFound):
-            await ops.request_suspense_release(
-                session,
-                ana,
-                adjustment_id=new_id(),
-                reason="nobody",
-                asset="USD",
-                amount=1_00,
-                user_id=new_id(),
-            )
-
-    assert await stored(db) == []
-
-
 # --- reading ---------------------------------------------------------------------------------
 
 
@@ -553,6 +422,35 @@ async def test_adjustments_are_listed_newest_first_by_status_and_in_pages(
     assert ([item.id for item in rest.items], rest.next_cursor) == ([made[1].id], None)
     assert [item.id for item in approved.items] == [made[0].id]
     assert (one.id, one.status) == (made[0].id, "approved")
+
+
+async def test_reading_adjustments_is_audited(
+    db: Database, ana: Principal, bruno: Principal, maria: User
+) -> None:
+    pending = await request(db, ana, goodwill(*await accounts(db, maria)))
+
+    async with db.transaction() as session:
+        await ops.get_adjustment(session, bruno, pending.id)
+        await ops.list_adjustments(session, bruno, status="pending")
+        await ops.list_adjustments(session, bruno)
+
+    (read,) = await audited(db, "adjustment.read")
+    assert (read["actor_type"], read["actor_id"]) == ("admin", str(bruno.user_id))
+    assert (read["resource_type"], read["resource_id"]) == ("adjustment", str(pending.id))
+    by_status, everything = await audited(db, "adjustment.listed")
+    assert (by_status["actor_type"], by_status["actor_id"]) == ("admin", str(bruno.user_id))
+    assert by_status["details"] == {"status": "pending", "returned": 1}
+    assert everything["details"] == {"status": "all", "returned": 1}
+
+
+async def test_an_adjustment_that_is_not_there_is_not_audited_as_read(
+    db: Database, ana: Principal
+) -> None:
+    with pytest.raises(ops.AdjustmentNotFound):
+        async with db.transaction() as session:
+            await ops.get_adjustment(session, ana, new_id())
+
+    assert await audited(db, "adjustment.read") == []
 
 
 # --- the lock order --------------------------------------------------------------------------

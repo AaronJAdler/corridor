@@ -227,3 +227,26 @@ def test_the_key_that_authenticates_cached_rates_is_optional_and_never_short() -
 
     assert [error["loc"] for error in failure.value.errors()] == [("fx_cache_mac_key",)]
     assert ONE_SHORT not in str(failure.value)
+
+
+def test_reconciliation_runs_every_five_minutes_over_an_hour_and_waits_two_minutes() -> None:
+    settings = Settings(_env_file=None, **REQUIRED)  # type: ignore[arg-type]
+
+    assert settings.reconciliation_interval_seconds == 300
+    assert settings.reconciliation_window_seconds == 3600
+    assert settings.reconciliation_grace_seconds == 120
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("reconciliation_interval_seconds", 0),
+        ("reconciliation_window_seconds", 0),
+        ("reconciliation_grace_seconds", -1),
+    ],
+)
+def test_a_reconciliation_setting_that_could_not_work_is_refused(name: str, value: int) -> None:
+    with pytest.raises(ValidationError) as failure:
+        Settings(_env_file=None, **REQUIRED, **{name: value})  # type: ignore[arg-type]
+
+    assert [error["loc"] for error in failure.value.errors()] == [(name,)]

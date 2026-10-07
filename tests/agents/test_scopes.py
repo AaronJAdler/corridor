@@ -41,6 +41,7 @@ from tests.agents.support import (
     key_headers,
     send,
     set_policy,
+    withdraw,
 )
 from tests.support.auth import RegisteredUser, register_user, served_routes
 from tests.support.providers import (  # noqa: F401
@@ -102,6 +103,9 @@ class World:
     # refused for the scope and for nothing else.
     agent_id: str
     spare_key_id: str
+    # A withdrawal that agent asked for itself, still held: the one kind an agent's key
+    # may call back.
+    agent_withdrawal_id: str
     # Two payments another agent of Maria's asked for, which wait for her answer.
     to_approve: str
     to_reject: str
@@ -248,7 +252,7 @@ AGENT_ROUTES: Final[dict[Route, Reachable]] = {
     ),
     ("/v1/withdrawals/{withdrawal_id}/cancel", "POST"): Reachable(
         Scope.WITHDRAWALS_CREATE,
-        lambda w: Call("POST", f"/v1/withdrawals/{w.maria.withdrawal_id}/cancel"),
+        lambda w: Call("POST", f"/v1/withdrawals/{w.agent_withdrawal_id}/cancel"),
         other=lambda w: Call("POST", f"/v1/withdrawals/{w.joao.withdrawal_id}/cancel"),
     ),
     ("/v1/fx/quotes", "POST"): Reachable(
@@ -330,6 +334,8 @@ NOT_FOR_AGENTS: Final[dict[Route, tuple[Callable[[World], Call], int]]] = {
 ADMIN_ROUTES: Final[frozenset[Route]] = frozenset(
     {
         ("/v1/admin/users/{user_id}/kyc-tier", "PUT"),
+        ("/v1/admin/users/{user_id}/role", "POST"),
+        ("/v1/admin/users/{user_id}/close", "POST"),
         ("/v1/admin/recon/breaks", "GET"),
         ("/v1/admin/recon/breaks/{break_id}/resolve", "POST"),
         ("/v1/admin/outbox/dead", "GET"),
@@ -475,6 +481,13 @@ async def world(
     agent = await create_agent(client, maria.user)
     spare = await issue_key(client, maria.user, agent["id"], Scope.WALLET_READ)
     await set_policy(client, maria.user, agent["id"], any_recipient=True)
+    withdrawing = await issue_key(client, maria.user, agent["id"], Scope.WITHDRAWALS_CREATE)
+    asked_by_agent = await withdraw(
+        client,
+        key_headers(withdrawing["key"]),
+        {"asset": "USD", "amount": "3.00", "beneficiary_id": maria.beneficiary_id},
+    )
+    assert asked_by_agent.status_code == 202, asked_by_agent.text
     # Another agent, which has to ask before it pays anything at all.
     asking = await an_agent(
         client, maria.user, Scope.TRANSFERS_CREATE, approval_threshold_usd="0", any_recipient=True
@@ -489,6 +502,7 @@ async def world(
         carla=carla,
         agent_id=agent["id"],
         spare_key_id=spare["id"],
+        agent_withdrawal_id=asked_by_agent.json()["id"],
         to_approve=to_approve,
         to_reject=to_reject,
     )
@@ -556,6 +570,18 @@ async def test_a_key_with_only_the_routes_scope_succeeds_on_its_owners_resources
     response = await world.send(case.own(world), await world.key(case.scope))
 
     assert response.status_code == case.succeeds, response.text
+
+
+async def test_a_key_that_may_withdraw_cannot_cancel_its_owners_own_withdrawal(
+    world: World,
+) -> None:
+    cancel = Call("POST", f"/v1/withdrawals/{world.maria.withdrawal_id}/cancel")
+
+    response = await world.send(cancel, await world.key(Scope.WITHDRAWALS_CREATE))
+
+    assert_problem(response, 403, "withdrawal_not_agents")
+    # Hers to call back still, from her own session.
+    assert (await world.send(cancel, world.maria.headers)).status_code == 200
 
 
 @by_id

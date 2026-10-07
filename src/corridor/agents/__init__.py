@@ -26,6 +26,7 @@ from corridor.agents.errors import (
     InvalidExpiry,
     InvalidPolicy,
     InvalidScopes,
+    PolicyNotSet,
     RecipientNotAllowed,
 )
 from corridor.agents.keys import AGENT_SCOPES
@@ -95,6 +96,7 @@ __all__ = [
     "Policy",
     "PolicyDecision",
     "PolicyKind",
+    "PolicyNotSet",
     "PresentedKey",
     "Recipient",
     "RecipientKind",

@@ -52,7 +52,9 @@ async def clear_review(session: AsyncSession, principal: Principal, review_id: u
     A withdrawal is asked to be sent again, since the event written with it found the
     review open. A deposit is released from suspense to the user recorded on the review.
     One that has no such user, because it arrived at nobody's account, cannot be cleared:
-    who it belongs to is not something this decides.
+    who it belongs to is not something this decides. Nor can one whose user has closed
+    their account since, or one an adjustment has already taken out of suspense: payments
+    refuses either, and the review stays open.
     """
     identity.require_admin(principal)
     actor = audit.Actor.admin(principal.user_id)

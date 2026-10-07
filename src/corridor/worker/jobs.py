@@ -34,11 +34,9 @@ WEBHOOK_REDACTION_JOB = "webhooks.redact_payloads"
 # How often overdue withdrawals are looked for. How long one waits before it counts as
 # overdue is a setting, `payout_sweep_after_seconds`.
 PAYOUT_SWEEP_INTERVAL_SECONDS = 30.0
+# How often it runs and what each run looks back over are settings:
+# `reconciliation_interval_seconds` and `reconciliation_window_seconds`.
 RECONCILIATION_JOB = "recon.run"
-RECONCILIATION_INTERVAL_SECONDS = 300.0
-# What each run looks back over. Much longer than the interval, so that every movement is
-# compared many times and a run that was missed leaves no gap.
-RECONCILIATION_WINDOW = timedelta(hours=1)
 
 
 def build_jobs(
@@ -116,8 +114,21 @@ def build_jobs(
         # The scheduler runs a job on one worker at a time, so two runs do not overlap;
         # if they did, each disagreement would still get one break.
         now = utcnow()
+        async with db.transaction() as session:
+            # From where the last completed run ended, if a worker was away for longer
+            # than the window: what happened in between is still compared.
+            window_start = await recon.catch_up_start(
+                session,
+                window_end=now,
+                window=timedelta(seconds=settings.reconciliation_window_seconds),
+            )
         result = await recon.run(
-            db, bank, custody, window_start=now - RECONCILIATION_WINDOW, window_end=now
+            db,
+            bank,
+            custody,
+            window_start=window_start,
+            window_end=now,
+            grace=timedelta(seconds=settings.reconciliation_grace_seconds),
         )
         log.info(
             "recon.done",
@@ -139,5 +150,7 @@ def build_jobs(
     if bank is not None or custody is not None:
         jobs.append(Job("payments.sweep_payouts", PAYOUT_SWEEP_INTERVAL_SECONDS, sweep_payouts))
         if reconcile:
-            jobs.append(Job(RECONCILIATION_JOB, RECONCILIATION_INTERVAL_SECONDS, reconcile_window))
+            jobs.append(
+                Job(RECONCILIATION_JOB, settings.reconciliation_interval_seconds, reconcile_window)
+            )
     return jobs

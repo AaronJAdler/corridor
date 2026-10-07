@@ -169,8 +169,13 @@ services:
     profiles: ["demo"]
     restart: "no"
     command: ["corridor", "demo", "--base-url", "http://api:8000", "--sim-url", "http://sim:8100"]
+    # A client of the stack: it is given the simulator's control token, to play the bank,
+    # and where the database and Redis are, to verify the ledger at the end. It holds no
+    # provider key, no webhook secret and no key of Corridor's own.
     environment:
-      <<: *corridor-environment
+      CORRIDOR_ENVIRONMENT: development
+      CORRIDOR_DATABASE_URL: postgresql+asyncpg://corridor_app:${DB_APP_PASSWORD:?set DB_APP_PASSWORD in .env}@postgres:5432/corridor
+      CORRIDOR_REDIS_URL: redis://redis:6379/0
       CORRIDOR_SIM_CONTROL_TOKEN: ${SIM_CONTROL_TOKEN:?set SIM_CONTROL_TOKEN in .env}
     healthcheck:
       disable: true

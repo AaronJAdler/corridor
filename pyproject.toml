@@ -79,7 +79,7 @@ e2e = { cmd = "python scripts/e2e.py", help = "Run API, worker and simulators as
 demo = { cmd = "python scripts/e2e.py demo", help = "Start a scratch stack and narrate a deposit, conversion, transfer and withdrawal" }
 lint-docker = { cmd = "uvx --from hadolint-bin==2.15.1 hadolint Dockerfile", help = "Lint the Dockerfile (hadolint; Linux and macOS)" }
 lint-compose = { cmd = "docker compose --env-file .env.example config --quiet", help = "Validate compose.yaml with the placeholder settings" }
-lint-ci = { sequence = [{ cmd = "uvx --from actionlint-py==1.7.12.25 actionlint" }, { cmd = "uvx zizmor==1.30.1 .github" }], help = "Lint the workflows: schema, then security" }
+lint-ci = { sequence = [{ cmd = "uvx --from actionlint-py==1.7.12.25 actionlint" }, { cmd = "uvx zizmor==1.30.1 --offline .github" }], help = "Lint the workflows: schema, then security (offline: the same with or without a GitHub token)" }
 lint-infra = { sequence = [{ cmd = "terraform -chdir=infra fmt -check -recursive" }, { cmd = "terraform -chdir=infra init -backend=false -input=false" }, { cmd = "terraform -chdir=infra validate" }, { cmd = "uvx --python 3.13 checkov==3.3.25 --directory infra --framework terraform --quiet --compact --skip-download" }], help = "Check the Terraform: format, validity, then security" }
 
 # --- Lint ------------------------------------------------------------------
@@ -155,11 +155,15 @@ asyncio_default_test_loop_scope = "function"
 filterwarnings = ["error"]
 markers = [
     "corrupts_ledger: the test damages the ledger on purpose, so the check that every test leaves it sound is skipped",
+    "e2e: starts the whole stack as real processes; skipped unless run with -m e2e",
 ]
 
 [tool.coverage.run]
 source = ["corridor"]
 branch = true
+# The demo is a client of a running stack. It runs only as a process of its own, started by
+# `poe demo` and the end-to-end run, where this measure does not reach.
+omit = ["*/corridor/demo.py"]
 
 [tool.coverage.report]
 show_missing = true

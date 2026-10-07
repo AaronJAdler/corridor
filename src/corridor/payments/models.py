@@ -1,7 +1,8 @@
 """The payments tables. Private to this module: nothing outside ``corridor.payments`` imports them.
 
 The authoritative definitions, with grants, are ``migrations/versions/0008_payments.py``
-(transfers) and ``0011_money_flows.py`` (everything else). A test compares them with these.
+(transfers), ``0011_money_flows.py`` (everything else) and ``0018_review_c.py`` (who asked
+for a withdrawal). A test compares them with these.
 """
 
 import uuid
@@ -126,6 +127,7 @@ class WithdrawalRow(Base):
             " OR (kind = 'chain' AND beneficiary_id IS NULL AND to_address IS NOT NULL)",
             name="target",
         ),
+        CheckConstraint("initiated_by_type IN ('user', 'agent')", name="initiated_by_type"),
         Index("ix_withdrawals_user_id_id", "user_id", "id"),
         Index("ix_withdrawals_status_id", "status", "id"),
     )
@@ -145,6 +147,8 @@ class WithdrawalRow(Base):
     failure_reason: Mapped[str | None] = mapped_column(Text)
     hold_entry_id: Mapped[uuid.UUID]
     final_entry_id: Mapped[uuid.UUID | None]
+    initiated_by_type: Mapped[str] = mapped_column(Text)
+    initiated_by_id: Mapped[uuid.UUID]
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
     submitted_at: Mapped[datetime | None]

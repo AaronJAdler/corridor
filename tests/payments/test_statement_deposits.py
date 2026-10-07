@@ -276,3 +276,87 @@ async def test_a_deposit_returned_before_it_was_seen_is_not_credited_from_the_st
     assert await available(db, maria) == 0
     (row,) = await rows(db, "SELECT status, entry_id FROM deposits")
     assert (row["status"], row["entry_id"]) == ("returned", None)
+
+
+# --- a deposit the statement shows as returned -------------------------------------------------
+
+
+async def recorded_return(db: Database, **changes: Any) -> str:
+    return await payments.apply_statement_return(
+        db,
+        **{
+            "provider": "simbank",
+            "provider_ref": "dep_statement_1",
+            "asset": "USD",
+            "amount": 250_00,
+            **changes,
+        },
+    )
+
+
+async def test_a_deposit_a_statement_shows_as_returned_is_recorded_as_returned_and_moves_nothing(
+    db: Database,
+) -> None:
+    assert await recorded_return(db) == "recorded"
+
+    (row,) = await rows(db, "SELECT * FROM deposits")
+    assert (row["provider_ref"], row["status"], row["amount"]) == (
+        "dep_statement_1",
+        "returned",
+        250_00,
+    )
+    assert (row["user_id"], row["entry_id"]) == (None, None)
+    assert await count(db, "journal_entries") == 0
+    event = await credit_audit(db, "deposit.returned")
+    assert event["actor_id"] == "recon.repair"
+    assert event["details"] == {
+        "asset": "USD",
+        "amount": "25000",
+        "shortfall": "0",
+        "reason": "statement",
+        "received": False,
+    }
+
+
+async def test_a_deposit_recorded_as_returned_from_a_statement_is_never_credited_afterwards(
+    db: Database, bank: SimBank, custody: SimCustody, maria: User
+) -> None:
+    line = await bank_line(db, bank, custody, maria)
+    await recorded_return(db)
+
+    await payments.apply_statement_deposit(db, **line)
+    await payments.apply_bank_deposit_received(
+        db,
+        {
+            "deposit_id": line["provider_ref"],
+            "virtual_account_id": line["account_ref"],
+            "asset": "USD",
+            "amount": "250.00",
+            "sender_name": SENDER,
+            "reference": "INV-2041",
+        },
+    )
+
+    assert (await available(db, maria), await settlement(db)) == (0, 0)
+    assert await count(db, "journal_entries") == 0
+
+
+async def test_recording_a_return_for_a_deposit_that_is_on_record_leaves_it_to_its_own_events(
+    db: Database, bank: SimBank, custody: SimCustody, maria: User
+) -> None:
+    await payments.apply_statement_deposit(db, **await bank_line(db, bank, custody, maria))
+
+    assert await recorded_return(db) == "known"
+    assert await recorded_return(db) == "known"
+
+    (row,) = await rows(db, "SELECT status FROM deposits")
+    assert row["status"] == "completed"
+    assert await available(db, maria) == 250_00
+    assert await rows(db, "SELECT 1 FROM audit_events WHERE action = 'deposit.returned'") == []
+
+
+async def test_only_a_bank_takes_a_deposit_back(db: Database) -> None:
+    with pytest.raises(ValueError, match="simcustody"):
+        await recorded_return(db, provider="simcustody", asset="USDC")
+
+    assert await count(db, "deposits") == 0

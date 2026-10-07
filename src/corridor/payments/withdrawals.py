@@ -30,6 +30,7 @@ from corridor.payments.errors import (
     DuplicateWithdrawal,
     InvalidAddress,
     InvalidWithdrawalTarget,
+    WithdrawalNotAgents,
     WithdrawalNotCancelable,
     WithdrawalNotFound,
 )
@@ -166,6 +167,8 @@ async def request_withdrawal(
             status="held",
             provider=provider,
             hold_entry_id=entry.id,
+            initiated_by_type=principal.actor_type,
+            initiated_by_id=principal.actor_id,
             created_at=now,
             updated_at=now,
         )
@@ -262,6 +265,9 @@ async def cancel_withdrawal(
     to the provider, or has ended some other way, the answer is a conflict. ``held`` is the
     one state in which the provider is certain not to have it, which is what makes giving
     the funds back safe.
+
+    An agent calls back only what it asked for itself. The scope that lets it withdraw
+    does not make its owner's withdrawals, or another agent's, its own to stop.
     """
     identity.require_scope(principal, Scope.WITHDRAWALS_CREATE)
     # Locked only if it is this user's: nobody can hold a lock on someone else's row.
@@ -273,6 +279,11 @@ async def cancel_withdrawal(
     row = rows.mappings().one_or_none()
     if row is None:
         raise WithdrawalNotFound
+    if principal.is_agent and (row["initiated_by_type"], row["initiated_by_id"]) != (
+        "agent",
+        principal.actor_id,
+    ):
+        raise WithdrawalNotAgents
     if row["status"] != "held":
         raise WithdrawalNotCancelable
     canceled = await release(session, row, status="canceled")
@@ -441,6 +452,8 @@ def as_withdrawal(row: RowMapping) -> Withdrawal:
         failure_reason=row["failure_reason"],
         hold_entry_id=row["hold_entry_id"],
         final_entry_id=row["final_entry_id"],
+        initiated_by_type=row["initiated_by_type"],
+        initiated_by_id=row["initiated_by_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         submitted_at=row["submitted_at"],

@@ -2,7 +2,9 @@
 
 Everything here is a client. It knows the API and the simulator only by their addresses and
 does what a person with two browser tabs could do: call Corridor's public API, and tell the
-simulated bank what the outside world did. It imports nothing from the rest of Corridor, so
+simulated bank what the outside world did, through the simulator's control endpoints. It
+holds no credential of the stack's: not the key Corridor calls its providers with, and no
+administrator's. It imports nothing from the rest of Corridor, so
 what it shows is what a client sees.
 
 ``Stack`` is also what the end-to-end runner drives its scenario through.
@@ -51,13 +53,11 @@ class Stack:
         base_url: str,
         sim_url: str,
         *,
-        sim_api_key: str,
         sim_control_token: str | None = None,
         wait_seconds: float = WAIT_SECONDS,
     ) -> None:
         self.api = httpx.Client(base_url=base_url, timeout=REQUEST_TIMEOUT_SECONDS)
         self.sim = httpx.Client(base_url=sim_url, timeout=REQUEST_TIMEOUT_SECONDS)
-        self._sim_api_key = sim_api_key
         self._sim_control_token = sim_control_token
         self._wait_seconds = wait_seconds
 
@@ -142,23 +142,21 @@ class Stack:
         """A bank transfer to the person's virtual account arrives. Returns the bank's id.
 
         The control endpoint names the account by the bank's own id for it, which Corridor's
-        API does not show a client. The bank hands out one account per customer and asset
-        and answers a repeated request with the same one, so the id is asked for the way
-        Corridor asked for it: with the provider API key.
+        API does not show a client. The simulator's control endpoints say which account it
+        issued to a customer, so nothing here needs the key Corridor calls the bank with.
         """
         self.deposit_instruction(person, asset)
-        account = self.sim.post(
-            "/bank/v1/virtual-accounts",
-            json={"customer_reference": person.id, "asset": asset},
-            headers={"Authorization": f"Bearer {self._sim_api_key}"},
-        )
-        if account.status_code not in (200, 201):
-            raise DemoError(_refusal(account, "look the virtual account up at the bank"))
+        issued = self.control("GET", f"/bank/virtual-accounts?customer_reference={person.id}")[
+            "virtual_accounts"
+        ]
+        accounts = [account for account in issued if account["asset"] == asset]
+        if len(accounts) != 1:
+            raise DemoError(f"could not find the {asset} account the bank issued {person.name}")
         deposit = self.control(
             "POST",
             "/bank/deposits",
             {
-                "virtual_account_id": account.json()["id"],
+                "virtual_account_id": accounts[0]["id"],
                 "amount": amount,
                 "sender_name": person.name,
                 "reference": f"DEMO-{secrets.token_hex(3).upper()}",

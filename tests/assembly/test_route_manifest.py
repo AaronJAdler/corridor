@@ -50,7 +50,9 @@ MANIFEST: frozenset[tuple[str, str]] = frozenset(
         ("POST", "/v1/admin/risk/denylist"),
         ("GET", "/v1/admin/risk/limits"),
         ("PUT", "/v1/admin/risk/limits"),
+        ("POST", "/v1/admin/users/{user_id}/close"),
         ("PUT", "/v1/admin/users/{user_id}/kyc-tier"),
+        ("POST", "/v1/admin/users/{user_id}/role"),
         ("GET", "/v1/agents"),
         ("POST", "/v1/agents"),
         ("POST", "/v1/agents/{agent_id}/keys"),
@@ -254,7 +256,7 @@ async def test_every_route_is_under_v1_or_is_a_service_endpoint(app: FastAPI) ->
 async def test_every_admin_route_asks_for_an_administrator(app: FastAPI) -> None:
     admin = [route for route in served_routes(app) if route.path.startswith("/v1/admin/")]
 
-    assert len(admin) == 20
+    assert len(admin) == 22
     assert [
         (route.method, route.path) for route in admin if deps._require_admin not in route.calls
     ] == []

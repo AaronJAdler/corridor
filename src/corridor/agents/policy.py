@@ -22,7 +22,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from corridor import audit, identity, risk
-from corridor.agents.errors import AgentRevoked, InvalidPolicy, RecipientNotAllowed
+from corridor.agents.errors import AgentRevoked, InvalidPolicy, PolicyNotSet, RecipientNotAllowed
 from corridor.agents.models import AgentAllowedRecipientRow, AgentPolicyRow
 from corridor.agents.service import own_agent_status
 from corridor.agents.types import (
@@ -173,6 +173,10 @@ async def check_policy(
     caller moves nothing and asks for approval instead. For a movement the owner has
     approved, the caller asks again for the refusals and has no more use for the answer.
 
+    A conversion is refused for an agent whose owner has set no policy, as a payment is,
+    and is otherwise held to the amount the policy allows at once. No conversion waits for
+    approval: the caller of one has no use for ``requires_approval``.
+
     A user acting for themselves has no policy and is always allowed. The agent's limit
     over 24 hours is not checked here: ``risk.authorize`` does that, under the lock that
     makes the sum exact, when the movement is made.
@@ -182,12 +186,12 @@ async def check_policy(
         return _ALLOW
     policy = await _policy_of(session, agent_id)
 
-    # A conversion is between the owner's own wallets: there is nobody to pay.
-    if (
-        kind != "conversion"
-        and not policy.any_recipient
-        and not await _may_pay(session, policy, recipient)
-    ):
+    if kind == "conversion":
+        # A conversion is between the owner's own wallets: there is nobody to pay, so no
+        # list to be on. What is asked is that the owner has said anything at all.
+        if policy.updated_at is None:
+            raise PolicyNotSet
+    elif not policy.any_recipient and not await _may_pay(session, policy, recipient):
         raise RecipientNotAllowed
 
     value = await risk.usd_value(session, asset, amount)

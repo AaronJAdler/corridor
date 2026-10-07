@@ -11,6 +11,7 @@ from corridor.payments.deposits import (
     apply_chain_deposit_failed,
     apply_statement_deposit,
     get_deposit,
+    get_suspense_deposit,
     list_deposits,
     release_from_suspense,
 )
@@ -26,6 +27,7 @@ from corridor.payments.errors import (
     DepositNotFound,
     DepositNotInSuspense,
     DepositNotReceived,
+    DepositOwnerClosed,
     DuplicateTransfer,
     DuplicateWithdrawal,
     InvalidAddress,
@@ -38,6 +40,7 @@ from corridor.payments.errors import (
     RecipientNotFound,
     TransferNotFound,
     UnsupportedBeneficiaryAsset,
+    WithdrawalNotAgents,
     WithdrawalNotCancelable,
     WithdrawalNotFound,
 )
@@ -56,7 +59,11 @@ from corridor.payments.queries import (
     withdrawals_completed_between,
     withdrawals_in_flight,
 )
-from corridor.payments.returns import apply_bank_deposit_returned
+from corridor.payments.returns import (
+    apply_bank_deposit_returned,
+    apply_statement_return,
+    return_from_suspense,
+)
 from corridor.payments.sweeper import sweep_payouts
 from corridor.payments.transfers import create_transfer, get_transfer, list_transfers
 from corridor.payments.types import (
@@ -67,6 +74,7 @@ from corridor.payments.types import (
     DepositInstruction,
     DepositStatus,
     FlowKind,
+    SuspenseSettlement,
     Transfer,
     TransferStatus,
     Withdrawal,
@@ -98,6 +106,7 @@ __all__ = [
     "DepositNotFound",
     "DepositNotInSuspense",
     "DepositNotReceived",
+    "DepositOwnerClosed",
     "DepositStatus",
     "DuplicateTransfer",
     "DuplicateWithdrawal",
@@ -110,11 +119,13 @@ __all__ = [
     "ProviderEventMismatch",
     "ProviderUnavailable",
     "RecipientNotFound",
+    "SuspenseSettlement",
     "Transfer",
     "TransferNotFound",
     "TransferStatus",
     "UnsupportedBeneficiaryAsset",
     "Withdrawal",
+    "WithdrawalNotAgents",
     "WithdrawalNotCancelable",
     "WithdrawalNotFound",
     "WithdrawalStatus",
@@ -126,6 +137,7 @@ __all__ = [
     "apply_payout_completed",
     "apply_payout_failed",
     "apply_statement_deposit",
+    "apply_statement_return",
     "apply_withdrawal_completed",
     "apply_withdrawal_failed",
     "cancel_withdrawal",
@@ -136,6 +148,7 @@ __all__ = [
     "find_withdrawals",
     "get_deposit",
     "get_deposit_instruction",
+    "get_suspense_deposit",
     "get_transfer",
     "get_withdrawal",
     "list_beneficiaries",
@@ -145,6 +158,7 @@ __all__ = [
     "reject_held_withdrawal",
     "release_from_suspense",
     "request_withdrawal",
+    "return_from_suspense",
     "send_cleared_withdrawal",
     "submit_withdrawal",
     "sweep_payouts",

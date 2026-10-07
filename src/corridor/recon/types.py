@@ -51,15 +51,16 @@ class Break:
     """One thing a provider and Corridor disagree about, as recorded."""
 
     id: uuid.UUID
-    # The run that first saw it.
+    # The run that first saw it, and the latest one that still did.
     run_id: uuid.UUID
+    last_seen_run_id: uuid.UUID
     kind: BreakKind
     provider: str
     # The provider's id for the deposit or the payout; the asset code for a balance.
     provider_ref: str
     asset: str
-    # What Corridor recorded and what the provider reports, in minor units. None on the
-    # side that has nothing.
+    # What Corridor recorded and what the provider reports, in minor units, as the latest
+    # run that saw the break found them. None on the side that has nothing.
     expected: int | None
     actual: int | None
     status: BreakStatus
@@ -109,6 +110,9 @@ class Finding:
     actual: int | None
     # The statement line of a deposit that is missing here.
     transaction: ProviderTransaction | None = None
+    # True when the same statement shows that deposit as returned: there is nothing left
+    # at the provider to credit.
+    returned: bool = False
     # The provider's payout for a withdrawal that is still in flight here.
     sent: Sent | None = None
     withdrawal_id: uuid.UUID | None = None

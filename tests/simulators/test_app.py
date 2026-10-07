@@ -262,6 +262,7 @@ CONTROL_ROUTES = [
     ("POST", "/reset"),
     ("GET", "/clock"),
     ("POST", "/clock/advance"),
+    ("GET", "/bank/virtual-accounts"),
     ("POST", "/bank/deposits"),
     ("POST", "/bank/deposits/dep_1/return"),
     ("GET", "/bank/payouts"),

@@ -42,9 +42,13 @@ from corridor.identity import generate_private_key_pem  # noqa: E402
 
 STARTUP_TIMEOUT_SECONDS = 30.0
 STOP_TIMEOUT_SECONDS = 10.0
-# The worker reconciles when it starts and every five minutes after that. The scenario
-# waits for the first run only, which comes within a second or two of the worker starting.
-RECONCILIATION_WAIT_SECONDS = 60.0
+# The worker of this stack reconciles every couple of seconds, and repairs a deposit the
+# bank has had for a second: a deployment's five minutes and two would make the scenario
+# wait that long for the one webhook it loses on purpose.
+RECONCILIATION_INTERVAL_SECONDS = 2
+RECONCILIATION_GRACE_SECONDS = 1
+# How long the scenario waits for anything that happens behind the API.
+WAIT_SECONDS = 60.0
 
 
 def free_port() -> int:
@@ -88,7 +92,6 @@ class Processes:
 
     base_url: str
     sim_url: str
-    sim_api_key: str = field(repr=False)
     corridor_environment: dict[str, str] = field(repr=False)
     sim_environment: dict[str, str] = field(repr=False)
     running: list[Running] = field(default_factory=list)
@@ -183,7 +186,6 @@ def scratch_stack() -> Iterator[Processes]:
     processes = Processes(
         base_url=base_url,
         sim_url=sim_url,
-        sim_api_key=sim_api_key,
         corridor_environment={
             **inherited,
             "CORRIDOR_ENVIRONMENT": "test",
@@ -201,6 +203,8 @@ def scratch_stack() -> Iterator[Processes]:
             "CORRIDOR_FX_RATES_API_KEY": sim_api_key,
             "CORRIDOR_BANK_RAIL_WEBHOOK_SECRETS": json.dumps([bank_secret]),
             "CORRIDOR_CUSTODY_WEBHOOK_SECRETS": json.dumps([custody_secret]),
+            "CORRIDOR_RECONCILIATION_INTERVAL_SECONDS": str(RECONCILIATION_INTERVAL_SECONDS),
+            "CORRIDOR_RECONCILIATION_GRACE_SECONDS": str(RECONCILIATION_GRACE_SECONDS),
         },
         sim_environment={
             **inherited,
@@ -239,8 +243,8 @@ def arrives(stack: Stack, person: Person, asset: str, amount: str) -> bool:
 
 
 def lost_deposit(stack: Stack, bruno: Person) -> None:
-    """A deposit whose webhook never arrives. Run before the worker is started: the
-    reconciliation job is due when a worker first starts, and then not for five minutes."""
+    """A deposit whose webhook never arrives, while the worker is running: only its next
+    reconciliation run can find it."""
     stack.control("POST", "/webhooks/behaviour", {"drop_types": ["deposit.received"]})
     deposit_id = stack.bank_deposit(bruno, "75.00")
     # The simulator delivers on its own clock. Give it time to have delivered, had it
@@ -310,12 +314,7 @@ def agent_payments(stack: Stack, ana: Person, bruno: Person) -> None:
 
 
 def scenario(processes: Processes) -> None:
-    stack = Stack(
-        processes.base_url,
-        processes.sim_url,
-        sim_api_key=processes.sim_api_key,
-        wait_seconds=RECONCILIATION_WAIT_SECONDS,
-    )
+    stack = Stack(processes.base_url, processes.sim_url, wait_seconds=WAIT_SECONDS)
     try:
         ready = stack.api.get("/readyz")
         check(ready.status_code == 200, "the API is up and reaches PostgreSQL and Redis")
@@ -324,13 +323,6 @@ def scenario(processes: Processes) -> None:
         check(
             available(stack, ana) == 0 and available(stack, bruno) == 0,
             "two users register and start with nothing",
-        )
-
-        lost_deposit(stack, bruno)
-        processes.start_worker()
-        check(
-            arrives(stack, bruno, "USD", "75.00"),
-            "the worker starts, reconciliation finds the deposit at the bank, and Bruno has 75.00",
         )
 
         details = stack.deposit_instruction(ana)["details"]
@@ -358,8 +350,14 @@ def scenario(processes: Processes) -> None:
             sent.status_code == 201
             and sent.json()["status"] == "completed"
             and available(stack, ana) == Decimal("350.00") - Decimal(sent.json()["fee"])
-            and available(stack, bruno) == Decimal("125.00"),
-            "Ana sends Bruno 50.00 USD, and he has 125.00",
+            and available(stack, bruno) == Decimal("50.00"),
+            "Ana sends Bruno 50.00 USD, and he has 50.00",
+        )
+
+        lost_deposit(stack, bruno)
+        check(
+            arrives(stack, bruno, "USD", "125.00"),
+            "reconciliation finds the deposit at the bank mid-run, and Bruno has 125.00",
         )
 
         beneficiary_id = stack.add_beneficiary(bruno)
@@ -406,6 +404,7 @@ def run_scenario() -> int:
         try:
             processes.start_simulator()
             processes.start_api()
+            processes.start_worker()
             scenario(processes)
         except Exception as failure:
             print(f"\nEnd-to-end run failed: {failure}")
@@ -435,8 +434,8 @@ def run_demo() -> int:
                     processes.sim_url,
                 ],
                 cwd=ROOT,
-                # The demo reads the provider API key and the database from the same
-                # settings the API runs with.
+                # The demo ends by verifying the ledger, which reads the database from
+                # the same settings the API runs with.
                 env=processes.corridor_environment,
                 check=False,
             )

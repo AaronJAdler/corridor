@@ -2,8 +2,13 @@
 
 One admin asks for it, with a reason and the postings; a different admin approves it, and
 the approval is what posts the entry. Nothing is posted for an adjustment that is only
-asked for, or that is rejected. Releasing money from suspense, to a user or back to where
-it came from, is an adjustment whose postings are worked out here instead of typed.
+asked for, or that is rejected.
+
+Money leaves suspense as the deposit it arrived as, and in no other way. Releasing a
+deposit to a user, or sending it back to where it came from, is an adjustment that names
+the deposit: its postings are worked out here instead of typed, and the approval hands it
+to payments, which looks at the deposit under its lock and moves it out of suspense once.
+An adjustment written by hand cannot debit suspense at all.
 
 Each function takes the caller's session and runs inside the caller's transaction.
 """
@@ -26,10 +31,10 @@ from corridor.ops.errors import (
     SelfApproval,
 )
 from corridor.ops.models import AdjustmentRow
-from corridor.ops.types import Adjustment, AdjustmentStatus, Leg
+from corridor.ops.types import Adjustment, AdjustmentKind, AdjustmentStatus, Leg
 from corridor.platform.clock import utcnow
 from corridor.platform.db import advisory_xact_lock, lock_key
-from corridor.platform.money import MAX_MINOR_UNITS, get_asset
+from corridor.platform.money import MAX_MINOR_UNITS
 from corridor.platform.pagination import (
     DEFAULT_LIMIT,
     InvalidCursor,
@@ -61,50 +66,13 @@ async def request_adjustment(
 
     The postings are checked now, so that what waits for approval is something that can
     be posted: each names an existing account once, in the asset it says, and they balance
-    in every asset.
+    in every asset. None of them takes money out of suspense: that is asked for by naming
+    the deposit, with ``request_suspense_release`` or ``request_suspense_return``.
     """
     identity.require_admin(principal)
-    reason = reason.strip()
-    if not 0 < len(reason) <= MAX_REASON_LENGTH:
-        raise InvalidAdjustment(
-            f"A reason of 1 to {MAX_REASON_LENGTH} characters is required.", field="reason"
-        )
     await _check(session, legs)
-
-    inserted = await session.execute(
-        insert(_adjustments)
-        .values(
-            id=adjustment_id,
-            requested_by=principal.user_id,
-            approved_by=None,
-            status="pending",
-            reason=reason,
-            legs=[
-                {
-                    "account_id": str(leg.account_id),
-                    "asset": leg.asset,
-                    "direction": leg.direction.value,
-                    # A string: a JSON number would lose precision above 2^53.
-                    "amount": str(leg.amount),
-                }
-                for leg in legs
-            ],
-            entry_id=None,
-            created_at=utcnow(),
-            decided_at=None,
-        )
-        .returning(_adjustments)
-    )
-    adjustment = _adjustment(inserted.mappings().one())
-    await audit.record(
-        session,
-        actor=audit.Actor.admin(principal.user_id),
-        action="adjustment.requested",
-        resource_type="adjustment",
-        resource_id=adjustment.id,
-        details={"reason": reason, "legs": len(legs)},
-    )
-    return adjustment
+    await _refuse_suspense_debit(session, legs)
+    return await _record(session, principal, adjustment_id, reason, legs, kind="manual")
 
 
 async def request_suspense_release(
@@ -113,23 +81,32 @@ async def request_suspense_release(
     *,
     adjustment_id: uuid.UUID,
     reason: str,
-    asset: str,
-    amount: int,
+    deposit_id: uuid.UUID,
     user_id: uuid.UUID,
 ) -> Adjustment:
-    """Ask for money in suspense to be credited to a user's available balance."""
+    """Ask for a deposit in suspense to be credited to a user's available balance.
+
+    The deposit must be in suspense now and the user must be able to receive it. Both are
+    looked at again when the adjustment is approved, which may be much later.
+    """
     identity.require_admin(principal)
-    suspense = await _suspense_holding(session, asset, amount)
-    wallet = await wallets.resolve(session, user_id, asset)
-    return await request_adjustment(
+    deposit = await payments.get_suspense_deposit(session, deposit_id)
+    if (await identity.get_user(session, user_id)).status == "closed":
+        raise payments.DepositOwnerClosed
+    suspense = await ledger.open_account(session, AccountKind.SUSPENSE, deposit.asset)
+    wallet = await wallets.resolve(session, user_id, deposit.asset)
+    return await _record(
         session,
         principal,
-        adjustment_id=adjustment_id,
-        reason=reason,
-        legs=(
-            Leg(suspense, asset, Direction.DEBIT, amount),
-            Leg(wallet.available_account_id, asset, Direction.CREDIT, amount),
+        adjustment_id,
+        reason,
+        (
+            Leg(suspense.id, deposit.asset, Direction.DEBIT, deposit.amount),
+            Leg(wallet.available_account_id, deposit.asset, Direction.CREDIT, deposit.amount),
         ),
+        kind="suspense_release",
+        deposit_id=deposit_id,
+        user_id=user_id,
     )
 
 
@@ -139,29 +116,30 @@ async def request_suspense_return(
     *,
     adjustment_id: uuid.UUID,
     reason: str,
-    asset: str,
-    amount: int,
+    deposit_id: uuid.UUID,
 ) -> Adjustment:
-    """Ask for money in suspense to be taken off the books as sent back through the
+    """Ask for a deposit in suspense to be taken off the books as sent back through the
     provider it arrived at. Sending it is the operator's to do with the provider."""
     identity.require_admin(principal)
-    suspense = await _suspense_holding(session, asset, amount)
-    if get_asset(asset).kind == "fiat":
-        kind, provider = AccountKind.BANK_SETTLEMENT, payments.BANK_PROVIDER
-    else:
-        kind, provider = AccountKind.CUSTODY_OMNIBUS, payments.CUSTODY_PROVIDER
-    arrived_at = await ledger.find_account(session, kind, asset, provider=provider)
-    if arrived_at is None:
-        raise InvalidAdjustment("Nothing has arrived through a provider in this asset.")
-    return await request_adjustment(
+    deposit = await payments.get_suspense_deposit(session, deposit_id)
+    suspense = await ledger.open_account(session, AccountKind.SUSPENSE, deposit.asset)
+    arrived_at = await ledger.open_account(
+        session,
+        AccountKind.BANK_SETTLEMENT if deposit.kind == "bank" else AccountKind.CUSTODY_OMNIBUS,
+        deposit.asset,
+        provider=deposit.provider,
+    )
+    return await _record(
         session,
         principal,
-        adjustment_id=adjustment_id,
-        reason=reason,
-        legs=(
-            Leg(suspense, asset, Direction.DEBIT, amount),
-            Leg(arrived_at.id, asset, Direction.CREDIT, amount),
+        adjustment_id,
+        reason,
+        (
+            Leg(suspense.id, deposit.asset, Direction.DEBIT, deposit.amount),
+            Leg(arrived_at.id, deposit.asset, Direction.CREDIT, deposit.amount),
         ),
+        kind="suspense_return",
+        deposit_id=deposit_id,
     )
 
 
@@ -178,6 +156,13 @@ async def approve_adjustment(
     transfer does, so that user's money-out lock is taken first, before the adjustment's
     row and before any balance, in the order every money path takes its locks. The legs
     are written once, with the request, so they are read for that without a lock.
+
+    One that takes a deposit out of suspense is carried out by payments, after the
+    adjustment's row and under the deposit's: the deposit must still be in suspense, and
+    it leaves suspense in this transaction. So two adjustments for one deposit, or an
+    adjustment and a cleared review, or an adjustment and the bank's own return, move the
+    money once, whichever comes first. The one that comes second is refused and stays
+    pending, for an admin to reject.
     """
     identity.require_admin(principal)
     await advisory_xact_lock(session, await _money_out_locks(session, adjustment_id))
@@ -188,31 +173,55 @@ async def approve_adjustment(
         raise SelfApproval
 
     pending = _adjustment(row)
-    entry = await ledger.post_entry(
-        session,
-        EntryDraft(
-            kind=ENTRY_KIND,
-            source_type=SOURCE_TYPE,
-            source_id=str(adjustment_id),
-            postings=tuple(
-                PostingDraft(leg.account_id, leg.direction, leg.amount) for leg in pending.legs
+    actor = audit.Actor.admin(principal.user_id)
+    metadata = {
+        "adjustment_id": str(adjustment_id),
+        "requested_by": str(pending.requested_by),
+        "approved_by": str(principal.user_id),
+    }
+    if pending.deposit_id is None:
+        # Asked for before suspense was closed to adjustments written by hand, perhaps.
+        await _refuse_suspense_debit(session, pending.legs)
+        entry = await ledger.post_entry(
+            session,
+            EntryDraft(
+                kind=ENTRY_KIND,
+                source_type=SOURCE_TYPE,
+                source_id=str(adjustment_id),
+                postings=tuple(
+                    PostingDraft(leg.account_id, leg.direction, leg.amount) for leg in pending.legs
+                ),
+                metadata=metadata,
             ),
-            metadata={
-                "requested_by": str(pending.requested_by),
-                "approved_by": str(principal.user_id),
-            },
-        ),
-    )
+        )
+        entry_id = entry.id
+    elif pending.kind == "suspense_return":
+        returned = await payments.return_from_suspense(
+            session, pending.deposit_id, actor=actor, metadata=metadata
+        )
+        entry_id = returned.entry_id
+    elif pending.user_id is not None:
+        released = await payments.release_from_suspense(
+            session, pending.deposit_id, pending.user_id, actor=actor, metadata=metadata
+        )
+        entry_id = released.entry_id
+    else:  # pragma: no cover - the table refuses a release that names nobody
+        raise RuntimeError(f"adjustment {adjustment_id} releases a deposit to nobody")
     approved = await _decide(
-        session, adjustment_id, status="approved", approved_by=principal.user_id, entry_id=entry.id
+        session, adjustment_id, status="approved", approved_by=principal.user_id, entry_id=entry_id
     )
     await audit.record(
         session,
-        actor=audit.Actor.admin(principal.user_id),
+        actor=actor,
         action="adjustment.approved",
         resource_type="adjustment",
         resource_id=adjustment_id,
-        details={"entry_id": str(entry.id), "requested_by": str(pending.requested_by)},
+        details={
+            "entry_id": str(entry_id),
+            "requested_by": str(pending.requested_by),
+            "kind": pending.kind,
+            **({} if pending.deposit_id is None else {"deposit_id": str(pending.deposit_id)}),
+        },
     )
     return approved
 
@@ -241,11 +250,19 @@ async def reject_adjustment(
 async def get_adjustment(
     session: AsyncSession, principal: Principal, adjustment_id: uuid.UUID
 ) -> Adjustment:
+    """One adjustment, for an admin. That it was read is written to the audit log."""
     identity.require_admin(principal)
     rows = await session.execute(select(_adjustments).where(_adjustments.c.id == adjustment_id))
     row = rows.mappings().one_or_none()
     if row is None:
         raise AdjustmentNotFound
+    await audit.record(
+        session,
+        actor=audit.Actor.admin(principal.user_id),
+        action="adjustment.read",
+        resource_type="adjustment",
+        resource_id=adjustment_id,
+    )
     return _adjustment(row)
 
 
@@ -257,7 +274,8 @@ async def list_adjustments(
     cursor: str | None = None,
     limit: int = DEFAULT_LIMIT,
 ) -> Page[Adjustment]:
-    """One page of adjustments, newest first. All of them, or those in one status."""
+    """One page of adjustments, newest first, for an admin. All of them, or those in one
+    status. That they were read is written to the audit log."""
     identity.require_admin(principal)
     limit = clamp_limit(limit)
     # The cursor is tied to the filter, so one from another list is refused.
@@ -271,6 +289,13 @@ async def list_adjustments(
     rows = await session.execute(query.order_by(_adjustments.c.id.desc()).limit(limit + 1))
     found = [_adjustment(row) for row in rows.mappings()]
     shown = found[:limit]
+    await audit.record(
+        session,
+        actor=audit.Actor.admin(principal.user_id),
+        action="adjustment.listed",
+        resource_type="adjustment",
+        details={"status": scope, "returned": len(shown)},
+    )
     return Page(
         items=tuple(shown),
         next_cursor=(
@@ -279,6 +304,85 @@ async def list_adjustments(
             else None
         ),
     )
+
+
+async def _record(
+    session: AsyncSession,
+    principal: Principal,
+    adjustment_id: uuid.UUID,
+    reason: str,
+    legs: Sequence[Leg],
+    *,
+    kind: AdjustmentKind,
+    deposit_id: uuid.UUID | None = None,
+    user_id: uuid.UUID | None = None,
+) -> Adjustment:
+    """Write a pending adjustment and the audit event that says who asked for it."""
+    reason = reason.strip()
+    if not 0 < len(reason) <= MAX_REASON_LENGTH:
+        raise InvalidAdjustment(
+            f"A reason of 1 to {MAX_REASON_LENGTH} characters is required.", field="reason"
+        )
+    inserted = await session.execute(
+        insert(_adjustments)
+        .values(
+            id=adjustment_id,
+            requested_by=principal.user_id,
+            approved_by=None,
+            status="pending",
+            kind=kind,
+            deposit_id=deposit_id,
+            user_id=user_id,
+            reason=reason,
+            legs=[
+                {
+                    "account_id": str(leg.account_id),
+                    "asset": leg.asset,
+                    "direction": leg.direction.value,
+                    # A string: a JSON number would lose precision above 2^53.
+                    "amount": str(leg.amount),
+                }
+                for leg in legs
+            ],
+            entry_id=None,
+            created_at=utcnow(),
+            decided_at=None,
+        )
+        .returning(_adjustments)
+    )
+    adjustment = _adjustment(inserted.mappings().one())
+    await audit.record(
+        session,
+        actor=audit.Actor.admin(principal.user_id),
+        action="adjustment.requested",
+        principal_id=user_id,
+        resource_type="adjustment",
+        resource_id=adjustment.id,
+        details={
+            "reason": reason,
+            "legs": len(legs),
+            "kind": kind,
+            **({} if deposit_id is None else {"deposit_id": str(deposit_id)}),
+        },
+    )
+    return adjustment
+
+
+async def _refuse_suspense_debit(session: AsyncSession, legs: Sequence[Leg]) -> None:
+    """Refuse postings written by hand that take money out of suspense.
+
+    Suspense holds deposits, each of which leaves it once, under its own row's lock. A
+    debit that names no deposit would take the money and leave the deposit there, to be
+    released or returned a second time.
+    """
+    for leg in legs:
+        if leg.direction is not Direction.DEBIT:
+            continue
+        if (await ledger.get_account(session, leg.account_id)).kind is AccountKind.SUSPENSE:
+            raise InvalidAdjustment(
+                "Money leaves suspense by releasing or returning the deposit it arrived as.",
+                field="legs",
+            )
 
 
 async def _check(session: AsyncSession, legs: Sequence[Leg]) -> None:
@@ -329,16 +433,6 @@ async def _money_out_locks(session: AsyncSession, adjustment_id: uuid.UUID) -> l
     return keys
 
 
-async def _suspense_holding(session: AsyncSession, asset: str, amount: int) -> uuid.UUID:
-    """The suspense account of an asset, provided it holds at least ``amount`` now."""
-    get_asset(asset)
-    suspense = await ledger.find_account(session, AccountKind.SUSPENSE, asset)
-    held = await ledger.get_balance(session, suspense.id) if suspense is not None else 0
-    if suspense is None or amount > held:
-        raise InvalidAdjustment("Suspense does not hold that much in this asset.", field="amount")
-    return suspense.id
-
-
 async def _lock(session: AsyncSession, adjustment_id: uuid.UUID) -> RowMapping:
     rows = await session.execute(
         select(_adjustments).where(_adjustments.c.id == adjustment_id).with_for_update()
@@ -383,6 +477,9 @@ def _adjustment(row: RowMapping) -> Adjustment:
         requested_by=row["requested_by"],
         approved_by=row["approved_by"],
         status=row["status"],
+        kind=row["kind"],
+        deposit_id=row["deposit_id"],
+        user_id=row["user_id"],
         reason=row["reason"],
         legs=tuple(
             Leg(

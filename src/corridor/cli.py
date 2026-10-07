@@ -119,19 +119,11 @@ def verify_ledger() -> None:
 
 
 @app.command()
-def demo(
+def demo(  # pragma: no cover - a client of a running stack, run as a process of its own
     base_url: Annotated[str, typer.Option(help="Where the API listens.")] = "http://127.0.0.1:8000",
     sim_url: Annotated[
         str, typer.Option(help="Where the provider simulator listens.")
     ] = "http://127.0.0.1:8100",
-    sim_api_key: Annotated[
-        str,
-        typer.Option(
-            envvar="CORRIDOR_BANK_RAIL_API_KEY",
-            show_envvar=True,
-            help="The provider API key the stack calls the simulator with.",
-        ),
-    ] = "",
     sim_control_token: Annotated[
         str,
         typer.Option(
@@ -151,14 +143,8 @@ def demo(
     """
     from corridor import demo as story
 
-    if not sim_api_key:
-        raise typer.BadParameter(
-            "set CORRIDOR_BANK_RAIL_API_KEY or pass --sim-api-key", param_hint="--sim-api-key"
-        )
     typer.echo(f"Corridor demo: the API at {base_url}, the simulated providers at {sim_url}.\n")
-    stack = story.Stack(
-        base_url, sim_url, sim_api_key=sim_api_key, sim_control_token=sim_control_token or None
-    )
+    stack = story.Stack(base_url, sim_url, sim_control_token=sim_control_token or None)
     try:
         story.run(stack)
     except story.DemoError as refusal:

@@ -6,13 +6,14 @@ delivered, a deposit that is recalled, or a provider that forgets everything it 
 """
 
 import uuid
+from datetime import timedelta
 from typing import Any
 
 import pytest
 from prometheus_client import REGISTRY
 from sqlalchemy import text
 
-from corridor import ops, recon, risk
+from corridor import ops, recon, risk, wallets
 from corridor.identity import Principal
 from corridor.ledger import AccountKind
 from corridor.platform.ids import new_id
@@ -29,6 +30,7 @@ from tests.recon.support import (
     let_pass,
     submitted,
 )
+from tests.support.ledger import fund
 from tests.support.providers import CLOSED_ACCOUNT_NUMBER
 from tests.support.stack import PROVIDER_FEE, Stack
 
@@ -393,6 +395,103 @@ async def test_a_break_that_is_still_open_is_not_opened_again_by_the_next_run(
     stored = await breaks(stack)
     assert len(stored) == 2
     assert {row["run_id"] for row in stored} == {first.run.id}
+    assert {row["last_seen_run_id"] for row in stored} == {second.run.id}
+
+
+def changed(kind: str) -> float:
+    """How many times this process has counted an open break of a kind as changed."""
+    value = REGISTRY.get_sample_value("corridor_recon_break_changes_total", {"kind": kind})
+    return value or 0.0
+
+
+async def test_an_open_break_is_brought_up_to_date_by_a_run_that_finds_it_changed(
+    stack: Stack, reconcile: Reconcile
+) -> None:
+    user, _ = await funded(stack)
+    await forget(stack)
+    await let_pass(stack)
+    first = await reconcile()
+    (balance,) = await breaks(stack, "kind = 'settlement_balance'")
+    assert (balance["expected"], balance["actual"]) == (500_00, 0)
+    before = (changed("settlement_balance"), changed("unknown_deposit"))
+    # The books come to hold 40.00 more at the bank, which the bank knows nothing of.
+    async with stack.db.transaction() as session:
+        wallet = await wallets.get_wallet(session, uuid.UUID(user.id), "USD")
+        await fund(session, wallet.available_account_id, 40_00)
+    await let_pass(stack)
+
+    second = await reconcile()
+
+    (balance,) = await breaks(stack, "kind = 'settlement_balance'")
+    assert (balance["expected"], balance["actual"]) == (540_00, 0)
+    assert (balance["run_id"], balance["last_seen_run_id"]) == (first.run.id, second.run.id)
+    assert balance["status"] == "open"
+    assert second.run.breaks_opened == 0
+    (returned,) = [found for found in second.breaks if found.kind == "settlement_balance"]
+    assert (returned.expected, returned.actual, returned.last_seen_run_id) == (
+        540_00,
+        0,
+        second.run.id,
+    )
+    # The deposit the bank forgot is the same disagreement as before, seen again.
+    (unknown,) = await breaks(stack, "kind = 'unknown_deposit'")
+    assert unknown["last_seen_run_id"] == second.run.id
+    assert (changed("settlement_balance"), changed("unknown_deposit")) == (
+        before[0] + 1,
+        before[1],
+    )
+
+
+async def test_a_break_no_later_run_sees_keeps_the_run_that_last_saw_it(
+    stack: Stack, reconcile: Reconcile
+) -> None:
+    await funded(stack)
+    await forget(stack)
+    await let_pass(stack)
+    first = await reconcile()
+    # Long enough for the forgotten deposit to have left every window.
+    await let_pass(stack, (recon.LOOKBACK + 2 * WINDOW).total_seconds())
+
+    later = await reconcile()
+
+    (unknown,) = await breaks(stack, "kind = 'unknown_deposit'")
+    assert "unknown_deposit" not in kinds(later.breaks)
+    assert (unknown["status"], unknown["last_seen_run_id"]) == ("open", first.run.id)
+
+
+# --- a deposit too new to repair -----------------------------------------------------------------
+
+
+async def test_a_missing_deposit_younger_than_the_grace_is_left_for_its_webhook(
+    stack: Stack, bank: SimBank, custody: SimCustody
+) -> None:
+    user = await stack.person()
+    await stack.webhooks_behave(drop_types=["deposit.received"])
+    await stack.bank_deposit(user, "250.00")
+    await let_pass(stack, 60)
+
+    async def run_with_grace() -> recon.RunResult:
+        now = stack.clock.now()
+        return await recon.run(
+            stack.db,
+            bank,
+            custody,
+            window_start=now - WINDOW,
+            window_end=now,
+            grace=timedelta(seconds=120),
+        )
+
+    early = await run_with_grace()
+
+    # Not a break yet, and not a difference in the balance either: it is in transit.
+    assert (early.breaks, early.repaired) == ((), 0)
+    assert await stack.wallet(user) == (0, 0)
+
+    await let_pass(stack, 61)
+    late = await run_with_grace()
+
+    assert (kinds(late.breaks), late.repaired) == (["missing_deposit"], 1)
+    assert await stack.wallet(user) == (250_00, 0)
 
 
 async def test_a_break_that_was_resolved_is_opened_again_if_it_is_found_again(

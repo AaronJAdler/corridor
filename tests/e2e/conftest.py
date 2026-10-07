@@ -1,15 +1,9 @@
 """The end-to-end test starts three processes and waits on real time, so it runs only when
-it is asked for: ``uv run pytest -m e2e``."""
+it is asked for: ``uv run pytest -m e2e``. The marker is registered in ``pyproject.toml``."""
 
 import pytest
 
 MARKER = "e2e"
-
-
-def pytest_configure(config: pytest.Config) -> None:
-    config.addinivalue_line(
-        "markers", f"{MARKER}: starts the whole stack as real processes; run with -m {MARKER}"
-    )
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

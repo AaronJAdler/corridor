@@ -1,7 +1,8 @@
 """The reconciliation tables. Private to this module: nothing outside ``corridor.recon``
 imports them.
 
-The authoritative definition, with grants, is ``migrations/versions/0013_recon.py``. A test
+The authoritative definition, with grants, is ``migrations/versions/0013_recon.py`` and
+``0018_review_c.py``. A test
 compares the two.
 """
 
@@ -61,6 +62,9 @@ class ReconBreakRow(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
     run_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("recon_runs.id", deferrable=True, initially="DEFERRED"), index=True
+    )
+    last_seen_run_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("recon_runs.id", deferrable=True, initially="DEFERRED")
     )
     kind: Mapped[str] = mapped_column(Text)
     provider: Mapped[str] = mapped_column(Text)

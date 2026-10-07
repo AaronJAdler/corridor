@@ -127,16 +127,16 @@ class AdjustmentRequest(_Request):
 
 class SuspenseReleaseRequest(_Request):
     reason: Annotated[Text, Field(max_length=ops.MAX_REASON_LENGTH)]
-    asset: Annotated[Text, Field(max_length=_MAX_FIELD_LENGTH)]
-    amount: Annotated[Text, Field(max_length=_MAX_FIELD_LENGTH)]
+    # The deposit to release, whole. Its asset and amount are the deposit's own.
+    deposit_id: uuid.UUID
     # Whose available balance the money is credited to.
     user_id: uuid.UUID
 
 
 class SuspenseReturnRequest(_Request):
     reason: Annotated[Text, Field(max_length=ops.MAX_REASON_LENGTH)]
-    asset: Annotated[Text, Field(max_length=_MAX_FIELD_LENGTH)]
-    amount: Annotated[Text, Field(max_length=_MAX_FIELD_LENGTH)]
+    # The deposit to book as sent back, whole.
+    deposit_id: uuid.UUID
 
 
 class LegResponse(BaseModel):
@@ -150,6 +150,11 @@ class LegResponse(BaseModel):
 class AdjustmentResponse(BaseModel):
     id: uuid.UUID
     status: ops.AdjustmentStatus
+    kind: ops.AdjustmentKind
+    # The deposit a suspense adjustment takes out of suspense, and for a release the user
+    # it is credited to. Null for an adjustment written by hand.
+    deposit_id: uuid.UUID | None
+    user_id: uuid.UUID | None
     reason: str
     legs: list[LegResponse]
     requested_by: uuid.UUID
@@ -164,6 +169,9 @@ class AdjustmentResponse(BaseModel):
         return cls(
             id=adjustment.id,
             status=adjustment.status,
+            kind=adjustment.kind,
+            deposit_id=adjustment.deposit_id,
+            user_id=adjustment.user_id,
             reason=adjustment.reason,
             legs=[
                 LegResponse(
@@ -237,7 +245,7 @@ async def request_adjustment(
     "/adjustments/suspense-release",
     status_code=201,
     response_model=AdjustmentResponse,
-    summary="Ask for money in suspense to be credited to a user",
+    summary="Ask for a deposit in suspense to be credited to a user",
 )
 async def request_suspense_release(
     request: Request,
@@ -246,16 +254,13 @@ async def request_suspense_release(
     db: Db,
     key: IdempotencyKey,
 ) -> JSONResponse:
-    amount = parse_amount(body.amount, body.asset)
-
     async def work(session: AsyncSession) -> StoredResponse:
         adjustment = await ops.request_suspense_release(
             session,
             principal,
             adjustment_id=new_id(),
             reason=body.reason,
-            asset=body.asset,
-            amount=amount,
+            deposit_id=body.deposit_id,
             user_id=body.user_id,
         )
         return _stored(201, adjustment)
@@ -267,7 +272,7 @@ async def request_suspense_release(
     "/adjustments/suspense-return",
     status_code=201,
     response_model=AdjustmentResponse,
-    summary="Ask for money in suspense to be booked as sent back",
+    summary="Ask for a deposit in suspense to be booked as sent back",
 )
 async def request_suspense_return(
     request: Request,
@@ -276,16 +281,13 @@ async def request_suspense_return(
     db: Db,
     key: IdempotencyKey,
 ) -> JSONResponse:
-    amount = parse_amount(body.amount, body.asset)
-
     async def work(session: AsyncSession) -> StoredResponse:
         adjustment = await ops.request_suspense_return(
             session,
             principal,
             adjustment_id=new_id(),
             reason=body.reason,
-            asset=body.asset,
-            amount=amount,
+            deposit_id=body.deposit_id,
         )
         return _stored(201, adjustment)
 
@@ -370,6 +372,7 @@ async def _idempotent(
         key=key,
         method=request.method,
         route=route_template(request.scope),
+        path=request.url.path,
         body=await request.body(),
         work=work,
     )

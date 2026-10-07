@@ -111,6 +111,17 @@ class RecipientNotAllowed(PermissionDenied):
         super().__init__("This agent's policy does not allow it to pay this recipient.")
 
 
+class PolicyNotSet(PermissionDenied):
+    """The agent's owner has set no policy for it, so it may not convert. An agent with
+    no policy can pay nobody, and it can move nothing between its owner's wallets either."""
+
+    code = "policy_not_set"
+    title = "Agent has no policy"
+
+    def __init__(self) -> None:
+        super().__init__("This agent has no policy, so it cannot convert.")
+
+
 class ApprovalNotFound(NotFound):
     """There is no such request, or it is another user's: the two are not told apart."""
 

@@ -102,8 +102,12 @@ jobs:
           done
           exit 1
       - run: uv sync --frozen
-      - run: uv run poe test
+      # The suite with coverage recorded, then the two thresholds: what `poe check` runs
+      # after the static gates, which the lint job has already run.
+      - run: uv run poe test-cov
+      - run: uv run poe coverage
       - run: uv run poe smoke
+      - run: uv run poe e2e
 
   secret-scan:
     name: Secret scan
@@ -156,10 +160,9 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: false
       - run: uv sync --frozen
+      # The security linter runs offline, so it needs no token and says the same here as
+      # on a developer's machine.
       - run: uv run poe lint-ci
-        env:
-          # Lets the security linter look up the actions it audits. Read-only.
-          GH_TOKEN: ${{ github.token }}
 
   infra:
     name: Terraform lint

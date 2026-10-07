@@ -8,6 +8,7 @@ from corridor.api.routers import (
     admin_recon,
     admin_reviews,
     admin_risk,
+    admin_users,
     agents,
     approvals,
     auth,
@@ -41,4 +42,5 @@ ROUTERS: tuple[APIRouter, ...] = (
     admin_ops.router,
     admin_reviews.router,
     admin_risk.router,
+    admin_users.router,
 )

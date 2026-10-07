@@ -24,6 +24,7 @@ NOW = datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
 INSUFFICIENT_PRIVILEGE = "42501"
 ANA, BRUNO = new_id(), new_id()
 ENTRY = new_id()
+DEPOSIT, MARIA = new_id(), new_id()
 
 APPROVED: dict[str, Any] = {
     "status": "approved",
@@ -39,6 +40,9 @@ async def add_adjustment(db: Database, **changes: Any) -> uuid.UUID:
         "requested_by": ANA,
         "approved_by": None,
         "status": "pending",
+        "kind": "manual",
+        "deposit_id": None,
+        "user_id": None,
         "reason": "goodwill credit",
         "legs": json.dumps([]),
         "entry_id": None,
@@ -49,10 +53,10 @@ async def add_adjustment(db: Database, **changes: Any) -> uuid.UUID:
     async with db.transaction() as session:
         await session.execute(
             text(
-                "INSERT INTO ops_adjustments (id, requested_by, approved_by, status, reason,"
-                " legs, entry_id, created_at, decided_at) VALUES (:id, :requested_by,"
-                " :approved_by, :status, :reason, CAST(:legs AS jsonb), :entry_id, :created_at,"
-                " :decided_at)"
+                "INSERT INTO ops_adjustments (id, requested_by, approved_by, status, kind,"
+                " deposit_id, user_id, reason, legs, entry_id, created_at, decided_at) VALUES"
+                " (:id, :requested_by, :approved_by, :status, :kind, :deposit_id, :user_id,"
+                " :reason, CAST(:legs AS jsonb), :entry_id, :created_at, :decided_at)"
             ),
             values,
         )
@@ -125,6 +129,44 @@ async def test_the_table_refuses_a_pending_adjustment_becoming_approved_by_its_r
     ],
 )
 async def test_an_adjustment_that_contradicts_itself_is_refused(
+    db: Database, changes: dict[str, Any], constraint: str
+) -> None:
+    with pytest.raises(DBAPIError) as error:
+        await add_adjustment(db, **changes)
+
+    assert refused(error) == (CHECK_VIOLATION, constraint)
+
+
+async def test_a_release_and_a_return_of_a_deposit_are_accepted(db: Database) -> None:
+    await add_adjustment(db, kind="suspense_release", deposit_id=DEPOSIT, user_id=MARIA)
+    await add_adjustment(db, kind="suspense_return", deposit_id=DEPOSIT)
+
+
+@pytest.mark.parametrize(
+    ("changes", "constraint"),
+    [
+        ({"kind": "refund"}, "ck_ops_adjustments_kind"),
+        ({"kind": "suspense_release", "user_id": MARIA}, "ck_ops_adjustments_suspense"),
+        ({"kind": "suspense_return"}, "ck_ops_adjustments_suspense"),
+        ({"kind": "suspense_release", "deposit_id": DEPOSIT}, "ck_ops_adjustments_suspense"),
+        (
+            {"kind": "suspense_return", "deposit_id": DEPOSIT, "user_id": MARIA},
+            "ck_ops_adjustments_suspense",
+        ),
+        ({"deposit_id": DEPOSIT}, "ck_ops_adjustments_suspense"),
+        ({"user_id": MARIA}, "ck_ops_adjustments_suspense"),
+    ],
+    ids=[
+        "unknown-kind",
+        "release-of-no-deposit",
+        "return-of-no-deposit",
+        "release-to-nobody",
+        "return-to-a-user",
+        "by-hand-with-a-deposit",
+        "by-hand-with-a-user",
+    ],
+)
+async def test_a_suspense_adjustment_names_its_deposit_and_a_release_its_user(
     db: Database, changes: dict[str, Any], constraint: str
 ) -> None:
     with pytest.raises(DBAPIError) as error:

@@ -45,8 +45,9 @@ UPDATABLE: dict[str, set[str]] = {
 ROWS: dict[str, tuple[str, dict[str, Any]]] = {
     "withdrawals": (
         "INSERT INTO withdrawals (id, user_id, asset_code, amount, fee, kind, to_address, status,"
-        " provider, hold_entry_id, created_at, updated_at) VALUES (:id, :user, 'USDC', 100, 0,"
-        " 'chain', 'sim1address', 'held', 'simcustody', :entry, :now, :now)",
+        " provider, hold_entry_id, initiated_by_type, initiated_by_id, created_at, updated_at)"
+        " VALUES (:id, :user, 'USDC', 100, 0, 'chain', 'sim1address', 'held', 'simcustody',"
+        " :entry, 'user', :user, :now, :now)",
         {"user": new_id(), "entry": new_id()},
     ),
     "deposits": (
@@ -74,6 +75,8 @@ FORBIDDEN = [
     ("withdrawals", "UPDATE withdrawals SET to_address = 'sim1elsewhere'"),
     ("withdrawals", "UPDATE withdrawals SET hold_entry_id = :other"),
     ("withdrawals", "UPDATE withdrawals SET fee = 0"),
+    ("withdrawals", "UPDATE withdrawals SET initiated_by_type = 'agent'"),
+    ("withdrawals", "UPDATE withdrawals SET initiated_by_id = :other"),
     ("deposits", "UPDATE deposits SET amount = amount + 1"),
     ("deposits", "UPDATE deposits SET provider_ref = 'dep_2'"),
     ("deposits", "UPDATE deposits SET asset_code = 'MXN'"),

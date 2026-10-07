@@ -157,6 +157,7 @@ async def request_withdrawal(
         key=key,
         method=request.method,
         route=route_template(request.scope),
+        path=request.url.path,
         body=await request.body(),
         work=work,
     )

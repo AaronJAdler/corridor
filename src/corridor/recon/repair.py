@@ -2,7 +2,9 @@
 
 Both are an event that never arrived. The provider's own record of it is given to
 payments: a payout's result through the function its webhook would have reached, and a
-deposit through the one for deposits read from a statement. Both are idempotent, so a
+deposit through the one for deposits read from a statement, or, when the statement shows
+the bank took it back again, through the one that records it as returned and credits
+nothing. Both are idempotent, so a
 repair that races the late webhook, the payout sweeper or another run changes nothing
 twice. Nothing else is repaired: every other break needs a person to decide what is true.
 
@@ -46,7 +48,10 @@ async def repair(db: Database, found: Sequence[tuple[Break, Finding]], *, comple
     for _, finding in found:
         try:
             if finding.kind == "missing_deposit" and finding.transaction is not None:
-                await _record_deposit(db, finding.provider, finding.transaction)
+                if finding.returned:
+                    await _record_returned(db, finding.provider, finding.transaction)
+                else:
+                    await _record_deposit(db, finding.provider, finding.transaction)
             elif finding.kind == "missing_payout_result" and finding.sent is not None:
                 await _apply_result(db, finding.provider, finding.sent)
         except (payments.MalformedProviderEvent, payments.ProviderEventMismatch) as refusal:
@@ -83,6 +88,17 @@ async def _record_deposit(db: Database, provider: str, line: ProviderTransaction
         amount=line.amount,
         tx_hash=line.tx_hash,
         sender=None,
+    )
+
+
+async def _record_returned(db: Database, provider: str, line: ProviderTransaction) -> None:
+    """Hand payments a deposit that the statement shows as received and then returned.
+
+    Crediting it would pay out money the bank has already taken back. It is recorded as
+    returned instead, with nothing posted, which is also what stops its own late events.
+    """
+    await payments.apply_statement_return(
+        db, provider=provider, provider_ref=line.id, asset=line.asset_code, amount=line.amount
     )
 
 
@@ -140,9 +156,16 @@ async def _close_settled(
         )
         for item in items:
             deposit = recorded.get(item.provider_ref)
+            if deposit is None:
+                continue
             # A journal entry is the proof: the row alone may be a deposit still pending.
-            if deposit is not None and deposit.entry_id is not None:
+            if deposit.entry_id is not None:
                 await breaks.resolve_as_system(session, item.id, "The deposit is on the books.")
+                closed += 1
+            elif deposit.status == "returned":
+                await breaks.resolve_as_system(
+                    session, item.id, "The deposit was returned before it was received."
+                )
                 closed += 1
 
     waiting = [item for item in still_open if item.kind == "missing_payout_result"]

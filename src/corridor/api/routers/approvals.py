@@ -9,13 +9,14 @@ import uuid
 from datetime import datetime
 from typing import Self
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from corridor import agents
 from corridor.api.deps import CurrentPrincipal, Db, SettingsDep
 from corridor.api.idempotency import StoredResponse
+from corridor.api.ratelimit import money_rate_limit
 from corridor.platform.logging import get_logger
 from corridor.platform.money import format_amount
 from corridor.platform.pagination import DEFAULT_LIMIT, Page
@@ -123,7 +124,12 @@ async def list_approvals(
     )
 
 
-@router.post("/{approval_id}/approve", summary="Approve a request and make its movement")
+@router.post(
+    "/{approval_id}/approve",
+    summary="Approve a request and make its movement",
+    # Approving moves money, so it is counted with the routes that do, by who is acting.
+    dependencies=[Depends(money_rate_limit)],
+)
 async def approve(
     approval_id: uuid.UUID, principal: CurrentPrincipal, db: Db, settings: SettingsDep
 ) -> ApprovalResponse:

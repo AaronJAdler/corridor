@@ -321,14 +321,28 @@ async def _decide(
 
 
 def _details(row: RowMapping | dict[str, Any]) -> dict[str, Any]:
-    """What every audit event about a request says: whose agent, and what it would move."""
+    """What every audit event about a request says: whose agent, what it would move, and
+    to whom."""
+    stored = row["request"]
+    # Where the money would go, under the name the request itself has for it: the user a
+    # transfer pays, or the beneficiary or the address a withdrawal is sent to.
+    destination = {
+        name: stored[key]
+        for name, key in (
+            ("recipient_id", "recipient"),
+            ("beneficiary_id", "beneficiary_id"),
+            ("to_address", "to_address"),
+        )
+        if stored.get(key) is not None
+    }
     return {
         "agent_id": str(row["agent_id"]),
         "owner_user_id": str(row["owner_user_id"]),
         "kind": row["kind"],
         "movement_id": str(row["movement_id"]),
-        "asset": row["request"]["asset"],
-        "amount": row["request"]["amount"],
+        "asset": stored["asset"],
+        "amount": stored["amount"],
+        **destination,
     }
 
 

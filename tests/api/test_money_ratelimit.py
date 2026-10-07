@@ -122,6 +122,8 @@ def test_the_money_routes_are_the_ones_that_carry_the_limit(app: FastAPI) -> Non
         ("POST", "/v1/beneficiaries"),
         ("GET", "/v1/beneficiaries"),
         ("GET", "/v1/deposit-instructions"),
+        # Approving what an agent asked for makes the movement.
+        ("POST", "/v1/approvals/{approval_id}/approve"),
     }
 
 

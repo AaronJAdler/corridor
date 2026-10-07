@@ -67,18 +67,23 @@ async def record_run(
 
 async def open_break(
     session: AsyncSession, run_id: uuid.UUID, finding: Finding
-) -> tuple[Break, bool]:
-    """The open break for a disagreement, and whether this call opened it.
+) -> tuple[Break, bool, bool]:
+    """The open break for a disagreement, whether this call opened it, and whether the
+    difference it records changed.
 
     One disagreement has one open break however many runs see it: the insert does nothing
     when there is one, and a concurrent run inserting the same break waits here for the
-    first and then finds its row.
+    first and then finds its row. A break that is seen again is brought up to date: it
+    says what the two sides hold now and which run last saw it, so that an admin reads
+    today's difference and can tell a break that is still there from one no run has seen
+    since.
     """
     inserted = await session.execute(
         pg_insert(_breaks)
         .values(
             id=new_id(),
             run_id=run_id,
+            last_seen_run_id=run_id,
             kind=finding.kind,
             provider=finding.provider,
             provider_ref=finding.provider_ref,
@@ -99,16 +104,36 @@ async def open_break(
     )
     row = inserted.mappings().one_or_none()
     if row is not None:
-        return _break(row), True
+        return _break(row), True, False
+    # Locked, so that what it held is read and replaced without another run in between.
     existing = await session.execute(
-        select(_breaks).where(
+        select(_breaks)
+        .where(
             _breaks.c.kind == finding.kind,
             _breaks.c.provider == finding.provider,
             _breaks.c.provider_ref == finding.provider_ref,
             _breaks.c.status == "open",
         )
+        .with_for_update()
     )
-    return _break(existing.mappings().one()), False
+    before = existing.mappings().one()
+    changed = (before["expected"], before["actual"]) != (finding.expected, finding.actual)
+    refreshed = await session.execute(
+        update(_breaks)
+        .where(_breaks.c.id == before["id"])
+        .values(expected=finding.expected, actual=finding.actual, last_seen_run_id=run_id)
+        .returning(_breaks)
+    )
+    return _break(refreshed.mappings().one()), False, changed
+
+
+async def last_completed_window_end(session: AsyncSession) -> datetime | None:
+    """Where the latest window ends that a run compared in full. None if none ever did."""
+    found = await session.execute(
+        select(func.max(_runs.c.window_end)).where(_runs.c.status == "completed")
+    )
+    latest: datetime | None = found.scalar_one()
+    return latest
 
 
 async def lock_open(session: AsyncSession, kinds: Collection[BreakKind]) -> list[Break]:
@@ -293,6 +318,7 @@ def _break(row: RowMapping) -> Break:
     return Break(
         id=row["id"],
         run_id=row["run_id"],
+        last_seen_run_id=row["last_seen_run_id"],
         kind=row["kind"],
         provider=row["provider"],
         provider_ref=row["provider_ref"],

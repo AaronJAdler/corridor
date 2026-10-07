@@ -287,6 +287,78 @@ async def test_a_balance_row_that_points_at_the_wrong_posting_is_found(
     ]
 
 
+async def test_suspense_that_holds_less_than_nothing_is_found(db: Database) -> None:
+    # No damage is needed: suspense has no balance to check, so the ledger posts this.
+    async with db.transaction() as session:
+        suspense = await system_account(session, AccountKind.SUSPENSE)
+        user = await open_user(session)
+        settlement = await system_account(session, AccountKind.BANK_SETTLEMENT)
+        await ledger.post_entry(
+            session,
+            ledger.EntryDraft(
+                "deposit_suspense",
+                "deposit",
+                "dep_1",
+                (ledger.debit(settlement, 75_00), ledger.credit(suspense, 75_00)),
+            ),
+        )
+        for attempt in ("first", "second"):
+            # The one deposit, paid out of suspense twice.
+            await ledger.post_entry(
+                session,
+                ledger.EntryDraft(
+                    "adjustment",
+                    "adjustment",
+                    attempt,
+                    (ledger.debit(suspense, 75_00), ledger.credit(user.available, 75_00)),
+                ),
+            )
+
+    found = await findings(db)
+
+    assert [(f.check, f.subject, f.detail) for f in found] == [
+        ("negative_suspense", str(suspense), "suspense holds -7500 in USD")
+    ]
+
+
+async def test_suspense_that_holds_nothing_or_something_is_no_finding(db: Database) -> None:
+    async with db.transaction() as session:
+        suspense = await system_account(session, AccountKind.SUSPENSE)
+        settlement = await system_account(session, AccountKind.BANK_SETTLEMENT)
+        for reference, amount in (("dep_1", 75_00), ("dep_2", 20_00)):
+            await ledger.post_entry(
+                session,
+                ledger.EntryDraft(
+                    "deposit_suspense",
+                    "deposit",
+                    reference,
+                    (ledger.debit(settlement, amount), ledger.credit(suspense, amount)),
+                ),
+            )
+        await ledger.post_entry(
+            session,
+            ledger.EntryDraft(
+                "deposit_return",
+                "deposit",
+                "dep_1",
+                (ledger.debit(suspense, 75_00), ledger.credit(settlement, 75_00)),
+            ),
+        )
+    assert await findings(db) == []
+
+    async with db.transaction() as session:
+        await ledger.post_entry(
+            session,
+            ledger.EntryDraft(
+                "deposit_return",
+                "deposit",
+                "dep_2",
+                (ledger.debit(suspense, 20_00), ledger.credit(settlement, 20_00)),
+            ),
+        )
+    assert await findings(db) == []
+
+
 async def test_findings_are_capped_per_check(db: Database, superuser_db: Database) -> None:
     async with db.transaction() as session:
         users = [await funded_user(session, 1_00) for _ in range(5)]

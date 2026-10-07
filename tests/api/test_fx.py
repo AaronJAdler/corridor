@@ -20,6 +20,7 @@ from corridor.platform.config import Settings
 from corridor.platform.db import Database
 from corridor.platform.ids import new_id
 from corridor.providers import SimRates
+from tests.agents.support import Acting, an_agent, give_open_policy
 from tests.support.auth import RegisteredUser, register_user
 from tests.support.ledger import fund
 from tests.support.providers import API_KEY, BASE_URL, Sim, sim  # noqa: F401
@@ -325,11 +326,16 @@ async def test_a_conversion_without_an_idempotency_key_is_refused(
 
 @pytest.mark.usefixtures("rates")
 async def test_each_route_needs_its_scope(
-    client: httpx.AsyncClient, app: FastAPI, maria: RegisteredUser
+    client: httpx.AsyncClient, app: FastAPI, db: Database, maria: RegisteredUser
 ) -> None:
     quote_id = await quoted(client, maria)
+    converting, reading = agent_for(maria, Scope.FX_CONVERT), agent_for(maria, Scope.FX_READ)
+    # An agent converts only under a policy of its owner's. These two have one that
+    # limits nothing, so that what is refused below is refused for the scope.
+    await give_open_policy(db, converting)
+    await give_open_policy(db, reading)
 
-    app.dependency_overrides[get_principal] = lambda: agent_for(maria, Scope.FX_CONVERT)
+    app.dependency_overrides[get_principal] = lambda: converting
     assert (await ask(client, maria)).status_code == 201
     assert_problem(
         await client.get(f"{CONVERSIONS}/{new_id()}", headers=maria.headers),
@@ -338,13 +344,85 @@ async def test_each_route_needs_its_scope(
     )
 
     # Reading conversions lets an agent neither price one nor make one.
-    app.dependency_overrides[get_principal] = lambda: agent_for(maria, Scope.FX_READ)
+    app.dependency_overrides[get_principal] = lambda: reading
     assert_problem(await ask(client, maria), 403, "insufficient_scope")
     assert_problem(await convert(client, maria, quote_id), 403, "insufficient_scope")
     assert (await client.get(f"{CONVERSIONS}/{new_id()}", headers=maria.headers)).status_code == 404
 
-    app.dependency_overrides[get_principal] = lambda: agent_for(maria, Scope.FX_CONVERT)
+    app.dependency_overrides[get_principal] = lambda: converting
     assert (await convert(client, maria, quote_id, key="key-2")).status_code == 201
+
+
+# --- an agent converts under its owner's policy ------------------------------------------------
+
+
+async def convert_as(
+    client: httpx.AsyncClient, agent: Acting, quote_id: str, key: str = "agent-key-1"
+) -> httpx.Response:
+    return await client.post(
+        CONVERSIONS,
+        json={"quote_id": quote_id},
+        headers={**agent.headers, "Idempotency-Key": key},
+    )
+
+
+@pytest.mark.usefixtures("rates")
+async def test_an_agent_whose_owner_set_no_policy_cannot_convert(
+    client: httpx.AsyncClient, db: Database, maria: RegisteredUser
+) -> None:
+    agent = await an_agent(client, maria, Scope.FX_CONVERT)
+    quote_id = await quoted(client, maria)
+
+    refused = await convert_as(client, agent, quote_id)
+
+    assert_problem(refused, 403, "policy_not_set")
+    assert await available(client, maria) == "250.00"
+    assert await count(db, "fx_conversions") == 0
+    # The quote was not used up: its owner converts it still.
+    assert (await convert(client, maria, quote_id)).status_code == 201
+
+
+@pytest.mark.usefixtures("rates")
+async def test_an_agent_with_a_policy_converts_up_to_its_cap_at_once(
+    client: httpx.AsyncClient, db: Database, maria: RegisteredUser
+) -> None:
+    agent = await an_agent(client, maria, Scope.FX_CONVERT, per_tx_usd="50.00")
+    over, at = await quoted(client, maria, "50.01"), await quoted(client, maria, "50.00")
+
+    refused = await convert_as(client, agent, over, "over")
+    converted = await convert_as(client, agent, at, "at")
+
+    assert_problem(refused, 422, "limit_exceeded")
+    assert (refused.json()["limit"], refused.json()["scope"]) == ("per_transaction", "agent")
+    assert converted.status_code == 201, converted.text
+    assert await available(client, maria) == "200.00"
+    assert await count(db, "fx_conversions") == 1
+
+
+@pytest.mark.usefixtures("rates")
+async def test_a_conversion_above_the_approval_threshold_is_made_and_does_not_wait(
+    client: httpx.AsyncClient, db: Database, maria: RegisteredUser
+) -> None:
+    agent = await an_agent(client, maria, Scope.FX_CONVERT, approval_threshold_usd="20.00")
+    quote_id = await quoted(client, maria, "100.00")
+
+    converted = await convert_as(client, agent, quote_id)
+
+    assert converted.status_code == 201, converted.text
+    assert "approval_request" not in converted.json()
+    assert await available(client, maria) == "150.00"
+    assert await count(db, "agent_approval_requests") == 0
+
+
+@pytest.mark.usefixtures("rates")
+async def test_an_agent_cannot_use_its_policy_to_learn_of_another_users_quote(
+    client: httpx.AsyncClient, maria: RegisteredUser, joao: RegisteredUser
+) -> None:
+    agent = await an_agent(client, maria, Scope.FX_CONVERT, per_tx_usd="50.00")
+    theirs = await quoted(client, joao, "10.00")
+
+    assert_problem(await convert_as(client, agent, theirs), 404, "quote_not_found")
+    assert_problem(await convert_as(client, agent, str(new_id()), "none"), 404, "quote_not_found")
 
 
 @pytest.mark.usefixtures("rates")

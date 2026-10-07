@@ -16,6 +16,7 @@ from corridor.payments import (
     DuplicateWithdrawal,
     InvalidAddress,
     InvalidWithdrawalTarget,
+    WithdrawalNotAgents,
     WithdrawalNotCancelable,
     WithdrawalNotFound,
 )
@@ -511,6 +512,85 @@ async def test_only_a_held_withdrawal_can_be_cancelled(
 
     assert (await available(db, maria), await held(db, maria)) == (400_00, 100_00)
     assert (await withdrawal_row(db, withdrawal.id))["status"] == status
+
+
+# --- who asked for it ----------------------------------------------------------------------------
+
+WITHDRAWS = Scope.WITHDRAWALS_CREATE
+
+
+async def test_a_withdrawal_keeps_who_asked_for_it(
+    db: Database, settings: Settings, bank: SimBank, maria: User
+) -> None:
+    await deposit(db, maria, 500_00)
+    beneficiary = await add_beneficiary(db, bank, maria)
+    agent = agent_of(maria, WITHDRAWS)
+
+    own = await withdraw(db, settings, maria, 100_00, beneficiary=beneficiary)
+    agents = await withdraw(db, settings, maria, 50_00, beneficiary=beneficiary, principal=agent)
+
+    assert (own.initiated_by_type, own.initiated_by_id) == ("user", maria.id)
+    assert (agents.initiated_by_type, agents.initiated_by_id) == ("agent", agent.actor_id)
+    assert agents.user_id == maria.id
+
+
+async def test_an_agent_cancels_a_withdrawal_it_asked_for(
+    db: Database, settings: Settings, bank: SimBank, maria: User
+) -> None:
+    await deposit(db, maria, 500_00)
+    beneficiary = await add_beneficiary(db, bank, maria)
+    agent = agent_of(maria, WITHDRAWS)
+    withdrawal = await withdraw(
+        db, settings, maria, 100_00, beneficiary=beneficiary, principal=agent
+    )
+
+    async with db.transaction() as session:
+        canceled = await payments.cancel_withdrawal(session, agent, withdrawal.id)
+
+    assert canceled.status == "canceled"
+    assert (await available(db, maria), await held(db, maria)) == (500_00, 0)
+    (audited,) = await rows(db, "SELECT * FROM audit_events WHERE action = 'withdrawal.canceled'")
+    assert (audited["actor_type"], audited["actor_id"]) == ("agent", str(agent.actor_id))
+
+
+async def test_an_agent_cannot_cancel_a_withdrawal_its_owner_or_another_agent_asked_for(
+    db: Database, settings: Settings, bank: SimBank, maria: User
+) -> None:
+    await deposit(db, maria, 500_00)
+    beneficiary = await add_beneficiary(db, bank, maria)
+    agent, another = agent_of(maria, WITHDRAWS), agent_of(maria, WITHDRAWS)
+    owners = await withdraw(db, settings, maria, 100_00, beneficiary=beneficiary)
+    others = await withdraw(db, settings, maria, 50_00, beneficiary=beneficiary, principal=another)
+
+    for withdrawal in (owners, others):
+        with pytest.raises(WithdrawalNotAgents) as refusal:
+            async with db.transaction() as session:
+                await payments.cancel_withdrawal(session, agent, withdrawal.id)
+        assert (refusal.value.status, refusal.value.code) == (403, "withdrawal_not_agents")
+
+    assert (await available(db, maria), await held(db, maria)) == (350_00, 150_00)
+    assert [(await withdrawal_row(db, w.id))["status"] for w in (owners, others)] == ["held"] * 2
+    assert await rows(db, "SELECT 1 FROM audit_events WHERE action = 'withdrawal.canceled'") == []
+
+
+async def test_the_owner_cancels_a_withdrawal_an_agent_asked_for(
+    db: Database, settings: Settings, bank: SimBank, maria: User
+) -> None:
+    await deposit(db, maria, 500_00)
+    beneficiary = await add_beneficiary(db, bank, maria)
+    withdrawal = await withdraw(
+        db,
+        settings,
+        maria,
+        100_00,
+        beneficiary=beneficiary,
+        principal=agent_of(maria, WITHDRAWS),
+    )
+
+    canceled = await cancel(db, maria, withdrawal.id)
+
+    assert canceled.status == "canceled"
+    assert (await available(db, maria), await held(db, maria)) == (500_00, 0)
 
 
 async def test_nobody_else_can_cancel_a_withdrawal_or_learn_that_it_exists(

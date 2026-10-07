@@ -5,12 +5,12 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, RowMapping, Table, delete, insert
+from sqlalchemy import CursorResult, RowMapping, Table, delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from corridor import identity
 from corridor.fx import rounding
-from corridor.fx.errors import SameAsset
+from corridor.fx.errors import QuoteNotFound, SameAsset
 from corridor.fx.models import QuoteRow
 from corridor.fx.types import Quote
 from corridor.identity import Principal, Scope
@@ -84,6 +84,21 @@ async def create_quote(
         .returning(_quotes)
     )
     return quote_of(inserted.mappings().one())
+
+
+async def get_quote(session: AsyncSession, principal: Principal, quote_id: uuid.UUID) -> Quote:
+    """A quote of the principal's user, as it stands: what converting it would sell, and
+    for what.
+
+    Another user's quote is answered exactly as one that does not exist, as converting it
+    would be. Read without a lock: whoever converts it looks again, under one.
+    """
+    identity.require_scope(principal, Scope.FX_CONVERT)
+    found = await session.execute(select(_quotes).where(_quotes.c.id == quote_id))
+    row = found.mappings().one_or_none()
+    if row is None or row["user_id"] != principal.user_id:
+        raise QuoteNotFound
+    return quote_of(row)
 
 
 async def purge_unused_quotes(session: AsyncSession, *, expired_before: datetime) -> int:

@@ -5,12 +5,14 @@ through the function the webhook would have reached, and a deposit through the o
 deposits read from a statement. S5 is the first test here.
 """
 
+from datetime import timedelta
 from typing import Any
 
 import pytest
 
-from corridor import payments, risk
+from corridor import payments, recon, risk
 from corridor.ledger import AccountKind
+from corridor.providers import SimBank, SimCustody
 from corridor.recon import repair as repair_module
 from tests.payments.support import entries, rows
 from tests.recon.conftest import Reconcile
@@ -146,6 +148,117 @@ async def test_a_dropped_deposit_to_an_account_nobody_was_given_is_repaired_into
     (deposit,) = await stack.deposits()
     assert (deposit["status"], deposit["user_id"]) == ("suspense", None)
     assert await stack.book_balance(AccountKind.SUSPENSE, "USD") == 75_00
+
+
+# --- a deposit the bank took back before Corridor heard of it --------------------------------
+
+
+async def came_and_went(stack: Stack, amount: str = "250.00") -> tuple[Any, str]:
+    """A bank deposit that was received and then recalled, with neither webhook delivered:
+    the user it was for, and the bank's id for it."""
+    user = await stack.person()
+    await stack.webhooks_behave(drop_types=["deposit.received", "deposit.returned"])
+    deposit_id = await stack.bank_deposit(user, amount)
+    await let_pass(stack)
+    await stack.sim.control("POST", f"/bank/deposits/{deposit_id}/return", {"reason": "recalled"})
+    await let_pass(stack)
+    return user, deposit_id
+
+
+async def test_a_missing_deposit_the_statement_shows_as_returned_is_not_credited(
+    stack: Stack, reconcile: Reconcile
+) -> None:
+    user, deposit_id = await came_and_went(stack)
+    assert await stack.provider_balance("bank", "USD") == 0
+
+    result = await reconcile()
+
+    assert (kinds(result.breaks), result.repaired) == (["missing_deposit"], 1)
+    assert await stack.wallet(user) == (0, 0)
+    (deposit,) = await stack.deposits()
+    assert (deposit["provider_ref"], deposit["status"]) == (deposit_id, "returned")
+    assert (deposit["user_id"], deposit["entry_id"]) == (None, None)
+    assert await entries(stack.db, "deposit", f"{BANK}:{deposit_id}") == []
+    assert await stack.book_balance(AccountKind.BANK_SETTLEMENT, "USD", provider=BANK) == 0
+    (closed,) = await breaks(stack)
+    assert (closed["status"], closed["resolved_by"]) == ("resolved", "system")
+    assert closed["note"] == "The deposit was returned before it was received."
+    (recorded,) = await rows(
+        stack.db,
+        "SELECT actor_type, actor_id, resource_id, details FROM audit_events"
+        " WHERE action = 'deposit.returned'",
+    )
+    assert (recorded["actor_type"], recorded["actor_id"]) == ("system", "recon.repair")
+    assert recorded["resource_id"] == str(deposit["id"])
+    assert recorded["details"]["received"] is False
+
+
+async def test_the_run_after_a_deposit_was_recorded_as_returned_finds_nothing(
+    stack: Stack, reconcile: Reconcile
+) -> None:
+    user, _ = await came_and_went(stack)
+    await reconcile()
+    await let_pass(stack)
+
+    result = await reconcile()
+
+    assert (result.breaks, result.repaired) == ((), 0)
+    assert [row["status"] for row in await breaks(stack)] == ["resolved"]
+    assert await stack.wallet(user) == (0, 0)
+
+
+async def test_a_window_that_ended_before_the_return_was_recorded_still_balances(
+    stack: Stack, bank: SimBank, custody: SimCustody, reconcile: Reconcile
+) -> None:
+    await came_and_went(stack)
+    ended = stack.clock.now()
+    await let_pass(stack)
+    # Recorded as returned now, after the window below has ended.
+    assert (await reconcile()).repaired == 1
+
+    result = await recon.run(
+        stack.db, bank, custody, window_start=ended - timedelta(hours=1), window_end=ended
+    )
+
+    assert result.breaks == ()
+
+
+async def test_a_deposit_recorded_as_returned_is_not_credited_when_its_webhooks_arrive_late(
+    stack: Stack, reconcile: Reconcile
+) -> None:
+    user = await stack.person()
+    await stack.webhooks_behave(hold=True)
+    deposit_id = await stack.bank_deposit(user, "250.00")
+    await let_pass(stack)
+    await stack.sim.control("POST", f"/bank/deposits/{deposit_id}/return", {"reason": "recalled"})
+    await let_pass(stack)
+    assert (await reconcile()).repaired == 1
+
+    await stack.webhooks_behave(hold=False)
+    await stack.settle()
+
+    assert await stack.wallet(user) == (0, 0)
+    (deposit,) = await stack.deposits()
+    assert (deposit["status"], deposit["entry_id"]) == ("returned", None)
+    assert await entries(stack.db, "deposit", f"{BANK}:{deposit_id}") == []
+    assert (await reconcile()).breaks == ()
+
+
+async def test_a_missing_deposit_that_was_not_returned_is_still_credited_beside_one_that_was(
+    stack: Stack, reconcile: Reconcile
+) -> None:
+    gone, _ = await came_and_went(stack)
+    stayed = await stack.person()
+    await stack.bank_deposit(stayed, "40.00")
+    await let_pass(stack)
+
+    result = await reconcile()
+
+    assert (kinds(result.breaks), result.repaired) == (["missing_deposit"] * 2, 2)
+    assert (await stack.wallet(gone), await stack.wallet(stayed)) == ((0, 0), (40_00, 0))
+    assert await stack.book_balance(
+        AccountKind.BANK_SETTLEMENT, "USD", provider=BANK
+    ) == await stack.provider_balance("bank", "USD")
 
 
 async def test_a_repaired_deposit_is_not_credited_again_when_its_webhook_arrives_late(

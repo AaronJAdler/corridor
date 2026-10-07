@@ -209,6 +209,16 @@ class Settings(BaseSettings):
     # A submitted payout with no settlement webhook after this long is checked by polling.
     payout_sweep_after_seconds: int = Field(default=120, ge=1)
 
+    # Reconciliation. How often a run is made, and what each one looks back over: much
+    # longer than the interval, so that every movement is compared many times. A run after
+    # an outage starts from where the last completed one ended instead, if that is
+    # further back.
+    reconciliation_interval_seconds: float = Field(default=300.0, gt=0)
+    reconciliation_window_seconds: int = Field(default=3600, ge=1)
+    # A deposit the provider received less than this long ago is not repaired yet: its
+    # webhook is most likely still on its way, and is the better record of it.
+    reconciliation_grace_seconds: int = Field(default=120, ge=0)
+
     @field_validator("withdrawal_min_fee", "transfer_min_fee")
     @classmethod
     def _amounts_of_known_assets(cls, value: dict[str, str]) -> dict[str, str]:

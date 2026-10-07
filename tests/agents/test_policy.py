@@ -11,7 +11,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from corridor import agents
+from corridor import agents, risk
 from corridor.identity import InsufficientScope, Principal, Scope
 from corridor.platform.clock import ManualClock
 from corridor.platform.db import Database
@@ -414,7 +414,8 @@ def acting_for(user: RegisteredUser, agent: Acting, *scopes: str) -> Principal:
 async def test_a_conversion_needs_no_recipient(
     client: httpx.AsyncClient, db: Database, maria: RegisteredUser
 ) -> None:
-    agent = await an_agent(client, maria, Scope.FX_CONVERT)
+    # A policy that names nobody: the agent can pay no one, and can still convert.
+    agent = await an_agent(client, maria, Scope.FX_CONVERT, per_tx_usd="50.00")
     principal = acting_for(maria, agent, Scope.FX_CONVERT)
 
     async with db.transaction() as session:
@@ -423,6 +424,37 @@ async def test_a_conversion_needs_no_recipient(
             await agents.check_policy(session, principal, "transfer", "USD", 5_00)
 
     assert conversion.outcome == "allow"
+
+
+async def test_an_agent_whose_owner_set_no_policy_cannot_convert(
+    client: httpx.AsyncClient, db: Database, maria: RegisteredUser
+) -> None:
+    agent = await an_agent(client, maria, Scope.FX_CONVERT)
+    principal = acting_for(maria, agent, Scope.FX_CONVERT)
+
+    async with db.transaction() as session:
+        with pytest.raises(agents.PolicyNotSet) as refusal:
+            await agents.check_policy(session, principal, "conversion", "USD", 5_00)
+
+    assert (refusal.value.status, refusal.value.code) == (403, "policy_not_set")
+
+
+async def test_a_conversion_is_held_to_the_cap_and_not_to_the_approval_threshold(
+    client: httpx.AsyncClient, db: Database, maria: RegisteredUser
+) -> None:
+    agent = await an_agent(
+        client, maria, Scope.FX_CONVERT, per_tx_usd="50.00", approval_threshold_usd="20.00"
+    )
+    principal = acting_for(maria, agent, Scope.FX_CONVERT)
+
+    async with db.transaction() as session:
+        with pytest.raises(risk.LimitExceeded):
+            await agents.check_policy(session, principal, "conversion", "USD", 50_01)
+        # Above the threshold. The caller of a conversion does not ask for approval, and
+        # the answer says only what it would say of a payment.
+        between = await agents.check_policy(session, principal, "conversion", "USD", 30_00)
+
+    assert between.requires_approval
 
 
 async def test_a_user_acting_for_themselves_has_no_policy_to_ask(

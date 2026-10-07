@@ -286,11 +286,46 @@ async def test_a_rule_that_is_not_one_is_refused_and_nothing_is_set(
     assert await audited(db, "risk.limit_set") == []
 
 
+async def test_an_admin_cannot_set_an_agents_limits_which_are_its_owners_policy(
+    client: httpx.AsyncClient, db: Database, settings: Settings
+) -> None:
+    root = await admin(client, db, settings)
+    before = await rows(db, "SELECT * FROM risk_limits ORDER BY id")
+
+    response = await client.put(
+        LIMITS,
+        json={
+            "scope": "agent",
+            "agent_id": str(uuid.uuid4()),
+            "per_transaction_usd": "1000000.00",
+            "daily_usd": None,
+        },
+        headers=root.headers,
+    )
+
+    assert (response.status_code, response.json()["code"]) == (409, "agent_limit_not_settable")
+    assert await rows(db, "SELECT * FROM risk_limits ORDER BY id") == before
+    assert await audited(db, "risk.limit_set") == []
+
+
+async def test_a_rule_for_a_user_who_does_not_exist_is_not_set(
+    client: httpx.AsyncClient, db: Database, settings: Settings
+) -> None:
+    root = await admin(client, db, settings)
+    before = await rows(db, "SELECT * FROM risk_limits ORDER BY id")
+
+    response = await client.put(LIMITS, json=rule(), headers=root.headers)
+
+    assert (response.status_code, response.json()["code"]) == (404, "user_not_found")
+    assert await rows(db, "SELECT * FROM risk_limits ORDER BY id") == before
+    assert await audited(db, "risk.limit_set") == []
+
+
 async def test_an_admin_reads_every_rule_newest_first_a_page_at_a_time(
     client: httpx.AsyncClient, db: Database, settings: Settings
 ) -> None:
     root = await admin(client, db, settings)
-    mine = (await client.put(LIMITS, json=rule(), headers=root.headers)).json()
+    mine = (await client.put(LIMITS, json=rule(user_id=root.id), headers=root.headers)).json()
 
     first = (await client.get(LIMITS, params={"limit": 2}, headers=root.headers)).json()
     rest = (

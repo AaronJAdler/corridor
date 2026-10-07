@@ -228,6 +228,56 @@ def test_the_fingerprint_covers_the_method_and_the_route_template() -> None:
     assert fingerprint("POST", "/v1/withdrawals", body) != base
 
 
+def test_the_fingerprint_covers_the_path_that_was_asked_for() -> None:
+    route, body = "/v1/admin/adjustments/{adjustment_id}/approve", b""
+    one = fingerprint("POST", route, body, "/v1/admin/adjustments/0190aaaa/approve")
+    other = fingerprint("POST", route, body, "/v1/admin/adjustments/0190bbbb/approve")
+
+    assert one != other
+    assert one == fingerprint("POST", route, body, "/v1/admin/adjustments/0190aaaa/approve")
+    assert one != fingerprint("POST", route, body)
+
+
+def test_a_route_with_no_parameters_has_the_fingerprint_it_had_without_the_path() -> None:
+    body = b'{"amount":"5.00"}'
+
+    assert fingerprint("POST", "/v1/transfers", body, "/v1/transfers") == fingerprint(
+        "POST", "/v1/transfers", body
+    )
+
+
+async def test_a_key_sent_again_for_another_resource_of_the_same_route_is_refused(
+    db: Database,
+) -> None:
+    route, actor = "/v1/things/{thing_id}/approve", new_id()
+    ran: list[str] = []
+
+    async def approve(path: str) -> tuple[StoredResponse, bool]:
+        async def work(_session: AsyncSession) -> StoredResponse:
+            ran.append(path)
+            return StoredResponse(200, {"approved": path}, {})
+
+        return await run_idempotent(
+            db,
+            actor_id=actor,
+            key="key-1",
+            method="POST",
+            route=route,
+            body=b"",
+            work=work,
+            path=path,
+        )
+
+    first, _ = await approve("/v1/things/a/approve")
+    again, replayed = await approve("/v1/things/a/approve")
+    with pytest.raises(IdempotencyKeyReused):
+        await approve("/v1/things/b/approve")
+
+    assert (again, replayed) == (first, True)
+    # The second thing was not approved, and was not answered with the first one's answer.
+    assert ran == ["/v1/things/a/approve"]
+
+
 def test_the_fingerprint_ignores_key_order_and_whitespace() -> None:
     compact = b'{"amount":"5.00","to":{"a":1,"b":[1,2]}}'
     spaced = b'{ "to" : {"b": [1, 2],\n "a": 1},\t"amount": "5.00" }'

@@ -52,6 +52,7 @@ async def add_break(db: Database, run_id: uuid.UUID, **changes: Any) -> uuid.UUI
     values = {
         "id": new_id(),
         "run_id": run_id,
+        "last_seen_run_id": run_id,
         "kind": "unknown_deposit",
         "provider": "simbank",
         "provider_ref": "dep_1",
@@ -68,10 +69,11 @@ async def add_break(db: Database, run_id: uuid.UUID, **changes: Any) -> uuid.UUI
     async with db.transaction() as session:
         await session.execute(
             text(
-                "INSERT INTO recon_breaks (id, run_id, kind, provider, provider_ref, asset_code,"
-                " expected, actual, status, note, resolved_by, created_at, resolved_at)"
-                " VALUES (:id, :run_id, :kind, :provider, :provider_ref, :asset_code, :expected,"
-                " :actual, :status, :note, :resolved_by, :created_at, :resolved_at)"
+                "INSERT INTO recon_breaks (id, run_id, last_seen_run_id, kind, provider,"
+                " provider_ref, asset_code, expected, actual, status, note, resolved_by,"
+                " created_at, resolved_at) VALUES (:id, :run_id, :last_seen_run_id, :kind,"
+                " :provider, :provider_ref, :asset_code, :expected, :actual, :status, :note,"
+                " :resolved_by, :created_at, :resolved_at)"
             ),
             values,
         )
@@ -146,9 +148,21 @@ async def test_a_break_belongs_to_a_run_that_exists_by_the_time_it_is_committed(
     db: Database,
 ) -> None:
     with pytest.raises(DBAPIError) as error:
-        await add_break(db, new_id())
+        await add_break(db, new_id(), last_seen_run_id=await add_run(db))
 
     assert refused(error) == (FOREIGN_KEY_VIOLATION, "fk_recon_breaks_run_id_recon_runs")
+
+
+async def test_the_run_that_last_saw_a_break_exists_by_the_time_it_is_committed(
+    db: Database,
+) -> None:
+    with pytest.raises(DBAPIError) as error:
+        await add_break(db, await add_run(db), last_seen_run_id=new_id())
+
+    assert refused(error) == (
+        FOREIGN_KEY_VIOLATION,
+        "fk_recon_breaks_last_seen_run_id_recon_runs",
+    )
 
 
 async def test_a_break_may_be_written_before_its_run_in_the_same_transaction(db: Database) -> None:
@@ -156,9 +170,9 @@ async def test_a_break_may_be_written_before_its_run_in_the_same_transaction(db:
     async with db.transaction() as session:
         await session.execute(
             text(
-                "INSERT INTO recon_breaks (id, run_id, kind, provider, provider_ref, asset_code,"
-                " status, created_at) VALUES (:id, :run_id, 'unknown_deposit', 'simbank',"
-                " 'dep_1', 'USD', 'open', :now)"
+                "INSERT INTO recon_breaks (id, run_id, last_seen_run_id, kind, provider,"
+                " provider_ref, asset_code, status, created_at) VALUES (:id, :run_id, :run_id,"
+                " 'unknown_deposit', 'simbank', 'dep_1', 'USD', 'open', :now)"
             ),
             {"id": new_id(), "run_id": run_id, "now": NOW},
         )
@@ -227,7 +241,81 @@ async def test_the_application_role_has_only_the_privileges_reconciliation_needs
         for table, privilege in granted:
             by_table.setdefault(table, set()).add(privilege)
 
+    # No UPDATE on breaks as a whole: only on the columns named below.
     assert by_table == {
         "recon_runs": {"SELECT", "INSERT"},
-        "recon_breaks": {"SELECT", "INSERT", "UPDATE"},
+        "recon_breaks": {"SELECT", "INSERT"},
     }
+
+
+async def test_the_application_role_updates_only_what_a_run_or_a_resolution_changes(
+    db: Database,
+) -> None:
+    async with db.transaction() as session:
+        columns = await session.execute(
+            text(
+                "SELECT column_name FROM information_schema.column_privileges"
+                " WHERE grantee = :role AND table_schema = 'public'"
+                " AND table_name = 'recon_breaks' AND privilege_type = 'UPDATE'"
+            ),
+            {"role": postgres.APP_ROLE},
+        )
+
+    assert set(columns.scalars()) == {
+        "expected",
+        "actual",
+        "last_seen_run_id",
+        "status",
+        "note",
+        "resolved_by",
+        "resolved_at",
+    }
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE recon_breaks SET kind = 'unknown_payout'",
+        "UPDATE recon_breaks SET provider_ref = 'dep_2'",
+        "UPDATE recon_breaks SET provider = 'simcustody'",
+        "UPDATE recon_breaks SET asset_code = 'MXN'",
+        "UPDATE recon_breaks SET run_id = last_seen_run_id",
+        "UPDATE recon_breaks SET created_at = resolved_at",
+    ],
+)
+async def test_the_application_cannot_rewrite_what_a_break_is_about(
+    db: Database, statement: str
+) -> None:
+    await add_break(db, await add_run(db))
+
+    with pytest.raises(DBAPIError) as error:
+        async with db.transaction() as session:
+            await session.execute(text(statement))
+
+    assert sqlstate_of(error.value) == INSUFFICIENT_PRIVILEGE
+
+
+async def test_the_application_brings_an_open_break_up_to_date_and_resolves_it(
+    db: Database,
+) -> None:
+    first, later = await add_run(db), await add_run(db)
+    await add_break(db, first)
+
+    async with db.transaction() as session:
+        refreshed = await session.execute(
+            text(
+                "UPDATE recon_breaks SET expected = 90, actual = 10, last_seen_run_id = :run"
+                " RETURNING run_id"
+            ),
+            {"run": later},
+        )
+        resolved = await session.execute(
+            text(
+                "UPDATE recon_breaks SET status = 'resolved', resolved_by = 'system',"
+                " note = 'settled', resolved_at = :now"
+            ),
+            {"now": NOW},
+        )
+
+    assert refreshed.scalar_one() == first
+    assert resolved.rowcount == 1  # type: ignore[attr-defined]

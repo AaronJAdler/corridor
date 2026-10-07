@@ -51,6 +51,18 @@ CHECKS: Final[dict[str, str]] = {
                ) derived ON derived.account_id = b.account_id
          WHERE b.balance <> COALESCE(derived.total, 0)
     """,  # noqa: S608 - built from a constant
+    # Suspense has no cached balance to refuse an overdraft, so its postings are summed
+    # here. Less than nothing in it means money left it that never arrived in it: a
+    # deposit paid out twice.
+    "negative_suspense": f"""
+        SELECT a.id::text AS subject,
+               'suspense holds ' || sum({_SIGNED}) || ' in ' || a.asset_code AS detail
+          FROM ledger_accounts a
+          JOIN postings p ON p.account_id = a.id
+         WHERE a.kind = 'suspense'
+         GROUP BY a.id, a.asset_code
+        HAVING sum({_SIGNED}) < 0
+    """,  # noqa: S608 - built from a constant
     "missing_balance_row": """
         SELECT a.id::text AS subject, a.kind || ' account has no cached balance' AS detail
           FROM ledger_accounts a

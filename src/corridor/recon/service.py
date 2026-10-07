@@ -9,6 +9,9 @@ sides do not book a movement at the same moment: a deposit is on the bank's stat
 before its webhook has been processed. For the same reason a statement is read from some
 way before the window: a record Corridor made in the window may be of something the
 provider did before it.
+
+Time does enter in one place. A deposit the provider has only just received is not called
+missing yet: the webhook that reports it is given a while to arrive first.
 """
 
 import uuid
@@ -26,7 +29,7 @@ from corridor.platform.clock import utcnow
 from corridor.platform.db import Database
 from corridor.platform.ids import new_id
 from corridor.platform.logging import get_logger
-from corridor.platform.metrics import RECON_BREAKS
+from corridor.platform.metrics import RECON_BREAK_CHANGES, RECON_BREAKS
 from corridor.platform.money import ASSETS
 from corridor.providers import (
     BankRail,
@@ -47,6 +50,10 @@ log = get_logger(__name__)
 # window is matched against it, so anything Corridor books later than this after the
 # provider did is reported as unknown to the provider, for a person to look at.
 LOOKBACK: Final = timedelta(hours=24)
+
+# The longest window a scheduled run reaches back over to cover what earlier runs missed.
+# Further back than this is for a person to reconcile, with a window they choose.
+MAX_CATCH_UP: Final = timedelta(days=7)
 
 # How many of Corridor's own records of one provider and asset a run reads for a window.
 SCAN_LIMIT: Final = 10_000
@@ -97,8 +104,13 @@ async def run(
     *,
     window_start: datetime,
     window_end: datetime,
+    grace: timedelta = timedelta(0),
 ) -> RunResult:
     """Reconcile the half-open window ``[window_start, window_end)`` and repair what can be.
+
+    A deposit the provider received less than ``grace`` ago and Corridor has not recorded
+    is left alone for now: its webhook is most likely on its way, and says who sent it,
+    which a statement does not. A later run finds it if the webhook never comes.
 
     A provider this process was not given is left out. One that cannot be read is left out
     for what could not be read, and the run is recorded as incomplete. A disagreement that
@@ -139,24 +151,27 @@ async def run(
 
     async def compare(
         session: AsyncSession,
-    ) -> tuple[Run, list[tuple[Break, Finding]], list[BreakKind]]:
+    ) -> tuple[Run, list[tuple[Break, Finding]], list[BreakKind], list[BreakKind]]:
         findings: dict[tuple[str, str, str], Finding] = {}
         for seen in views:
             for asset, statement in seen.statements.items():
                 for finding in await _compare(
-                    session, seen, asset, statement, window_start, window_end
+                    session, seen, asset, statement, window_start, window_end, started_at - grace
                 ):
                     findings.setdefault(finding.key, finding)
 
         run_id = new_id()
         found: list[tuple[Break, Finding]] = []
         opened: list[BreakKind] = []
+        changed: list[BreakKind] = []
         # In one order, so that two runs opening the same breaks queue and do not deadlock.
         for key in sorted(findings):
-            recorded, is_new = await breaks.open_break(session, run_id, findings[key])
+            recorded, is_new, has_changed = await breaks.open_break(session, run_id, findings[key])
             found.append((recorded, findings[key]))
             if is_new:
                 opened.append(recorded.kind)
+            if has_changed:
+                changed.append(recorded.kind)
         recorded_run = await breaks.record_run(
             session,
             run_id=run_id,
@@ -167,12 +182,14 @@ async def run(
             breaks_opened=len(opened),
             started_at=started_at,
         )
-        return recorded_run, found, opened
+        return recorded_run, found, opened, changed
 
-    recorded_run, found, opened_kinds = await db.run(compare)
+    recorded_run, found, opened_kinds, changed_kinds = await db.run(compare)
     # After the commit, and so once: the transaction above may have been run again.
     for kind in opened_kinds:
         RECON_BREAKS.labels(kind=kind).inc()
+    for kind in changed_kinds:
+        RECON_BREAK_CHANGES.labels(kind=kind).inc()
     repaired = await repair.repair(db, found, complete=complete)
     log.info(
         "recon.run_finished",
@@ -183,6 +200,19 @@ async def run(
         repaired=repaired,
     )
     return RunResult(run=recorded_run, breaks=tuple(item for item, _ in found), repaired=repaired)
+
+
+async def catch_up_start(
+    session: AsyncSession, *, window_end: datetime, window: timedelta
+) -> datetime:
+    """Where a scheduled run's window starts: ``window`` before its end, or where the last
+    completed run's window ended if that is further back, so that an outage longer than
+    the window leaves nothing uncompared. Never more than ``MAX_CATCH_UP`` back."""
+    start = window_end - window
+    covered_until = await breaks.last_completed_window_end(session)
+    if covered_until is not None and covered_until < start:
+        start = covered_until
+    return max(start, window_end - MAX_CATCH_UP)
 
 
 # --- reading the providers -------------------------------------------------------------------
@@ -329,6 +359,8 @@ class _Sides:
     statement: ProviderStatement
     window_start: datetime
     window_end: datetime
+    # A deposit the provider received after this moment is too new to repair.
+    settled_before: datetime
     arrived: tuple[ProviderTransaction, ...]
     recalled: tuple[ProviderTransaction, ...]
     # Each payout with the withdrawal its reference names, if it names one.
@@ -338,6 +370,17 @@ class _Sides:
     deposits: Mapping[str, Deposit]
     withdrawals: Mapping[uuid.UUID, Withdrawal]
 
+    def came_and_went(self, line: ProviderTransaction) -> bool:
+        """Whether a deposit line is of money the provider received and gave back without
+        Corridor ever booking it: the statement shows its return, or the return is all
+        that was ever recorded of it here. Only a bank takes a deposit back."""
+        deposit = self.deposits.get(line.id)
+        if deposit is not None:
+            return deposit.entry_id is None and deposit.status == "returned"
+        return self.view.kind == "bank" and any(
+            recall.related_id == line.id for recall in self.recalled
+        )
+
     def finding(
         self,
         kind: BreakKind,
@@ -346,6 +389,7 @@ class _Sides:
         actual: int | None,
         *,
         transaction: ProviderTransaction | None = None,
+        returned: bool = False,
         sent: Sent | None = None,
         withdrawal_id: uuid.UUID | None = None,
     ) -> Finding:
@@ -357,6 +401,7 @@ class _Sides:
             expected=expected,
             actual=actual,
             transaction=transaction,
+            returned=returned,
             sent=sent,
             withdrawal_id=withdrawal_id,
         )
@@ -378,6 +423,7 @@ async def _compare(
     statement: ProviderStatement,
     window_start: datetime,
     window_end: datetime,
+    settled_before: datetime,
 ) -> list[Finding]:
     """Everything one provider and Corridor disagree about in one asset."""
     lines = statement.transactions
@@ -392,6 +438,7 @@ async def _compare(
         statement=statement,
         window_start=window_start,
         window_end=window_end,
+        settled_before=settled_before,
         arrived=arrived,
         recalled=recalled,
         paid=paid,
@@ -426,10 +473,26 @@ async def _deposit_findings(session: AsyncSession, sides: _Sides) -> list[Findin
         deposit = sides.deposits.get(line.id)
         if deposit is not None and (deposit.asset, deposit.amount) != (sides.asset, line.amount):
             found.append(sides.finding("amount_mismatch", line.id, deposit.amount, line.amount))
-        elif deposit is None or deposit.entry_id is None:
+        elif deposit is not None and (deposit.entry_id is not None or deposit.status == "returned"):
+            # On the books, or recorded as returned before it was ever received: there is
+            # nothing here to put right.
+            continue
+        elif line.occurred_at > sides.settled_before:
+            # Too new: its webhook may still arrive, and is the better record of it.
+            continue
+        else:
             # Not recorded, or recorded and never credited: a row alone moves no money.
+            # One the statement also shows as returned is not credited by the repair: the
+            # money is no longer at the provider.
             found.append(
-                sides.finding("missing_deposit", line.id, None, line.amount, transaction=line)
+                sides.finding(
+                    "missing_deposit",
+                    line.id,
+                    None,
+                    line.amount,
+                    transaction=line,
+                    returned=deposit is None and sides.came_and_went(line),
+                )
             )
 
     # Deposits on the books, against the provider. A recalled deposit is one it knows.
@@ -554,6 +617,10 @@ async def _balance_finding(session: AsyncSession, sides: _Sides) -> Finding | No
     for line in sides.arrived:
         deposit = sides.deposits.get(line.id)
         if deposit is None or deposit.entry_id is None:
+            if sides.came_and_went(line):
+                # Received and returned at the provider, and never on the books: the two
+                # lines cancel there, and there is nothing here for them to differ from.
+                continue
             # Received and not credited: reported as missing, if it is in the window. An
             # older one is not allowed for, so that it shows in the balance.
             if line.occurred_at >= sides.window_start:
@@ -563,8 +630,10 @@ async def _balance_finding(session: AsyncSession, sides: _Sides) -> Finding | No
     for line in sides.recalled:
         deposit = sides.deposits.get(line.related_id or "")
         # A return that is not on the books at all is not in transit: it is a difference.
+        # Nor is the return of a deposit that was never booked: see above.
         if (
             deposit is not None
+            and deposit.entry_id is not None
             and deposit.status == "returned"
             and deposit.updated_at >= sides.window_end
         ):

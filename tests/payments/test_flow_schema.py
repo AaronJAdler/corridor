@@ -31,10 +31,11 @@ INSERT_DEPOSIT = text(
 )
 INSERT_WITHDRAWAL = text(
     "INSERT INTO withdrawals (id, user_id, asset_code, amount, fee, kind, beneficiary_id,"
-    " to_address, status, provider, provider_fee, hold_entry_id, final_entry_id, created_at,"
-    " updated_at)"
+    " to_address, status, provider, provider_fee, hold_entry_id, final_entry_id,"
+    " initiated_by_type, initiated_by_id, created_at, updated_at)"
     " VALUES (:id, :user_id, 'USD', :amount, :fee, :kind, :beneficiary_id, :to_address,"
-    " :status, 'simbank', :provider_fee, :hold_entry_id, :final_entry_id, :now, :now)"
+    " :status, 'simbank', :provider_fee, :hold_entry_id, :final_entry_id, :initiated_by_type,"
+    " :initiated_by_id, :now, :now)"
 )
 INSERT_INSTRUCTION = text(
     "INSERT INTO deposit_instructions (user_id, asset_code, provider, provider_ref, details,"
@@ -77,6 +78,8 @@ async def add_withdrawal(db: Database, **overrides: Any) -> None:
         "provider_fee": None,
         "hold_entry_id": new_id(),
         "final_entry_id": None,
+        "initiated_by_type": "user",
+        "initiated_by_id": new_id(),
         "now": NOW,
         **overrides,
     }
@@ -247,6 +250,7 @@ async def test_a_withdrawal_can_be_recorded_in_each_state_of_its_saga(
         ({"kind": "chain"}, "ck_withdrawals_target"),
         ({"kind": "chain", "beneficiary_id": None}, "ck_withdrawals_target"),
         ({"kind": "chain", "to_address": EXTERNAL_ADDRESS}, "ck_withdrawals_target"),
+        ({"initiated_by_type": "admin"}, "ck_withdrawals_initiated_by_type"),
     ],
 )
 async def test_a_row_that_could_not_be_a_withdrawal_is_refused(

@@ -118,6 +118,23 @@ async def test_there_is_one_virtual_account_per_customer_and_asset(sim: Sim) -> 
     assert (await sim.virtual_account("MXN")) == mxn
 
 
+async def test_the_control_endpoints_say_which_accounts_a_customer_was_issued(sim: Sim) -> None:
+    usd = await sim.virtual_account("USD")
+    mxn = await sim.virtual_account("MXN")
+    await sim.virtual_account("USD", customer="another-customer")
+
+    # With no credential: the provider API key is not needed to find an account.
+    issued = await sim.control(
+        "GET", "/bank/virtual-accounts?customer_reference=" + usd["customer_reference"]
+    )
+    nobody = await sim.control("GET", "/bank/virtual-accounts?customer_reference=nobody")
+    unnamed = await sim.anonymous.get("/_control/bank/virtual-accounts")
+
+    assert issued == {"virtual_accounts": [mxn, usd]}
+    assert nobody == {"virtual_accounts": []}
+    assert unnamed.status_code == 422
+
+
 @pytest.mark.parametrize(("asset", "rail", "_delay", "_fee"), SCHEDULE)
 async def test_a_virtual_account_is_on_its_assets_rail_with_identifiers_of_that_rails_shape(
     sim: Sim, asset: str, rail: str, _delay: int, _fee: str
