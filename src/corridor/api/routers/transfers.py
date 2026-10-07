@@ -15,10 +15,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
 
-from corridor import identity, payments
+from corridor import agents, identity, payments
 from corridor.api.deps import Db, SettingsDep, require
 from corridor.api.idempotency import IdempotencyKey, StoredResponse, run_idempotent, to_response
 from corridor.api.middleware import route_template
+from corridor.api.routers.approvals import AwaitingApprovalResponse, awaiting_approval
 from corridor.api.schemas import Text
 from corridor.identity import Principal, Scope
 from corridor.platform.ids import new_id
@@ -110,6 +111,13 @@ async def _render(
     status_code=201,
     response_model=TransferResponse,
     summary="Send money to another user",
+    responses={
+        202: {
+            "model": AwaitingApprovalResponse,
+            "description": "An agent asked for more than its owner lets it send unseen."
+            " Nothing has moved; the owner has been asked.",
+        }
+    },
 )
 async def create_transfer(
     request: Request,
@@ -123,6 +131,22 @@ async def create_transfer(
     amount = parse_amount(body.amount, body.asset)
 
     async def work(session: AsyncSession) -> StoredResponse:
+        if principal.agent_id is not None:
+            # After the key's lock and before anything is moved: the owner's policy says
+            # whether this agent may pay this recipient this much, and whether now.
+            decision = await agents.check_policy(
+                session,
+                principal,
+                "transfer",
+                body.asset,
+                amount,
+                agents.Recipient("user", body.recipient),
+            )
+            if decision.requires_approval:
+                intent = agents.TransferIntent(
+                    recipient=body.recipient, asset=body.asset, amount=amount, memo=body.memo
+                )
+                return awaiting_approval(await agents.request_approval(session, principal, intent))
         transfer = await payments.create_transfer(
             session,
             principal,

@@ -1,8 +1,8 @@
 """Scopes on routes: what an agent's key can reach, route by route.
 
-Every route the app serves is in exactly one of three tables: the public routes, the
-routes an agent can reach with one named scope, and the routes that are not for agents at
-all. A route in none of them fails the first test here, so a route added later cannot be
+Every route the app serves is in exactly one of four tables: the public routes, the
+routes an agent can reach with one named scope, the routes that are a user's own and not
+for agents at all, and the routes that are an administrator's. A route in none of them fails the first test here, so a route added later cannot be
 left out of the others. For each route an agent can reach:
 
 - no credential is a 401;
@@ -12,6 +12,7 @@ left out of the others. For each route an agent can reach:
 """
 
 import dataclasses
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Final
@@ -30,7 +31,17 @@ from corridor.platform.config import Settings
 from corridor.platform.db import Database
 from corridor.platform.ids import new_id
 from corridor.providers import SimBank, SimCustody, SimRates
-from tests.agents.support import AGENTS, create_agent, issue_key, key_headers
+from tests.agents.support import (
+    AGENTS,
+    APPROVALS,
+    NO_LIMITS,
+    an_agent,
+    create_agent,
+    issue_key,
+    key_headers,
+    send,
+    set_policy,
+)
 from tests.support.auth import RegisteredUser, register_user, served_routes
 from tests.support.providers import (  # noqa: F401
     ACCOUNT_NUMBER,
@@ -86,9 +97,14 @@ class World:
     maria: Person
     joao: Person
     carla: RegisteredUser
-    # An agent of Maria's and a spare key of it, for the routes that manage agents.
+    # An agent of Maria's and a spare key of it, for the routes that manage agents. Its
+    # policy lets it pay anyone any amount, so that what these tests see refused is
+    # refused for the scope and for nothing else.
     agent_id: str
     spare_key_id: str
+    # Two payments another agent of Maria's asked for, which wait for her answer.
+    to_approve: str
+    to_reject: str
 
     async def send(self, call: Call, headers: dict[str, str] | None = None) -> httpx.Response:
         sent = dict(headers or {})
@@ -236,7 +252,8 @@ AGENT_ROUTES: Final[dict[Route, Reachable]] = {
         other=lambda w: Call("POST", f"/v1/withdrawals/{w.joao.withdrawal_id}/cancel"),
     ),
     ("/v1/fx/quotes", "POST"): Reachable(
-        Scope.FX_READ,
+        # A quote is the first half of a conversion, and is asked for with its scope.
+        Scope.FX_CONVERT,
         lambda w: Call(
             "POST",
             "/v1/fx/quotes",
@@ -287,7 +304,45 @@ NOT_FOR_AGENTS: Final[dict[Route, tuple[Callable[[World], Call], int]]] = {
         lambda w: Call("DELETE", f"{AGENTS}/{w.agent_id}/keys/{w.spare_key_id}"),
         204,
     ),
+    ("/v1/agents/{agent_id}/policy", "PUT"): (
+        lambda w: Call(
+            "PUT", f"{AGENTS}/{w.agent_id}/policy", json={**NO_LIMITS, "any_recipient": True}
+        ),
+        200,
+    ),
+    ("/v1/agents/{agent_id}/policy", "GET"): (
+        lambda w: Call("GET", f"{AGENTS}/{w.agent_id}/policy"),
+        200,
+    ),
+    ("/v1/approvals", "GET"): (lambda w: Call("GET", APPROVALS), 200),
+    ("/v1/approvals/{approval_id}/approve", "POST"): (
+        lambda w: Call("POST", f"{APPROVALS}/{w.to_approve}/approve"),
+        200,
+    ),
+    ("/v1/approvals/{approval_id}/reject", "POST"): (
+        lambda w: Call("POST", f"{APPROVALS}/{w.to_reject}/reject"),
+        200,
+    ),
 }
+
+# The administrator's routes. An agent is never an administrator, whatever its owner is,
+# and the tests of each of these routes show what an administrator's own session can do.
+ADMIN_ROUTES: Final[frozenset[Route]] = frozenset(
+    {
+        ("/v1/admin/users/{user_id}/kyc-tier", "PUT"),
+        ("/v1/admin/recon/breaks", "GET"),
+        ("/v1/admin/recon/breaks/{break_id}/resolve", "POST"),
+        ("/v1/admin/outbox/dead", "GET"),
+        ("/v1/admin/outbox/dead/{event_id}/requeue", "POST"),
+        ("/v1/admin/adjustments", "POST"),
+        ("/v1/admin/adjustments", "GET"),
+        ("/v1/admin/adjustments/{adjustment_id}", "GET"),
+        ("/v1/admin/adjustments/{adjustment_id}/approve", "POST"),
+        ("/v1/admin/adjustments/{adjustment_id}/reject", "POST"),
+        ("/v1/admin/adjustments/suspense-release", "POST"),
+        ("/v1/admin/adjustments/suspense-return", "POST"),
+    }
+)
 
 
 def route_id(route: Route) -> str:
@@ -297,6 +352,7 @@ def route_id(route: Route) -> str:
 
 reachable = pytest.mark.parametrize("route", sorted(AGENT_ROUTES), ids=route_id)
 not_for_agents = pytest.mark.parametrize("route", sorted(NOT_FOR_AGENTS), ids=route_id)
+for_admins = pytest.mark.parametrize("route", sorted(ADMIN_ROUTES), ids=route_id)
 by_id = pytest.mark.parametrize(
     "route", sorted(r for r, case in AGENT_ROUTES.items() if case.other is not None), ids=route_id
 )
@@ -410,6 +466,14 @@ async def world(
     joao = await a_person(client, db, sim, "joao", "300.00", carla)
     agent = await create_agent(client, maria.user)
     spare = await issue_key(client, maria.user, agent["id"], Scope.WALLET_READ)
+    await set_policy(client, maria.user, agent["id"], any_recipient=True)
+    # Another agent, which has to ask before it pays anything at all.
+    asking = await an_agent(
+        client, maria.user, Scope.TRANSFERS_CREATE, approval_threshold_usd="0", any_recipient=True
+    )
+    asked = [await send(client, asking.headers, carla, "5.00") for _ in range(2)]
+    assert [response.status_code for response in asked] == [202, 202]
+    to_approve, to_reject = (response.json()["approval_request"]["id"] for response in asked)
     return World(
         api=client,
         maria=maria,
@@ -417,6 +481,8 @@ async def world(
         carla=carla,
         agent_id=agent["id"],
         spare_key_id=spare["id"],
+        to_approve=to_approve,
+        to_reject=to_reject,
     )
 
 
@@ -425,12 +491,13 @@ async def world(
 
 def test_every_route_is_public_or_reachable_by_an_agent_or_not_for_agents(app: FastAPI) -> None:
     served = {(route.path, route.method) for route in served_routes(app)}
+    tables = (PUBLIC_ROUTES, AGENT_ROUTES.keys(), NOT_FOR_AGENTS.keys(), ADMIN_ROUTES)
+    listed = [route for table in tables for route in table]
 
-    assert served - PUBLIC_ROUTES - AGENT_ROUTES.keys() - NOT_FOR_AGENTS.keys() == set()
+    assert served - set(listed) == set()
     # And no table lists a route that is gone, or one that another table also lists.
-    assert (AGENT_ROUTES.keys() | NOT_FOR_AGENTS.keys()) - served == set()
-    assert AGENT_ROUTES.keys() & NOT_FOR_AGENTS.keys() == set()
-    assert (AGENT_ROUTES.keys() | NOT_FOR_AGENTS.keys()) & PUBLIC_ROUTES == set()
+    assert set(listed) - PUBLIC_ROUTES - served == set()
+    assert len(listed) == len(set(listed))
 
 
 def test_the_check_notices_a_route_that_is_in_no_table(app: FastAPI) -> None:
@@ -440,7 +507,7 @@ def test_the_check_notices_a_route_that_is_in_no_table(app: FastAPI) -> None:
     app.add_api_route("/v1/added-later", handler, methods=["GET"])
     served = {(route.path, route.method) for route in served_routes(app)}
 
-    assert served - PUBLIC_ROUTES - AGENT_ROUTES.keys() - NOT_FOR_AGENTS.keys() == {
+    assert served - PUBLIC_ROUTES - AGENT_ROUTES.keys() - NOT_FOR_AGENTS.keys() - ADMIN_ROUTES == {
         ("/v1/added-later", "GET")
     }
 
@@ -542,3 +609,33 @@ async def test_a_route_that_is_not_for_agents_refuses_a_key_holding_every_scope(
 
     assert_problem(refused, 403, "insufficient_scope")
     assert allowed.status_code == succeeds, allowed.text
+
+
+# --- the administrator's routes --------------------------------------------------------------
+
+
+def test_the_administrators_routes_are_the_ones_under_admin(app: FastAPI) -> None:
+    served = {(route.path, route.method) for route in served_routes(app)}
+
+    assert {route for route in served if route[0].startswith("/v1/admin/")} == ADMIN_ROUTES
+
+
+@for_admins
+async def test_an_administrators_route_refuses_a_key_holding_every_scope(
+    world: World, route: Route
+) -> None:
+    path, method = route
+    # Any id will do: the credential is refused before anything about the request is read.
+    url = re.sub(r"\{[a-z_]+\}", str(new_id()), path)
+    key = await world.key(*sorted(agents.AGENT_SCOPES))
+
+    nobody = await world.send(Call(method, url))
+    refused = await world.send(Call(method, url), key)
+    owner = await world.send(Call(method, url), world.maria.headers)
+
+    assert_problem(nobody, 401, "unauthenticated")
+    # Whether it is refused as an agent's key or as no administrator is the admin
+    # routes' own tests' to say: here, that it is refused.
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["code"] in {"insufficient_scope", "permission_denied"}
+    assert_problem(owner, 403, "permission_denied")

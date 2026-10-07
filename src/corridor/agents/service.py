@@ -347,18 +347,38 @@ async def _refusal(session: AsyncSession, row: RowMapping, now: datetime) -> Key
 
 
 async def _own_agent(
-    session: AsyncSession, principal: Principal, agent_id: uuid.UUID
+    session: AsyncSession, principal: Principal, agent_id: uuid.UUID, *, lock: bool = False
 ) -> RowMapping:
     """The principal's user's agent with this id. Another user's is no agent at all."""
-    found = await session.execute(
-        select(_agents).where(
-            _agents.c.id == agent_id, _agents.c.owner_user_id == principal.user_id
-        )
+    query = select(_agents).where(
+        _agents.c.id == agent_id, _agents.c.owner_user_id == principal.user_id
     )
-    row = found.mappings().one_or_none()
+    if lock:
+        query = query.with_for_update()
+    row = (await session.execute(query)).mappings().one_or_none()
     if row is None:
         raise AgentNotFound
     return row
+
+
+async def own_agent_status(
+    session: AsyncSession, principal: Principal, agent_id: uuid.UUID, *, lock: bool = False
+) -> AgentStatus:
+    """The state of the principal's user's agent. For the rest of this package.
+
+    With ``lock`` its row is locked for the rest of the transaction, so that what is
+    written about the agent after this is written by one transaction at a time.
+    """
+    row = await _own_agent(session, principal, agent_id, lock=lock)
+    status: AgentStatus = row["status"]
+    return status
+
+
+async def status_of(session: AsyncSession, agent_id: uuid.UUID) -> AgentStatus | None:
+    """The state an agent is in at this moment, or None if there is no such agent."""
+    found = await session.execute(select(_agents.c.status).where(_agents.c.id == agent_id))
+    status: AgentStatus | None = found.scalar_one_or_none()
+    return status
 
 
 async def _keys_of(

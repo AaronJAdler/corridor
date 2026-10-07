@@ -1,18 +1,33 @@
-"""Agents: the principals a user lets act on their wallet, and the keys they act with.
+"""Agents: the principals a user lets act on their wallet, the keys they act with, what
+each may spend, and what it asked to spend beyond that.
 
 Other modules use the names exported here and nothing else from this package.
 """
 
+from corridor.agents.approvals import (
+    APPROVAL_TTL,
+    approve,
+    list_approvals,
+    reject,
+    request_approval,
+)
 from corridor.agents.errors import (
     AgentKeyNotFound,
     AgentKeysUnavailable,
+    AgentNotActive,
     AgentNotFound,
     AgentRevoked,
+    ApprovalAlreadyDecided,
+    ApprovalExpired,
+    ApprovalNotFound,
     InvalidExpiry,
+    InvalidPolicy,
     InvalidScopes,
+    RecipientNotAllowed,
 )
 from corridor.agents.keys import AGENT_SCOPES
 from corridor.agents.keys import read as read_key
+from corridor.agents.policy import MAX_ALLOWED_RECIPIENTS, check_policy, get_policy, set_policy
 from corridor.agents.service import (
     authenticate,
     create_agent,
@@ -27,34 +42,73 @@ from corridor.agents.types import (
     Agent,
     AgentKey,
     AgentStatus,
+    AllowedRecipient,
+    ApprovalKind,
+    ApprovalOutcome,
+    ApprovalRequest,
+    ApprovalStatus,
     IssuedKey,
     KeyOutcome,
     KeyRefusal,
+    Policy,
+    PolicyDecision,
+    PolicyKind,
     PresentedKey,
+    Recipient,
+    RecipientKind,
+    TransferIntent,
+    WithdrawalIntent,
 )
 
 __all__ = [
     "AGENT_SCOPES",
+    "APPROVAL_TTL",
+    "MAX_ALLOWED_RECIPIENTS",
     "Agent",
     "AgentKey",
     "AgentKeyNotFound",
     "AgentKeysUnavailable",
+    "AgentNotActive",
     "AgentNotFound",
     "AgentRevoked",
     "AgentStatus",
+    "AllowedRecipient",
+    "ApprovalAlreadyDecided",
+    "ApprovalExpired",
+    "ApprovalKind",
+    "ApprovalNotFound",
+    "ApprovalOutcome",
+    "ApprovalRequest",
+    "ApprovalStatus",
     "InvalidExpiry",
+    "InvalidPolicy",
     "InvalidScopes",
     "IssuedKey",
     "KeyOutcome",
     "KeyRefusal",
+    "Policy",
+    "PolicyDecision",
+    "PolicyKind",
     "PresentedKey",
+    "Recipient",
+    "RecipientKind",
+    "RecipientNotAllowed",
+    "TransferIntent",
+    "WithdrawalIntent",
+    "approve",
     "authenticate",
+    "check_policy",
     "create_agent",
+    "get_policy",
     "issue_key",
     "list_agents",
+    "list_approvals",
     "pause_agent",
     "read_key",
+    "reject",
+    "request_approval",
     "resume_agent",
     "revoke_agent",
     "revoke_key",
+    "set_policy",
 ]

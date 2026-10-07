@@ -1,6 +1,12 @@
 """What the agents module refuses, and how."""
 
-from corridor.platform.errors import Conflict, InvalidRequest, NotFound, ServiceUnavailable
+from corridor.platform.errors import (
+    Conflict,
+    InvalidRequest,
+    NotFound,
+    PermissionDenied,
+    ServiceUnavailable,
+)
 
 
 class AgentNotFound(NotFound):
@@ -49,3 +55,60 @@ class AgentKeysUnavailable(ServiceUnavailable):
 
     def __init__(self) -> None:
         super().__init__("Agent keys cannot be issued at the moment.")
+
+
+class InvalidPolicy(InvalidRequest):
+    code = "invalid_policy"
+    title = "Invalid policy"
+
+
+class RecipientNotAllowed(PermissionDenied):
+    """The agent's policy does not let it pay this destination.
+
+    It says the same of a destination that does not exist and of one that is not on the
+    list, so that an agent cannot use the answer to learn who is there.
+    """
+
+    code = "recipient_not_allowed"
+    title = "Recipient not allowed"
+
+    def __init__(self) -> None:
+        super().__init__("This agent's policy does not allow it to pay this recipient.")
+
+
+class ApprovalNotFound(NotFound):
+    """There is no such request, or it is another user's: the two are not told apart."""
+
+    code = "approval_not_found"
+    title = "Approval request not found"
+
+    def __init__(self) -> None:
+        super().__init__("There is no such approval request.")
+
+
+class ApprovalAlreadyDecided(Conflict):
+    """A request is decided once. Approving it again can never move the money again."""
+
+    code = "approval_already_decided"
+    title = "Approval request already decided"
+
+    def __init__(self) -> None:
+        super().__init__("This approval request has already been decided.")
+
+
+class ApprovalExpired(Conflict):
+    code = "approval_expired"
+    title = "Approval request expired"
+
+    def __init__(self) -> None:
+        super().__init__("This approval request expired before it was decided.")
+
+
+class AgentNotActive(Conflict):
+    """What a paused or revoked agent asked for is not carried out, even with approval."""
+
+    code = "agent_not_active"
+    title = "Agent not active"
+
+    def __init__(self) -> None:
+        super().__init__("This agent is paused or revoked, so its request was not carried out.")

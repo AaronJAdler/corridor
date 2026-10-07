@@ -1,4 +1,5 @@
-"""Agent endpoints: a user creates agents, gives them keys, and stops them.
+"""Agent endpoints: a user creates agents, gives them keys, says what each may spend, and
+stops them.
 
 All of it is the owner's alone to do, from their own session. An agent's key is refused on
 every route here, whatever its scopes, so no agent can make itself a key, widen one or
@@ -7,7 +8,7 @@ bring itself back.
 
 import uuid
 from datetime import datetime
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 
 from fastapi import APIRouter, Response
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
@@ -17,6 +18,7 @@ from corridor import agents
 from corridor.api.deps import CurrentPrincipal, Db, SettingsDep
 from corridor.api.schemas import DisplayName, Text
 from corridor.platform.logging import get_logger
+from corridor.platform.money import format_amount, parse_amount
 from corridor.platform.pagination import DEFAULT_LIMIT, Page
 
 log = get_logger(__name__)
@@ -27,6 +29,7 @@ router = APIRouter(prefix="/v1/agents", tags=["agents"])
 # server read; which scopes a key may hold is the agents module's to say.
 _MAX_SCOPES = 32
 _MAX_SCOPE_LENGTH = 64
+_MAX_AMOUNT_LENGTH = 320
 
 
 class _Request(BaseModel):
@@ -97,6 +100,67 @@ class AgentResponse(BaseModel):
             created_at=agent.created_at,
             keys=[KeyResponse.of(key) for key in agent.keys],
         )
+
+
+class RecipientBody(_Request):
+    # A user, or one of the owner's own beneficiaries.
+    kind: Literal["user", "beneficiary"]
+    id: uuid.UUID
+
+
+# A decimal string in US dollars, such as "250.00". A JSON number is refused: it would
+# have been through a float before it got here.
+UsdAmount = Annotated[Text, Field(max_length=_MAX_AMOUNT_LENGTH)]
+
+
+class PolicyRequest(_Request):
+    # The three amounts have no default. Null sets no limit of that sort, and that is a
+    # decision the owner states, not one made for them by leaving a field out.
+    # The most the agent may move at once, and in any 24 hours.
+    per_tx_usd: UsdAmount | None
+    daily_usd: UsdAmount | None
+    # A payment worth more than this moves nothing until the owner approves it.
+    approval_threshold_usd: UsdAmount | None
+    # Left out, the agent pays only whom ``allowed_recipients`` names: nobody, if it is empty.
+    any_recipient: bool = False
+    allowed_recipients: Annotated[
+        list[RecipientBody], Field(max_length=agents.MAX_ALLOWED_RECIPIENTS)
+    ] = []
+
+
+class PolicyResponse(BaseModel):
+    agent_id: uuid.UUID
+    per_tx_usd: str | None
+    daily_usd: str | None
+    approval_threshold_usd: str | None
+    any_recipient: bool
+    allowed_recipients: list[RecipientBody]
+    # Null for an agent whose owner has never set a policy: it can pay nobody.
+    updated_at: datetime | None
+
+    @classmethod
+    def of(cls, policy: agents.Policy) -> Self:
+        return cls(
+            agent_id=policy.agent_id,
+            per_tx_usd=_dollars(policy.per_tx_usd),
+            daily_usd=_dollars(policy.daily_usd),
+            approval_threshold_usd=_dollars(policy.approval_threshold_usd),
+            any_recipient=policy.any_recipient,
+            allowed_recipients=[
+                RecipientBody(kind=recipient.kind, id=recipient.target_id)
+                for recipient in policy.allowed_recipients
+            ],
+            updated_at=policy.updated_at,
+        )
+
+
+def _dollars(cents: int | None) -> str | None:
+    return None if cents is None else format_amount(cents, "USD")
+
+
+def _cents(dollars: str | None) -> int | None:
+    # Zero is an amount here: a cap of nothing stops the agent from spending at all.
+    return None if dollars is None else parse_amount(dollars, "USD", allow_zero=True)
 
 
 class AgentPageResponse(BaseModel):
@@ -186,3 +250,38 @@ async def revoke_key(
 ) -> None:
     await db.run(lambda session: agents.revoke_key(session, principal, agent_id, key_id))
     log.info("agent.key_revoked", agent_id=str(agent_id), key_id=str(key_id))
+
+
+@router.put("/{agent_id}/policy", summary="Set what an agent may spend and whom it may pay")
+async def set_policy(
+    agent_id: uuid.UUID, body: PolicyRequest, principal: CurrentPrincipal, db: Db
+) -> PolicyResponse:
+    # Before the transaction: a policy that could never be stored does not open one.
+    per_tx_usd = _cents(body.per_tx_usd)
+    daily_usd = _cents(body.daily_usd)
+    approval_threshold_usd = _cents(body.approval_threshold_usd)
+
+    async def work(session: AsyncSession) -> agents.Policy:
+        return await agents.set_policy(
+            session,
+            principal,
+            agent_id,
+            per_tx_usd=per_tx_usd,
+            daily_usd=daily_usd,
+            approval_threshold_usd=approval_threshold_usd,
+            any_recipient=body.any_recipient,
+            allowed_recipients=[
+                agents.AllowedRecipient(kind=recipient.kind, target_id=recipient.id)
+                for recipient in body.allowed_recipients
+            ],
+        )
+
+    policy = await db.run(work)
+    log.info("agent.policy_changed", agent_id=str(agent_id))
+    return PolicyResponse.of(policy)
+
+
+@router.get("/{agent_id}/policy", summary="What an agent may spend and whom it may pay")
+async def get_policy(agent_id: uuid.UUID, principal: CurrentPrincipal, db: Db) -> PolicyResponse:
+    policy = await db.run(lambda session: agents.get_policy(session, principal, agent_id))
+    return PolicyResponse.of(policy)

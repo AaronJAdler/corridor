@@ -14,10 +14,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
 
-from corridor import payments
+from corridor import agents, payments
 from corridor.api.deps import Db, SettingsDep, require
 from corridor.api.idempotency import IdempotencyKey, StoredResponse, run_idempotent, to_response
 from corridor.api.middleware import route_template
+from corridor.api.routers.approvals import AwaitingApprovalResponse, awaiting_approval
 from corridor.api.schemas import Text
 from corridor.identity import Principal, Scope
 from corridor.platform.ids import new_id
@@ -95,6 +96,14 @@ class WithdrawalPageResponse(BaseModel):
     status_code=202,
     response_model=WithdrawalResponse,
     summary="Withdraw to a saved bank account or to an address",
+    responses={
+        202: {
+            "model": WithdrawalResponse | AwaitingApprovalResponse,
+            "description": "The withdrawal, with its funds reserved. Or, for an agent that"
+            " asked for more than its owner lets it send unseen, the request the owner"
+            " has been asked to approve: nothing is reserved.",
+        }
+    },
 )
 async def request_withdrawal(
     request: Request,
@@ -108,6 +117,20 @@ async def request_withdrawal(
     amount = parse_amount(body.amount, body.asset)
 
     async def work(session: AsyncSession) -> StoredResponse:
+        if principal.agent_id is not None:
+            # After the key's lock and before anything is reserved: the owner's policy
+            # says whether this agent may send this much there, and whether now.
+            intent = agents.WithdrawalIntent(
+                asset=body.asset,
+                amount=amount,
+                beneficiary_id=body.beneficiary_id,
+                to_address=body.to_address,
+            )
+            decision = await agents.check_policy(
+                session, principal, "withdrawal", body.asset, amount, intent.destination
+            )
+            if decision.requires_approval:
+                return awaiting_approval(await agents.request_approval(session, principal, intent))
         withdrawal = await payments.request_withdrawal(
             session,
             principal,

@@ -5,7 +5,7 @@ that PostgreSQL says no.
 """
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -253,4 +253,261 @@ async def test_the_agents_of_an_owner_and_the_keys_of_an_agent_are_indexed(
         "pk_agent_keys",
         "pk_agents",
         "uq_agent_keys_prefix",
+    ]
+
+
+# --- policies and approval requests ----------------------------------------------------------
+
+LATER = NOW + timedelta(hours=24)
+
+
+async def add_policy(session: AsyncSession, agent: uuid.UUID, **overrides: Any) -> None:
+    values = {
+        "agent": agent,
+        "per_tx": None,
+        "daily": None,
+        "threshold": None,
+        "anyone": False,
+        "now": NOW,
+        **overrides,
+    }
+    await session.execute(
+        text(
+            "INSERT INTO agent_policies (agent_id, per_tx_usd, daily_usd,"
+            " approval_threshold_usd, any_recipient, updated_at)"
+            " VALUES (:agent, :per_tx, :daily, :threshold, :anyone, :now)"
+        ),
+        values,
+    )
+
+
+async def add_recipient(
+    session: AsyncSession, agent: uuid.UUID, kind: str = "user", target: uuid.UUID | None = None
+) -> None:
+    await session.execute(
+        text(
+            "INSERT INTO agent_allowed_recipients (agent_id, kind, target_id)"
+            " VALUES (:agent, :kind, :target)"
+        ),
+        {"agent": agent, "kind": kind, "target": target or new_id()},
+    )
+
+
+async def add_request(session: AsyncSession, agent: uuid.UUID, **overrides: Any) -> uuid.UUID:
+    request = new_id()
+    values = {
+        "id": request,
+        "agent": agent,
+        "owner": new_id(),
+        "kind": "transfer",
+        "request": '{"asset": "USD", "amount": "5000"}',
+        "status": "pending",
+        "movement": new_id(),
+        "failure": None,
+        "expires": LATER,
+        "decided": None,
+        "now": NOW,
+        **overrides,
+    }
+    await session.execute(
+        text(
+            "INSERT INTO agent_approval_requests (id, agent_id, owner_user_id, kind, request,"
+            " status, movement_id, failure_code, expires_at, decided_at, created_at)"
+            " VALUES (:id, :agent, :owner, :kind, CAST(:request AS jsonb), :status, :movement,"
+            " :failure, :expires, :decided, :now)"
+        ),
+        values,
+    )
+    return request
+
+
+async def violated(db: Database, add: Any, agent: uuid.UUID, **overrides: Any) -> str | None:
+    """The constraint that refuses a row with these values."""
+    with pytest.raises(DBAPIError) as failure:
+        async with db.transaction() as session:
+            await add(session, agent, **overrides)
+    return constraint_of(failure.value)
+
+
+@pytest.fixture
+async def policy(db: Database, agent: uuid.UUID) -> uuid.UUID:
+    """An agent with a policy that names one recipient."""
+    async with db.transaction() as session:
+        await add_policy(session, agent)
+        await add_recipient(session, agent)
+    return agent
+
+
+@pytest.fixture
+async def request_id(db: Database, agent: uuid.UUID) -> uuid.UUID:
+    async with db.transaction() as session:
+        return await add_request(session, agent)
+
+
+@pytest.mark.parametrize("column", ["per_tx", "daily", "threshold"])
+async def test_no_amount_of_a_policy_is_negative(
+    db: Database, agent: uuid.UUID, column: str
+) -> None:
+    name = {"per_tx": "per_tx_usd", "daily": "daily_usd", "threshold": "approval_threshold_usd"}
+
+    refused_by = await violated(db, add_policy, agent, **{column: -1})
+
+    assert refused_by == f"ck_agent_policies_{name[column]}"
+
+
+async def test_an_agent_has_one_policy_and_it_is_an_agents(db: Database, policy: uuid.UUID) -> None:
+    assert await violated(db, add_policy, policy) == "pk_agent_policies"
+    assert await violated(db, add_policy, new_id()) == "fk_agent_policies_agent_id_agents"
+
+
+async def test_a_listed_recipient_is_a_user_or_a_beneficiary_of_an_agent_with_a_policy(
+    db: Database, policy: uuid.UUID
+) -> None:
+    assert (
+        await violated(db, add_recipient, policy, kind="address")
+        == "ck_agent_allowed_recipients_kind"
+    )
+    assert (
+        await violated(db, add_recipient, new_id())
+        == "fk_agent_allowed_recipients_agent_id_agent_policies"
+    )
+
+
+async def test_a_recipient_is_on_a_list_once(db: Database, policy: uuid.UUID) -> None:
+    target = new_id()
+    async with db.transaction() as session:
+        await add_recipient(session, policy, target=target)
+
+    assert await violated(db, add_recipient, policy, target=target) == "pk_agent_allowed_recipients"
+
+
+@pytest.mark.parametrize(
+    ("overrides", "constraint"),
+    [
+        ({"kind": "conversion"}, "kind"),
+        ({"status": "done", "decided": NOW}, "status"),
+        ({"request": "[1, 2]"}, "request"),
+        ({"status": "executed"}, "decided"),
+        ({"decided": NOW}, "decided"),
+        ({"status": "failed", "decided": NOW}, "failure"),
+        ({"failure": "insufficient_funds"}, "failure"),
+    ],
+)
+async def test_a_request_for_approval_is_well_formed(
+    db: Database, agent: uuid.UUID, overrides: dict[str, Any], constraint: str
+) -> None:
+    refused_by = await violated(db, add_request, agent, **overrides)
+
+    assert refused_by == f"ck_agent_approval_requests_{constraint}"
+
+
+async def test_no_two_requests_would_make_the_same_movement(db: Database, agent: uuid.UUID) -> None:
+    movement = new_id()
+    async with db.transaction() as session:
+        await add_request(session, agent, movement=movement)
+
+    refused_by = await violated(db, add_request, agent, movement=movement)
+
+    assert refused_by == "uq_agent_approval_requests_movement_id"
+
+
+async def test_a_request_belongs_to_an_agent_that_exists(db: Database) -> None:
+    refused_by = await violated(db, add_request, new_id())
+
+    assert refused_by == "fk_agent_approval_requests_agent_id_agents"
+
+
+@pytest.mark.parametrize("table", ["agent_policies", "agent_approval_requests"])
+async def test_the_application_cannot_delete_a_policy_or_a_request(
+    db: Database, policy: uuid.UUID, request_id: uuid.UUID, table: str
+) -> None:
+    failure = await refused(db, f"DELETE FROM {table}")  # noqa: S608
+
+    assert sqlstate_of(failure) == INSUFFICIENT_PRIVILEGE
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE agent_policies SET agent_id = :id",
+        "UPDATE agent_allowed_recipients SET target_id = :id",
+        "UPDATE agent_allowed_recipients SET agent_id = :id",
+    ],
+)
+async def test_the_application_cannot_move_a_policy_or_rewrite_whom_it_names(
+    db: Database, policy: uuid.UUID, statement: str
+) -> None:
+    failure = await refused(db, statement, id=new_id())
+
+    assert sqlstate_of(failure) == INSUFFICIENT_PRIVILEGE
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        """request = '{"asset": "USD", "amount": "1"}'""",
+        "movement_id = :id",
+        "owner_user_id = :id",
+        "agent_id = :id",
+        "kind = 'withdrawal'",
+        "expires_at = :later",
+        "created_at = :later",
+        "id = :id",
+    ],
+)
+async def test_the_application_cannot_rewrite_what_a_request_asked_for_or_whose_it_is(
+    db: Database, request_id: uuid.UUID, assignment: str
+) -> None:
+    failure = await refused(
+        db,
+        f"UPDATE agent_approval_requests SET {assignment}",  # noqa: S608
+        id=new_id(),
+        later=LATER + timedelta(days=30),
+    )
+
+    assert sqlstate_of(failure) == INSUFFICIENT_PRIVILEGE
+
+
+async def test_the_application_can_change_what_is_meant_to_change_of_a_policy_and_a_request(
+    db: Database, policy: uuid.UUID, request_id: uuid.UUID
+) -> None:
+    async with db.transaction() as session:
+        await session.execute(
+            text(
+                "UPDATE agent_policies SET per_tx_usd = 5000, daily_usd = 9000,"
+                " approval_threshold_usd = 2000, any_recipient = true, updated_at = :now"
+            ),
+            {"now": LATER},
+        )
+        await session.execute(text("DELETE FROM agent_allowed_recipients"))
+        await session.execute(
+            text(
+                "UPDATE agent_approval_requests SET status = 'failed', decided_at = :now,"
+                " failure_code = 'insufficient_funds'"
+            ),
+            {"now": LATER},
+        )
+
+    assert await rows(db, "SELECT per_tx_usd, any_recipient FROM agent_policies") == [
+        {"per_tx_usd": 5000, "any_recipient": True}
+    ]
+    assert await rows(db, "SELECT kind FROM agent_allowed_recipients") == []
+    assert await rows(db, "SELECT status, failure_code FROM agent_approval_requests") == [
+        {"status": "failed", "failure_code": "insufficient_funds"}
+    ]
+
+
+async def test_the_requests_of_an_owner_are_indexed(owner_db: Database) -> None:
+    found = await rows(
+        owner_db,
+        "SELECT indexname FROM pg_indexes WHERE tablename IN ('agent_policies',"
+        " 'agent_allowed_recipients', 'agent_approval_requests') ORDER BY indexname",
+    )
+
+    assert [row["indexname"] for row in found] == [
+        "ix_agent_approval_requests_owner_user_id",
+        "pk_agent_allowed_recipients",
+        "pk_agent_approval_requests",
+        "pk_agent_policies",
+        "uq_agent_approval_requests_movement_id",
     ]
