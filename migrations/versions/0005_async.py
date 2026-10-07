@@ -31,6 +31,10 @@ CREATE TABLE outbox_events (
     -- While an event is being processed, when its claim runs out. A worker that dies
     -- leaves the claim to expire, and the event is then picked up again.
     locked_until  timestamptz,
+    -- Made new for each claim and null outside one. A worker records its result only
+    -- where this is still the claim it took, which the attempt number cannot promise:
+    -- a requeue starts the count again.
+    claim_id      uuid,
     dedup_key     text,
     last_error    text,
     -- The request id and the like, carried across the queue so a request can be followed.
@@ -67,9 +71,13 @@ CREATE TABLE job_runs (
 )
 """
 
+# The search path is pinned, with the temporary schema last, so that `pg_notify` is the
+# catalogue's whatever path the inserting session has.
 NOTIFY_FUNCTION = """
 CREATE FUNCTION outbox_notify() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql
+SET search_path = pg_catalog, pg_temp
+AS $$
 BEGIN
     PERFORM pg_notify('corridor_outbox', '');
     RETURN NULL;

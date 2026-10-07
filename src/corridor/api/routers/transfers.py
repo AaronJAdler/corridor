@@ -19,6 +19,7 @@ from corridor import identity, payments
 from corridor.api.deps import Db, SettingsDep, require
 from corridor.api.idempotency import IdempotencyKey, StoredResponse, run_idempotent, to_response
 from corridor.api.middleware import route_template
+from corridor.api.schemas import Text
 from corridor.identity import Principal, Scope
 from corridor.platform.ids import new_id
 from corridor.platform.logging import get_logger
@@ -44,12 +45,12 @@ class TransferRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     # A handle, with or without the @, an email address or a user id.
-    recipient: Annotated[str, Field(min_length=1, max_length=_MAX_FIELD_LENGTH)]
-    asset: Annotated[str, Field(max_length=_MAX_FIELD_LENGTH)]
+    recipient: Annotated[Text, Field(min_length=1, max_length=_MAX_FIELD_LENGTH)]
+    asset: Annotated[Text, Field(max_length=_MAX_FIELD_LENGTH)]
     # A decimal string in major units. A JSON number is refused: it would have been
     # through a float before it got here.
-    amount: Annotated[str, Field(max_length=_MAX_FIELD_LENGTH)]
-    memo: Annotated[str | None, Field(max_length=_MAX_MEMO_FIELD_LENGTH)] = None
+    amount: Annotated[Text, Field(max_length=_MAX_FIELD_LENGTH)]
+    memo: Annotated[Text | None, Field(max_length=_MAX_MEMO_FIELD_LENGTH)] = None
 
 
 class PartyResponse(BaseModel):

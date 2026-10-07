@@ -5,14 +5,18 @@ have no default: the process refuses to start without them rather than run with 
 """
 
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # The role name is interpolated into GRANT statements, so it is restricted to a plain
 # identifier.
 APP_ROLE_PATTERN = r"^[a-z_][a-z0-9_]{0,62}$"
+
+
+MIN_WEBHOOK_SECRET_LENGTH = 32
+WebhookSecret = Annotated[SecretStr, Field(min_length=MIN_WEBHOOK_SECRET_LENGTH)]
 
 
 class Settings(BaseSettings):
@@ -22,6 +26,9 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         frozen=True,
+        # A value that is refused is very often a secret pasted into the wrong variable.
+        # The error names the setting and never repeats what it was given.
+        hide_input_in_errors=True,
     )
 
     environment: Literal["development", "test", "production"] = "development"
@@ -87,7 +94,10 @@ class Settings(BaseSettings):
     outbox_max_attempts: int = Field(default=8, ge=1)
     outbox_poll_seconds: float = Field(default=5.0, gt=0)
     outbox_retention_days: int = Field(default=7, ge=1)
+    # The worker serves its metrics on this port, or not at all when it is 0, and only on
+    # the loopback address unless told otherwise: the endpoint has no authentication.
     worker_metrics_port: int = Field(default=0, ge=0, le=65535)
+    worker_metrics_host: str = "127.0.0.1"
 
     # The providers: where each one is, and the key presented to it. None means the
     # provider is not configured, and its adapter refuses to be built. One deadline covers
@@ -102,13 +112,24 @@ class Settings(BaseSettings):
 
     # The secrets that sign each provider's webhooks. A list, so that a secret can be
     # rotated: the new one is added before the provider starts using it.
-    bank_rail_webhook_secrets: list[SecretStr] = Field(default_factory=list)
-    custody_webhook_secrets: list[SecretStr] = Field(default_factory=list)
+    # An empty or a short secret would verify a forged webhook as readily as a real one,
+    # so each has a least length. No secrets at all means the provider is not configured.
+    bank_rail_webhook_secrets: list[WebhookSecret] = Field(default_factory=list)
+    custody_webhook_secrets: list[WebhookSecret] = Field(default_factory=list)
 
     # What a transfer between users costs the sender: basis points of the amount, rounded
     # down, and never less than the minimum, which is in minor units of the asset sent.
     transfer_fee_bps: int = Field(default=0, ge=0, le=1000)
     transfer_fee_min_minor: int = Field(default=0, ge=0)
+
+    @field_validator("forwarded_allow_ips")
+    @classmethod
+    def _no_wildcard_proxy(cls, value: str) -> str:
+        # "*" believes X-Forwarded-For from anyone, so any client could choose the address
+        # it is rate-limited and logged under.
+        if any(entry.strip() == "*" for entry in value.split(",")):
+            raise ValueError('name the proxies to trust; "*" trusts every client')
+        return value
 
 
 class MigrationSettings(BaseSettings):
@@ -121,6 +142,9 @@ class MigrationSettings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         frozen=True,
+        # A value that is refused is very often a secret pasted into the wrong variable.
+        # The error names the setting and never repeats what it was given.
+        hide_input_in_errors=True,
     )
 
     database_owner_url: SecretStr | None = None

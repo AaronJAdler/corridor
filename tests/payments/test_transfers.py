@@ -19,7 +19,7 @@ from corridor.platform.db import (
     sqlstate_of,
 )
 from corridor.platform.ids import new_id
-from corridor.platform.money import InvalidAmount, UnknownAsset
+from corridor.platform.money import MAX_MINOR_UNITS, InvalidAmount, UnknownAsset
 from corridor.risk import UserRestricted
 from tests.identity.support import add_user, close_account
 from tests.payments.support import (
@@ -391,6 +391,46 @@ async def test_a_memo_of_140_characters_is_kept(
     transfer = await send(db, settings, maria, joao, 1_00, memo="m" * 140)
 
     assert transfer.memo == "m" * 140
+
+
+async def test_an_amount_that_with_its_fee_is_more_than_the_ledger_holds_is_refused(
+    db: Database, with_fee: Settings, maria: User, joao: User
+) -> None:
+    await deposit(db, maria, 100_00)
+
+    # The amount alone is the largest there is. The fee takes the debit past it.
+    with pytest.raises(InvalidAmount) as refusal:
+        await send(db, with_fee, maria, joao, MAX_MINOR_UNITS)
+
+    assert (refusal.value.status, refusal.value.code) == (422, "invalid_amount")
+    assert refusal.value.detail == "The amount is too large."
+    assert await available(db, maria) == 100_00
+    assert await count(db, "transfers") == 0
+
+
+async def test_the_largest_amount_is_not_refused_as_too_large_when_there_is_no_fee(
+    db: Database, settings: Settings, maria: User, joao: User
+) -> None:
+    await deposit(db, maria, 100_00)
+
+    # It is refused for the ordinary reason: nobody has that much.
+    with pytest.raises(InsufficientFunds):
+        await send(db, settings, maria, joao, MAX_MINOR_UNITS)
+
+
+@pytest.mark.parametrize("character", ["\x00", "\n", "\x1f"], ids=["nul", "newline", "0x1f"])
+async def test_a_memo_with_a_control_character_is_refused_and_nothing_moves(
+    db: Database, settings: Settings, maria: User, joao: User, character: str
+) -> None:
+    await deposit(db, maria, 100_00)
+
+    with pytest.raises(payments.InvalidMemo) as refusal:
+        await send(db, settings, maria, joao, 1_00, memo=f"for{character}lunch")
+
+    assert (refusal.value.status, refusal.value.code) == (422, "invalid_memo")
+    assert refusal.value.detail == "A memo cannot contain control characters."
+    assert await available(db, maria) == 100_00
+    assert await count(db, "transfers") == 0
 
 
 async def test_a_memo_longer_than_140_characters_is_refused(

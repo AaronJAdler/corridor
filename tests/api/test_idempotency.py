@@ -5,7 +5,6 @@ import asyncio
 import json
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import timedelta
 from typing import Any
 
 import asyncpg
@@ -24,12 +23,11 @@ from corridor.api.idempotency import (
     RequestInProgress,
     StoredResponse,
     fingerprint,
-    purge_expired,
     run_idempotent,
     to_response,
 )
 from corridor.api.middleware import route_template
-from corridor.platform.clock import ManualClock, utcnow
+from corridor.platform.clock import utcnow
 from corridor.platform.db import Database, lock_key
 from corridor.platform.errors import Conflict
 from corridor.platform.ids import new_id
@@ -429,20 +427,3 @@ async def test_a_key_of_visible_ascii_within_the_length_limit_is_accepted(
     response = await http.post(ROUTE, headers=headers(new_id(), key=key), json={})
 
     assert response.status_code == 201
-
-
-async def test_the_purge_deletes_keys_older_than_the_cutoff_and_only_those(
-    db: Database, clock: ManualClock
-) -> None:
-    actor = new_id()
-    await call(db, charging(), actor=actor, key="old")
-    clock.advance(seconds=25 * 3600)
-    await call(db, charging(), actor=actor, key="recent")
-
-    async with db.transaction() as session:
-        deleted = await purge_expired(session, older_than=utcnow() - timedelta(hours=24))
-
-    assert deleted == 1
-    # The recent key still replays; the purged one is a new request again.
-    assert (await call(db, charging(), actor=actor, key="recent"))[1] is True
-    assert (await call(db, charging(), actor=actor, key="old"))[1] is False

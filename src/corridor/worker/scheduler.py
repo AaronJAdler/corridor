@@ -29,6 +29,8 @@ log = get_logger(__name__)
 _job_runs = cast(Table, JobRun.__table__)
 
 MAX_ERROR_LENGTH: Final = 500
+# What is stored when the description of a failure is itself something PostgreSQL refuses.
+UNRECORDABLE: Final = "the failure could not be recorded"
 TICK_SECONDS: Final = 1.0
 
 
@@ -119,13 +121,25 @@ class Scheduler:
         else:
             log.info("scheduler.job_ok", job=job.name)
 
-        await connection.execute(
-            update(_job_runs)
-            .where(_job_runs.c.name == job.name)
-            .values(last_finished_at=utcnow(), last_error=error)
-        )
+        try:
+            await _finish(connection, job, error)
+        except Exception:
+            if error is None:
+                raise
+            # The description is what could not be stored. The run is still recorded as
+            # failed, with words that are certain to be storable.
+            log.exception("scheduler.failure_unrecordable", job=job.name)
+            await _finish(connection, job, UNRECORDABLE)
         SCHEDULED_JOB_RUNS.labels(job=job.name, outcome="ok" if error is None else "error").inc()
         return True
+
+
+async def _finish(connection: AsyncConnection, job: Job, error: str | None) -> None:
+    await connection.execute(
+        update(_job_runs)
+        .where(_job_runs.c.name == job.name)
+        .values(last_finished_at=utcnow(), last_error=error)
+    )
 
 
 async def _try_lock(connection: AsyncConnection, key: int) -> bool:
@@ -182,4 +196,5 @@ def _describe(error: Exception) -> str:
         message = "(no printable message)"
     described = f"{type(error).__name__}: {message}" if message else type(error).__name__
     # Scrubbed before it is cut: a secret cut in half no longer looks like one.
-    return str(scrub(described))[:MAX_ERROR_LENGTH]
+    # PostgreSQL refuses a NUL in text, so one in a message is dropped.
+    return str(scrub(described)).replace("\x00", "")[:MAX_ERROR_LENGTH]

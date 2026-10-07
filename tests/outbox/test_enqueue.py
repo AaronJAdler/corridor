@@ -65,6 +65,7 @@ async def test_an_event_is_stored_pending_and_due_at_once(db: Database, clock: M
         attempts=0,
         available_at=clock.now(),
         locked_until=None,
+        claim_id=None,
         dedup_key=None,
         last_error=None,
         context={},

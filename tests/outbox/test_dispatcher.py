@@ -19,7 +19,9 @@ from sqlalchemy import text
 
 from corridor import outbox
 from corridor.outbox import EventStatus, Handler, OutboxEvent, OutboxStats, Registry
+from corridor.outbox import dispatcher as dispatcher_module
 from corridor.outbox.retry import next_delay
+from corridor.outbox.service import mark_done
 from corridor.platform.clock import ManualClock
 from corridor.platform.config import Settings
 from corridor.platform.db import Database
@@ -390,6 +392,42 @@ async def test_a_secret_that_straddles_the_cut_is_removed_whole(
     assert (await load(db, event_id)).last_error == f"RuntimeError: {padding} {REDACTED}"
 
 
+async def test_a_nul_byte_in_a_handlers_error_is_dropped_and_the_failure_is_recorded(
+    db: Database, settings: Settings
+) -> None:
+    event_id = await enqueue_event(db)
+    # PostgreSQL refuses a NUL in text. Stored as it is, the failure could never be recorded.
+    failing = Failing(RuntimeError("the provider said \x00 and hung up"))
+
+    await dispatcher_for(db, settings, {TOPIC: failing}).run_once()
+
+    event = await load(db, event_id)
+    assert (event.status, event.attempts) == (EventStatus.PENDING, 1)
+    assert event.last_error == "RuntimeError: the provider said  and hung up"
+
+
+async def test_a_failure_that_cannot_be_recorded_as_described_is_dead_with_a_constant_message(
+    db: Database, settings: Settings, clock: ManualClock
+) -> None:
+    event_id = await enqueue_event(db)
+    # Half a surrogate pair cannot be sent to PostgreSQL as text at all.
+    failing = Failing(RuntimeError("the provider said \ud800"))
+    dispatcher = dispatcher_for(db, settings, {TOPIC: failing})
+    before = processed(TOPIC, "dead")
+
+    await dispatcher.run_once()
+
+    event = await load(db, event_id)
+    assert (event.status, event.attempts) == (EventStatus.DEAD, 1)
+    assert event.last_error == "the failure could not be recorded"
+    assert (event.finished_at, event.locked_until) == (clock.now(), None)
+    assert processed(TOPIC, "dead") == before + 1
+    # It is over: no claim is left to run out and bring the event round again.
+    clock.advance(seconds=settings.outbox_claim_seconds + 1)
+    assert await dispatcher.run_once() == 0
+    assert failing.calls == 1
+
+
 @pytest.mark.parametrize(
     ("error", "recorded"),
     [
@@ -553,6 +591,79 @@ async def test_an_event_claimed_by_a_dispatcher_that_died_is_picked_up_when_its_
     assert [handled.attempts for handled in recorder.events] == [2]
 
 
+async def test_a_claim_that_expires_after_the_last_attempt_leaves_the_event_dead(
+    db: Database, settings: Settings, clock: ManualClock
+) -> None:
+    last = settings.model_copy(update={"outbox_max_attempts": 1})
+    event_id = await enqueue_event(db)
+    await abandon(db, last)
+    recorder = Recorder()
+    survivor = dispatcher_for(db, last, {TOPIC: recorder})
+
+    clock.advance(seconds=last.outbox_claim_seconds + 1)
+    assert await survivor.run_once() == 0
+
+    event = await load(db, event_id)
+    assert (event.status, event.attempts) == (EventStatus.DEAD, 1)
+    assert event.last_error == "claim expired after the last attempt"
+    assert (event.finished_at, event.locked_until) == (clock.now(), None)
+    assert recorder.events == []
+
+
+async def test_workers_that_keep_dying_do_not_take_an_event_past_its_attempts(
+    db: Database, settings: Settings, clock: ManualClock
+) -> None:
+    event_id = await enqueue_event(db)
+
+    for attempt in range(1, settings.outbox_max_attempts + 1):
+        await abandon(db, settings)
+        assert (await load(db, event_id)).attempts == attempt
+        clock.advance(seconds=settings.outbox_claim_seconds + 1)
+
+    recorder = Recorder()
+    assert await dispatcher_for(db, settings, {TOPIC: recorder}).drain() == 0
+    event = await load(db, event_id)
+    assert (event.status, event.attempts) == (EventStatus.DEAD, settings.outbox_max_attempts)
+    assert recorder.events == []
+
+
+async def test_an_event_buried_by_an_expired_claim_does_not_hold_up_the_ones_behind_it(
+    db: Database, settings: Settings, clock: ManualClock
+) -> None:
+    last = settings.model_copy(update={"outbox_max_attempts": 1})
+    exhausted = await enqueue_event(db)
+    await abandon(db, last)
+    clock.advance(seconds=last.outbox_claim_seconds + 1)
+    behind = await enqueue_event(db)
+    recorder = Recorder()
+
+    assert await dispatcher_for(db, last, {TOPIC: recorder}).run_once() == 1
+
+    assert recorder.ids == [behind]
+    assert (await load(db, exhausted)).status == EventStatus.DEAD
+
+
+async def test_a_handler_that_outlasts_most_of_its_claim_is_stopped_and_has_failed(
+    db: Database, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A hundredth of a second of a one-second claim, so the test does not wait for it.
+    monkeypatch.setattr(dispatcher_module, "HANDLER_SHARE_OF_CLAIM", 0.01)
+    event_id = await enqueue_event(db)
+    hanging = Gate()
+    dispatcher = dispatcher_for(db, settings, {TOPIC: hanging}, outbox_claim_seconds=1)
+
+    async with asyncio.timeout(5):
+        assert await dispatcher.run_once() == 1
+
+    event = await load(db, event_id)
+    assert (event.status, event.attempts) == (EventStatus.PENDING, 1)
+    assert event.last_error == "TimeoutError"
+
+
+def test_a_handler_is_given_nine_tenths_of_the_claim() -> None:
+    assert dispatcher_module.HANDLER_SHARE_OF_CLAIM == 0.9
+
+
 async def test_a_late_finish_cannot_overwrite_the_result_of_a_newer_claim(
     db: Database, settings: Settings, clock: ManualClock
 ) -> None:
@@ -602,7 +713,7 @@ async def test_a_late_finish_cannot_end_a_newer_claim_that_is_still_in_flight(
             under_the_second_claim = await load(db, event_id)
 
             # The event is `processing` again, as it was when the first worker claimed it.
-            # Only the attempt number tells the two claims apart.
+            # Only the claim id tells the two claims apart.
             slow.open()
             assert await stuck == 1
             assert await load(db, event_id) == under_the_second_claim
@@ -620,6 +731,111 @@ async def test_a_late_finish_cannot_end_a_newer_claim_that_is_still_in_flight(
 
     event = await load(db, event_id)
     assert (event.status, event.attempts, event.finished_at) == (EventStatus.DONE, 2, clock.now())
+
+
+async def test_a_late_finish_cannot_end_a_claim_made_after_a_requeue_reset_the_attempts(
+    db: Database, settings: Settings, clock: ManualClock
+) -> None:
+    last = settings.model_copy(update={"outbox_max_attempts": 1})
+    event_id = await enqueue_event(db)
+    slow, current = Gate(), Gate()
+    stuck = asyncio.create_task(dispatcher_for(db, last, {TOPIC: slow}).run_once())
+    try:
+        await slow.entered()
+
+        # While the first worker's handler hangs: its claim runs out on the last attempt,
+        # the event is buried, an operator requeues it, and a new worker claims it. The
+        # event is `processing` on attempt 1 again, exactly as the first worker claimed it.
+        clock.advance(seconds=last.outbox_claim_seconds + 1)
+        assert await dispatcher_for(db, last, {}).run_once() == 0
+        async with db.transaction() as session:
+            assert await outbox.requeue(session, event_id) is True
+        working = asyncio.create_task(dispatcher_for(db, last, {TOPIC: current}).run_once())
+        try:
+            await current.entered()
+            under_the_new_claim = await load(db, event_id)
+            assert (under_the_new_claim.status, under_the_new_claim.attempts) == (
+                EventStatus.PROCESSING,
+                1,
+            )
+            [as_first_claimed] = slow.events
+            assert as_first_claimed.attempts == 1
+            assert as_first_claimed.claim_id != under_the_new_claim.claim_id
+
+            slow.open()
+            assert await stuck == 1
+            assert await load(db, event_id) == under_the_new_claim
+
+            current.open()
+            assert await working == 1
+        finally:
+            await reap(working)
+    finally:
+        await reap(stuck)
+
+    event = await load(db, event_id)
+    assert (event.status, event.attempts, event.finished_at) == (EventStatus.DONE, 1, clock.now())
+
+
+async def test_every_claim_has_an_id_of_its_own_which_is_cleared_when_the_claim_ends(
+    db: Database, settings: Settings, clock: ManualClock
+) -> None:
+    event_id = await enqueue_event(db)
+    assert (await load(db, event_id)).claim_id is None
+    recorder = Recorder()
+    failing = dispatcher_for(
+        db, settings, {TOPIC: Failing()}, rng=Shortest(), outbox_max_attempts=2
+    )
+
+    # Abandoned, then retried, then dead: three claims.
+    await abandon(db, settings)
+    abandoned = (await load(db, event_id)).claim_id
+    assert abandoned is not None
+    clock.advance(seconds=settings.outbox_claim_seconds + 1)
+    retrying = dispatcher_for(db, settings, {TOPIC: Failing()}, rng=Shortest())
+    assert await retrying.run_once() == 1
+    retried = await load(db, event_id)
+    assert (retried.status, retried.claim_id) == (EventStatus.PENDING, None)
+    assert await failing.run_once() == 1
+    dead = await load(db, event_id)
+    assert (dead.status, dead.claim_id) == (EventStatus.DEAD, None)
+
+    async with db.transaction() as session:
+        assert await outbox.requeue(session, event_id) is True
+    assert (await load(db, event_id)).claim_id is None
+    assert await dispatcher_for(db, settings, {TOPIC: recorder}).run_once() == 1
+    [handled] = recorder.events
+    assert handled.claim_id not in (None, abandoned)
+    done = await load(db, event_id)
+    assert (done.status, done.claim_id) == (EventStatus.DONE, None)
+
+
+async def test_a_claim_that_expires_after_the_last_attempt_leaves_no_claim_id(
+    db: Database, settings: Settings, clock: ManualClock
+) -> None:
+    last = settings.model_copy(update={"outbox_max_attempts": 1})
+    event_id = await enqueue_event(db)
+    await abandon(db, last)
+    clock.advance(seconds=last.outbox_claim_seconds + 1)
+
+    assert await dispatcher_for(db, last, {}).run_once() == 0
+
+    event = await load(db, event_id)
+    assert (event.status, event.claim_id) == (EventStatus.DEAD, None)
+
+
+async def test_a_result_cannot_be_recorded_for_an_event_that_was_never_claimed(
+    db: Database, clock: ManualClock
+) -> None:
+    event_id = await enqueue_event(db)
+    unclaimed = await load(db, event_id)
+
+    # Without a claim id there is nothing to tell this caller's row from any other's.
+    async with db.transaction() as session:
+        with pytest.raises(ValueError, match="was not claimed"):
+            await mark_done(session, unclaimed, now=clock.now())
+
+    assert await load(db, event_id) == unclaimed
 
 
 async def test_a_late_finish_cannot_touch_an_event_that_is_no_longer_being_processed(
@@ -817,6 +1033,24 @@ async def test_requeue_returns_a_dead_event_to_pending_and_it_is_then_handled(
     assert recorder.ids == [event_id]
     event = await load(db, event_id)
     assert (event.status, event.attempts) == (EventStatus.DONE, 1)
+
+
+async def test_requeue_clears_a_claim_id_left_on_a_dead_event(
+    db: Database, settings: Settings
+) -> None:
+    event_id = await enqueue_event(db)
+    await dispatcher_for(db, settings, {}).run_once()
+    # Nothing in the application leaves one there. A row repaired by hand might.
+    async with db.transaction() as session:
+        await session.execute(
+            text("UPDATE outbox_events SET claim_id = :claim WHERE id = :id"),
+            {"claim": new_id(), "id": event_id},
+        )
+
+    async with db.transaction() as session:
+        assert await outbox.requeue(session, event_id) is True
+
+    assert (await load(db, event_id)).claim_id is None
 
 
 async def test_requeue_can_be_told_the_time(db: Database, settings: Settings) -> None:

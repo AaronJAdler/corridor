@@ -11,11 +11,10 @@ import re
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Annotated, Any, Final, cast
 
 from fastapi import Depends, Header, Request
-from sqlalchemy import CursorResult, Table, delete, insert, select, text, update
+from sqlalchemy import Table, insert, select, text, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import JSONResponse
@@ -233,16 +232,6 @@ def _refusal(error: DomainError) -> StoredResponse:
     return StoredResponse(
         error.status, body, {**error.headers, "Content-Type": PROBLEM_CONTENT_TYPE}
     )
-
-
-async def purge_expired(session: AsyncSession, *, older_than: datetime) -> int:
-    """Delete the keys created before ``older_than``, and say how many.
-
-    After this a purged key is a new request again, which is why keys are kept for as long
-    as a client could reasonably still be retrying.
-    """
-    deleted = await session.execute(delete(_keys).where(_keys.c.created_at < older_than))
-    return cast(CursorResult[Any], deleted).rowcount
 
 
 def require_idempotency_key(

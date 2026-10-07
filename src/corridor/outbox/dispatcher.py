@@ -27,6 +27,10 @@ log = get_logger(__name__)
 Handler = Callable[[OutboxEvent], Awaitable[None]]
 
 MAX_ERROR_LENGTH: Final = 500
+# How much of its claim a handler may use. The rest is for recording what happened.
+HANDLER_SHARE_OF_CLAIM: Final = 0.9
+# What is stored when the description of a failure is itself something PostgreSQL refuses.
+UNRECORDABLE: Final = "the failure could not be recorded"
 
 
 class Registry:
@@ -71,7 +75,11 @@ class Dispatcher:
         """
         async with self._db.transaction() as session:
             events = await claim(
-                session, now=utcnow(), limit=self._batch_size, claim_seconds=self._claim_seconds
+                session,
+                now=utcnow(),
+                limit=self._batch_size,
+                claim_seconds=self._claim_seconds,
+                max_attempts=self._max_attempts,
             )
         # The claim is committed. From here on the dispatcher holds no transaction open
         # while a handler runs, however long a provider takes to answer.
@@ -120,7 +128,11 @@ class Dispatcher:
             return
 
         try:
-            await handler(event)
+            # Stopped before the claim runs out, so that the failure is recorded under this
+            # claim and the event is not picked up by a second worker while this one is
+            # still at it.
+            async with asyncio.timeout(self._claim_seconds * HANDLER_SHARE_OF_CLAIM):
+                await handler(event)
         except Exception as error:
             # Cancellation is deliberately not caught. It means the worker is shutting
             # down, not that the handler failed: the event is left claimed and is picked
@@ -139,7 +151,19 @@ class Dispatcher:
         log.info("outbox.event_done", **_fields(event))
 
     async def _record_failure(self, event: OutboxEvent, error: Exception) -> None:
-        description = _describe(error)
+        try:
+            await self._record_described(event, _describe(error), error)
+        except Exception:
+            # The failure could not be written down as described. Left at that, the event
+            # would stay claimed, come round when the claim ran out, fail the same way and
+            # never end. It is ended here with words that are certain to be storable. If
+            # the database is simply away this raises too, and the claim runs out as usual.
+            log.exception("outbox.failure_unrecordable", **_fields(event))
+            await self._bury(event, UNRECORDABLE)
+
+    async def _record_described(
+        self, event: OutboxEvent, description: str, error: Exception
+    ) -> None:
         if event.attempts >= self._max_attempts:
             await self._bury(event, description, error)
             return
@@ -195,4 +219,5 @@ def _describe(error: Exception) -> str:
         message = "(no printable message)"
     described = f"{type(error).__name__}: {message}" if message else type(error).__name__
     # Scrubbed before it is cut: a secret cut in half no longer looks like one.
-    return str(scrub(described))[:MAX_ERROR_LENGTH]
+    # PostgreSQL refuses a NUL in text, so one in a message is dropped.
+    return str(scrub(described)).replace("\x00", "")[:MAX_ERROR_LENGTH]

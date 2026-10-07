@@ -4,6 +4,7 @@ Every function takes the caller's session and never commits. A transfer, its jou
 its outbox event and its audit event are therefore committed together or not at all.
 """
 
+import re
 import uuid
 from typing import Any, Final, cast
 
@@ -27,7 +28,7 @@ from corridor.payments.types import Transfer
 from corridor.platform.clock import utcnow
 from corridor.platform.config import Settings
 from corridor.platform.db import advisory_xact_lock, lock_key
-from corridor.platform.money import InvalidAmount
+from corridor.platform.money import MAX_MINOR_UNITS, InvalidAmount
 from corridor.platform.pagination import (
     DEFAULT_LIMIT,
     InvalidCursor,
@@ -45,6 +46,9 @@ ENTRY_KIND: Final = "transfer"
 SOURCE_TYPE: Final = "transfer"
 TRANSFER_COMPLETED: Final = "transfer.completed"
 CURSOR_KIND: Final = "transfers"
+
+# The C0 control characters, U+0000 to U+001F.
+_CONTROL_CHARACTER: Final = re.compile(r"[\x00-\x1f]")
 
 # The namespace of the per-user lock that every movement of money out of a wallet takes.
 MONEY_OUT_LOCK: Final = "money_out"
@@ -76,6 +80,9 @@ async def create_transfer(
         raise InvalidAmount("The amount must be greater than zero.")
     if memo is not None and len(memo) > MAX_MEMO_LENGTH:
         raise InvalidMemo
+    if memo is not None and _CONTROL_CHARACTER.search(memo) is not None:
+        # PostgreSQL refuses a NUL in text, and none of the others belongs in a memo.
+        raise InvalidMemo("A memo cannot contain control characters.")
 
     sender_id = principal.user_id
     payee = await identity.find_user(session, recipient)
@@ -102,6 +109,10 @@ async def create_transfer(
     )
 
     fee = fees.transfer_fee(amount, settings)
+    if amount + fee > MAX_MINOR_UNITS:
+        # Each is storable alone, but the sender is debited their sum in one posting, and
+        # the ledger refuses that as a broken contract, which no client should be told.
+        raise InvalidAmount("The amount is too large.")
 
     source = await wallets.resolve(session, sender_id, asset)
     destination = await wallets.resolve(session, payee.id, asset)

@@ -60,7 +60,8 @@ def get_asset(code: str) -> Asset:
     try:
         return ASSETS[code]
     except KeyError:
-        raise UnknownAsset(f"{code!r} is not a supported asset.") from None
+        # What was asked for is not repeated: it may be anything a client or a provider sent.
+        raise UnknownAsset("That is not a supported asset.") from None
 
 
 def parse_amount(text: str, asset: Asset | str, *, allow_zero: bool = False) -> int:

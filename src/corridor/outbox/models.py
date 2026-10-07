@@ -48,6 +48,7 @@ class OutboxEventRow(Base):
     attempts: Mapped[int] = mapped_column(Integer)
     available_at: Mapped[datetime]
     locked_until: Mapped[datetime | None]
+    claim_id: Mapped[uuid.UUID | None]
     dedup_key: Mapped[str | None] = mapped_column(Text)
     last_error: Mapped[str | None] = mapped_column(Text)
     context: Mapped[dict[str, Any]] = mapped_column(JSONB)

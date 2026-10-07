@@ -43,8 +43,8 @@ class InvalidMemo(InvalidRequest):
     code = "invalid_memo"
     title = "Invalid memo"
 
-    def __init__(self) -> None:
-        super().__init__(f"A memo is at most {MAX_MEMO_LENGTH} characters.", field="memo")
+    def __init__(self, detail: str | None = None) -> None:
+        super().__init__(detail or f"A memo is at most {MAX_MEMO_LENGTH} characters.", field="memo")
 
 
 class DuplicateTransfer(Exception):

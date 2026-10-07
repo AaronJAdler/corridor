@@ -4,13 +4,15 @@ These tests wait for real asynchronous things (a notification, a poll, a process
 by polling for the outcome with a time limit and never by sleeping for a fixed time.
 """
 
+import ast
 import asyncio
 import contextlib
+import logging
 import os
 import signal
 import subprocess
 import sys
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterator, Mapping
 from datetime import timedelta
 from typing import Any
 
@@ -18,12 +20,13 @@ import pytest
 from prometheus_client import REGISTRY
 from sqlalchemy import text
 
-from corridor.outbox import Handler, Registry
+from corridor.outbox import Dispatcher, Handler, Registry
 from corridor.platform.clock import ManualClock
 from corridor.platform.config import Settings
 from corridor.platform.db import Database
 from corridor.platform.metrics import OUTBOX_DEAD
 from corridor.worker import Job, Worker, build_registry
+from corridor.worker import main as worker_main
 from tests.outbox.helpers import (
     TOPIC,
     Gate,
@@ -36,6 +39,7 @@ from tests.outbox.helpers import (
     status_counts,
     until,
 )
+from tests.payments.support import add_person, deposit, send
 from tests.support import postgres
 
 # Longer than any test waits: with this poll, only a notification can wake the worker.
@@ -313,6 +317,118 @@ async def test_the_registry_handles_a_ping_by_doing_nothing(db: Database) -> Non
     assert registry.handler_for("test.created") is None
 
 
+async def test_a_transfers_event_is_done_after_a_drain_with_the_real_registry(
+    db: Database, settings: Settings
+) -> None:
+    async with db.transaction() as session:
+        maria = await add_person(session, "maria")
+        joao = await add_person(session, "joao")
+    await deposit(db, maria, 100_00)
+    await send(db, settings, maria, joao, 30_00)
+
+    await Dispatcher(db, build_registry(), settings).drain()
+
+    assert await status_counts(db) == {"done": 1}
+
+
+def enqueued_topics() -> dict[str, str]:
+    """Every topic a call to ``enqueue`` in ``src`` names, with where it is named.
+
+    A topic is read from the call's second argument: a string, or a name the same module
+    binds to a string. Anything else fails here, so that a call this cannot read is
+    noticed and not silently left out.
+    """
+    topics: dict[str, str] = {}
+    for path in sorted((postgres.REPO_ROOT / "src" / "corridor").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        constants = {
+            target.id: node.value.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Assign | ast.AnnAssign)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+            if isinstance(target, ast.Name)
+        }
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            called = node.func
+            name = called.attr if isinstance(called, ast.Attribute) else getattr(called, "id", "")
+            if name != "enqueue":
+                continue
+            where = f"{path.relative_to(postgres.REPO_ROOT)}:{node.lineno}"
+            topic = node.args[1] if len(node.args) > 1 else None
+            if isinstance(topic, ast.Constant) and isinstance(topic.value, str):
+                topics[topic.value] = where
+            elif isinstance(topic, ast.Name) and topic.id in constants:
+                topics[constants[topic.id]] = where
+            else:
+                raise AssertionError(f"cannot read the topic enqueued at {where}")
+    return topics
+
+
+def test_every_topic_enqueued_anywhere_in_src_has_a_registered_handler() -> None:
+    topics = enqueued_topics()
+    registry = build_registry()
+
+    assert "transfer.completed" in topics
+    assert {
+        topic: where for topic, where in topics.items() if registry.handler_for(topic) is None
+    } == {}
+
+
+@pytest.fixture
+def served_metrics(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[tuple[int, str]]]:
+    """Run ``worker.run`` without a worker: record where the metrics server would listen."""
+    listening: list[tuple[int, str]] = []
+
+    def start_http_server(port: int, addr: str = "") -> None:
+        listening.append((port, addr))
+
+    async def serve(_settings: Settings) -> None:
+        return None
+
+    monkeypatch.setattr(worker_main, "start_http_server", start_http_server)
+    monkeypatch.setattr(worker_main, "_serve", serve)
+    root = logging.getLogger()
+    saved_handlers, saved_level = root.handlers[:], root.level
+    try:
+        yield listening
+    finally:
+        root.handlers, root.level = saved_handlers, saved_level
+
+
+def test_the_metrics_server_listens_on_the_loopback_address_unless_told_otherwise(
+    settings: Settings, served_metrics: list[tuple[int, str]]
+) -> None:
+    assert settings.worker_metrics_host == "127.0.0.1"
+
+    worker_main.run(settings.model_copy(update={"worker_metrics_port": 9105}))
+
+    assert served_metrics == [(9105, "127.0.0.1")]
+
+
+def test_the_metrics_server_listens_where_the_setting_says(
+    settings: Settings, served_metrics: list[tuple[int, str]]
+) -> None:
+    chosen = settings.model_copy(
+        update={"worker_metrics_port": 9105, "worker_metrics_host": "10.1.2.3"}
+    )
+
+    worker_main.run(chosen)
+
+    assert served_metrics == [(9105, "10.1.2.3")]
+
+
+def test_no_metrics_server_is_started_without_a_port(
+    settings: Settings, served_metrics: list[tuple[int, str]]
+) -> None:
+    worker_main.run(settings)
+
+    assert served_metrics == []
+
+
 # --- as a real process -----------------------------------------------------------------------
 
 
@@ -363,10 +479,13 @@ async def test_the_worker_process_handles_pings_and_exits_cleanly_when_signalled
     assert any('"worker.started"' in line for line in events)
     assert any('"worker.stopped"' in line for line in events)
     assert "Traceback" not in output + errors
-    # The hourly purge ran at start-up, through the real jobs.
+    # The hourly purges ran at start-up, through the real jobs.
     async with db.transaction() as session:
-        jobs = await session.execute(text("SELECT name, last_error FROM job_runs"))
-        assert [tuple(row) for row in jobs] == [("outbox.purge_finished", None)]
+        jobs = await session.execute(text("SELECT name, last_error FROM job_runs ORDER BY name"))
+        assert [tuple(row) for row in jobs] == [
+            ("idempotency.purge_expired", None),
+            ("outbox.purge_finished", None),
+        ]
 
 
 async def _is(actual: Any, expected: Any) -> bool:

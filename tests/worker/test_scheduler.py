@@ -420,6 +420,30 @@ async def test_a_recorded_error_has_its_secrets_removed(db: Database) -> None:
     assert (await job_run(db)).last_error == f"RuntimeError: refused: {REDACTED}"
 
 
+async def test_a_nul_byte_in_a_jobs_error_is_dropped_and_the_failure_is_recorded(
+    db: Database, clock: ManualClock
+) -> None:
+    await scheduler_for(db, Breaking(RuntimeError("it said \x00 and stopped"))).tick()
+
+    run = await job_run(db)
+    assert run.last_error == "RuntimeError: it said  and stopped"
+    assert run.last_finished_at == clock.now()
+
+
+async def test_a_jobs_failure_that_cannot_be_recorded_as_described_is_recorded_with_a_constant(
+    db: Database, clock: ManualClock
+) -> None:
+    before = job_runs_counted(JOB, "error")
+
+    # Half a surrogate pair cannot be sent to PostgreSQL as text at all.
+    assert await scheduler_for(db, Breaking(RuntimeError("it said \ud800"))).tick() == [JOB]
+
+    run = await job_run(db)
+    assert run.last_error == "the failure could not be recorded"
+    assert run.last_finished_at == clock.now()
+    assert job_runs_counted(JOB, "error") == before + 1
+
+
 async def test_a_recorded_error_is_cut_to_500_characters(db: Database) -> None:
     await scheduler_for(db, Breaking(RuntimeError("x" * 2_000))).tick()
 
@@ -513,7 +537,7 @@ async def test_the_purge_job_deletes_finished_events_older_than_the_retention(
     assert await status_counts(db) == {"done": 2, "dead": 1, "pending": 1}
 
     scheduler = Scheduler(db, build_jobs(settings))
-    assert await scheduler.tick() == ["outbox.purge_finished"]
+    assert "outbox.purge_finished" in await scheduler.tick()
 
     async with db.transaction() as session:
         left = set((await session.execute(text("SELECT id FROM outbox_events"))).scalars())
@@ -523,9 +547,16 @@ async def test_the_purge_job_deletes_finished_events_older_than_the_retention(
 
 
 async def test_the_purge_job_runs_hourly(db: Database, settings: Settings) -> None:
-    (job,) = build_jobs(settings)
+    by_name = {job.name: job for job in build_jobs(settings)}
 
-    assert (job.name, job.interval_seconds) == ("outbox.purge_finished", 3600)
+    assert by_name["outbox.purge_finished"].interval_seconds == 3600
+
+
+def test_the_jobs_that_exist_are_the_two_purges(settings: Settings) -> None:
+    assert sorted(job.name for job in build_jobs(settings)) == [
+        "idempotency.purge_expired",
+        "outbox.purge_finished",
+    ]
 
 
 # --- the table -------------------------------------------------------------------------------

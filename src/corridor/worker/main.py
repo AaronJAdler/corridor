@@ -27,6 +27,7 @@ from corridor.worker.scheduler import Job, Scheduler
 log = get_logger(__name__)
 
 PING_TOPIC = "worker.ping"
+TRANSFER_COMPLETED_TOPIC = "transfer.completed"
 
 
 class Worker:
@@ -162,10 +163,16 @@ async def _ping(_event: OutboxEvent) -> None:
     """Does nothing. Enqueue a ``worker.ping`` to see that a deployed worker is working."""
 
 
+async def _transfer_completed(_event: OutboxEvent) -> None:
+    """Does nothing yet: nothing consumes a completed transfer, and an event with no handler
+    would go dead instead of done."""
+
+
 def build_registry() -> Registry:
     """The handlers that exist today, by topic."""
     registry = Registry()
     registry.register(PING_TOPIC, _ping)
+    registry.register(TRANSFER_COMPLETED_TOPIC, _transfer_completed)
     return registry
 
 
@@ -173,7 +180,7 @@ def run(settings: Settings) -> None:
     """Run a worker until it is told to stop with SIGINT or SIGTERM. Blocks."""
     configure_logging(settings.log_level, settings.log_format)
     if settings.worker_metrics_port != 0:
-        start_http_server(settings.worker_metrics_port)
+        start_http_server(settings.worker_metrics_port, addr=settings.worker_metrics_host)
     asyncio.run(_serve(settings))
 
 

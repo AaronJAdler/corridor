@@ -18,9 +18,11 @@ from sqlalchemy import (
     RowMapping,
     Table,
     and_,
+    case,
     delete,
     func,
     literal,
+    null,
     or_,
     select,
     update,
@@ -32,7 +34,7 @@ from corridor.outbox.models import OutboxEventRow
 from corridor.outbox.types import EventStatus, OutboxEvent, OutboxStats
 from corridor.platform.clock import utcnow
 from corridor.platform.ids import new_id
-from corridor.platform.logging import current_context
+from corridor.platform.logging import current_context, get_logger
 
 # A Core table. The outbox writes with explicit statements and never through the ORM's unit
 # of work, so what reaches the database is exactly what is written here.
@@ -42,6 +44,11 @@ _events = cast(Table, OutboxEventRow.__table__)
 _TOPIC: Final = re.compile(r"[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+")
 
 MAX_PAGE_SIZE: Final = 200
+
+# The error recorded on an event whose worker never came back from its last attempt.
+CLAIM_EXPIRED: Final = "claim expired after the last attempt"
+
+log = get_logger(__name__)
 
 # Statuses are written into the SQL as literals, not bound. The partial indexes are
 # declared `WHERE status = '...'`, and PostgreSQL can use one in a plan it keeps for a
@@ -86,6 +93,7 @@ async def enqueue(
             attempts=0,
             available_at=available_at if available_at is not None else now,
             locked_until=None,
+            claim_id=None,
             dedup_key=dedup_key,
             last_error=None,
             context=_carried_context(),
@@ -112,7 +120,7 @@ def _carried_context() -> dict[str, Any]:
 
 
 async def claim(
-    session: AsyncSession, *, now: datetime, limit: int, claim_seconds: int
+    session: AsyncSession, *, now: datetime, limit: int, claim_seconds: int, max_attempts: int
 ) -> list[OutboxEvent]:
     """Claim up to ``limit`` events for ``claim_seconds`` and return them, oldest first.
 
@@ -120,9 +128,15 @@ async def claim(
     claim has run out, which means the worker that held it died or is too slow to count on.
     ``SKIP LOCKED`` is what lets several workers claim at once: each passes over the rows
     another is claiming at that moment instead of queueing behind them.
+
+    An event whose claim ran out on its last attempt is not claimed again. A handler that
+    kills or hangs its worker records no failure, so without this such an event would be
+    tried for ever. It is marked dead, in the same statement and so under the same lock,
+    and is not among the events returned.
     """
+    exhausted = and_(_events.c.status == _PROCESSING, _events.c.attempts >= max_attempts)
     due = (
-        select(_events.c.id)
+        select(_events.c.id, exhausted.label("exhausted"))
         .where(
             or_(
                 and_(_events.c.status == _PENDING, _events.c.available_at <= now),
@@ -139,18 +153,34 @@ async def claim(
         .cte("due")
         .prefix_with("MATERIALIZED")
     )
-    claimed = await session.execute(
+    spent = due.c.exhausted
+    claim_id = new_id()
+    touched = await session.execute(
         update(_events)
         .where(_events.c.id == due.c.id)
         .values(
-            status=_PROCESSING,
-            attempts=_events.c.attempts + 1,
-            locked_until=now + timedelta(seconds=claim_seconds),
+            status=case((spent, _DEAD), else_=_PROCESSING),
+            attempts=case((spent, _events.c.attempts), else_=_events.c.attempts + 1),
+            locked_until=case((spent, null()), else_=now + timedelta(seconds=claim_seconds)),
+            # One id for the batch is enough: no event is in a batch twice.
+            claim_id=case((spent, null()), else_=claim_id),
+            finished_at=case((spent, now), else_=_events.c.finished_at),
+            last_error=case((spent, CLAIM_EXPIRED), else_=_events.c.last_error),
         )
         .returning(_events)
     )
     # RETURNING promises no order.
-    return sorted((_event(row) for row in claimed.mappings()), key=lambda event: event.id)
+    events = sorted((_event(row) for row in touched.mappings()), key=lambda event: event.id)
+    for event in events:
+        if event.status is EventStatus.DEAD:
+            log.error(
+                "outbox.event_dead",
+                event_id=str(event.id),
+                topic=event.topic,
+                attempt=event.attempts,
+                error=CLAIM_EXPIRED,
+            )
+    return [event for event in events if event.status is EventStatus.PROCESSING]
 
 
 async def mark_done(session: AsyncSession, claimed: OutboxEvent, *, now: datetime) -> bool:
@@ -178,7 +208,7 @@ async def _finish(session: AsyncSession, claimed: OutboxEvent, **values: Any) ->
     finished = await session.execute(
         update(_events)
         .where(_still_held(claimed))
-        .values(locked_until=None, **values)
+        .values(locked_until=None, claim_id=None, **values)
         .returning(_events.c.id)
     )
     return finished.scalar_one_or_none() is not None
@@ -189,13 +219,14 @@ def _still_held(claimed: OutboxEvent) -> ColumnElement[bool]:
 
     A worker whose claim ran out before it finished may find that another worker has
     claimed the event again, or has already recorded a result. Its own result is then
-    stale and must change nothing. The attempt number tells one claim from the next.
+    stale and must change nothing. The claim id tells one claim from every other: it is
+    new for each claim and cleared when the claim ends. The attempt number would not do,
+    because a requeue starts it again.
     """
-    return and_(
-        _events.c.id == claimed.id,
-        _events.c.status == _PROCESSING,
-        _events.c.attempts == claimed.attempts,
-    )
+    if claimed.claim_id is None:
+        # Comparing with None would be `claim_id IS NULL`: every event nobody holds.
+        raise ValueError(f"event {claimed.id} was not claimed, so no result can be recorded")
+    return and_(_events.c.id == claimed.id, _events.c.claim_id == claimed.claim_id)
 
 
 # --- reading ---------------------------------------------------------------------------------
@@ -258,6 +289,7 @@ def _event(row: RowMapping) -> OutboxEvent:
         attempts=row["attempts"],
         available_at=row["available_at"],
         locked_until=row["locked_until"],
+        claim_id=row["claim_id"],
         dedup_key=row["dedup_key"],
         last_error=row["last_error"],
         context=row["context"],
@@ -283,6 +315,7 @@ async def requeue(
         .values(
             status=_PENDING,
             attempts=0,
+            claim_id=None,
             available_at=now if now is not None else utcnow(),
             finished_at=None,
         )

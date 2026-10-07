@@ -85,6 +85,17 @@ def test_an_unknown_asset_is_refused() -> None:
         parse_amount("1.00", "DOGE")
 
 
+def test_the_refusal_of_an_unknown_asset_does_not_repeat_what_was_sent() -> None:
+    # The code may come from a client or from a provider's response, and the message goes
+    # back to a client and into logs.
+    with pytest.raises(UnknownAsset) as refusal:
+        get_asset("DOGE<script>")
+
+    assert (refusal.value.status, refusal.value.code) == (422, "unknown_asset")
+    assert refusal.value.detail == "That is not a supported asset."
+    assert "DOGE" not in str(refusal.value)
+
+
 @pytest.mark.parametrize(
     ("minor", "asset", "text"),
     [

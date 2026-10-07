@@ -207,6 +207,7 @@ async def test_no_column_has_a_default(db: Database) -> None:
             "attempts",
             "available_at",
             "locked_until",
+            "claim_id",
             "dedup_key",
             "last_error",
             "context",
@@ -236,6 +237,24 @@ async def test_the_application_role_has_full_row_access(db: Database) -> None:
 
 
 # --- the notify trigger ----------------------------------------------------------------------
+
+
+async def test_the_notify_function_resolves_names_in_the_catalogue_and_nowhere_else(
+    db: Database,
+) -> None:
+    # Without a path of its own the function would run with its caller's, and whoever can
+    # create a `pg_notify` earlier on that path decides what the trigger calls.
+    async with db.transaction() as session:
+        config = (
+            await session.execute(
+                text(
+                    "SELECT proconfig FROM pg_proc"
+                    " WHERE proname = 'outbox_notify' AND pronamespace = 'public'::regnamespace"
+                )
+            )
+        ).scalar_one()
+
+    assert config == ["search_path=pg_catalog, pg_temp"]
 
 
 async def test_the_trigger_fires_once_per_insert_statement_and_for_nothing_else(

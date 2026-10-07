@@ -16,7 +16,8 @@ class EventStatus(StrEnum):
     PENDING = "pending"
     PROCESSING = "processing"
     DONE = "done"
-    # Out of attempts, or no handler: it stays until an operator requeues it.
+    # Out of attempts, no handler, or a last claim that ran out: it stays until an operator
+    # requeues it.
     DEAD = "dead"
 
 
@@ -32,6 +33,8 @@ class OutboxEvent:
     attempts: int
     available_at: datetime
     locked_until: datetime | None
+    # Which claim this is: new each time the event is claimed, and None outside a claim.
+    claim_id: uuid.UUID | None
     dedup_key: str | None
     last_error: str | None
     # What the request that enqueued it wants carried across the queue: its request id.
