@@ -4,6 +4,8 @@ It runs inside the caller's transaction, under the caller's per-user money-out l
 what it reads cannot be overtaken by another outgoing movement of the same user.
 """
 
+from typing import Final
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from corridor import identity
@@ -32,3 +34,8 @@ async def authorize(session: AsyncSession, movement: MoneyMovement) -> Decision:
             raise CounterpartyUnavailable
 
     return Decision(outcome="allow")
+
+
+# One name for the per-user lock that serialises a user's outgoing money movements, so
+# transfers, withdrawals, conversions and returns all queue behind each other.
+MONEY_OUT_LOCK: Final = "money_out"

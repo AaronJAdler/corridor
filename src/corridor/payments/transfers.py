@@ -51,7 +51,7 @@ CURSOR_KIND: Final = "transfers"
 _CONTROL_CHARACTER: Final = re.compile(r"[\x00-\x1f]")
 
 # The namespace of the per-user lock that every movement of money out of a wallet takes.
-MONEY_OUT_LOCK: Final = "money_out"
+MONEY_OUT_LOCK = risk.MONEY_OUT_LOCK
 
 
 async def create_transfer(
