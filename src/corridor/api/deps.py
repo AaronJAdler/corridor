@@ -33,6 +33,9 @@ PUBLIC_ROUTES: Final[frozenset[tuple[str, str]]] = frozenset(
         ("/v1/auth/register", "POST"),
         ("/v1/auth/login", "POST"),
         ("/v1/auth/refresh", "POST"),
+        # A provider cannot hold a bearer credential. Its deliveries are authenticated by
+        # an HMAC signature over the raw body, checked before anything else is done.
+        ("/v1/webhooks/{provider}", "POST"),
     }
 )
 

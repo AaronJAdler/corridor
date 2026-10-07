@@ -94,6 +94,7 @@ async def test_the_public_list_is_exactly_the_routes_meant_to_be_public(app: Fas
                 ("/v1/auth/register", "POST"),
                 ("/v1/auth/login", "POST"),
                 ("/v1/auth/refresh", "POST"),
+                ("/v1/webhooks/{provider}", "POST"),
             }
         )
         == PUBLIC_ROUTES
