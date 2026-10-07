@@ -1,0 +1,10 @@
+# Copy to terraform.tfvars and fill in. Nothing in this file is secret, and nothing secret
+# belongs in it: the cache's auth token is given through TF_VAR_redis_auth_token.
+
+region            = "us-east-1"
+certificate_arn   = "arn:aws:acm:us-east-1:111122223333:certificate/00000000-0000-0000-0000-000000000000"
+github_repository = "your-account/corridor"
+
+# First apply only: no tasks until the secrets have values and an image has been pushed.
+api_desired_count    = 0
+worker_desired_count = 0

@@ -79,6 +79,9 @@ e2e = { cmd = "python scripts/e2e.py", help = "Run API, worker and simulators as
 demo = { cmd = "python scripts/e2e.py demo", help = "Start a scratch stack and narrate a deposit, conversion, transfer and withdrawal" }
 lint-docker = { cmd = "uvx --from hadolint-bin==2.15.1 hadolint Dockerfile", help = "Lint the Dockerfile (hadolint; Linux and macOS)" }
 lint-compose = { cmd = "docker compose --env-file .env.example config --quiet", help = "Validate compose.yaml with the placeholder settings" }
+check = { sequence = ["lint", "typecheck", "contracts", "test"], help = "Every gate, in order" }
+lint-ci = { sequence = [{ cmd = "uvx --from actionlint-py==1.7.12.25 actionlint" }, { cmd = "uvx zizmor==1.30.1 .github" }], help = "Lint the workflows: schema, then security" }
+lint-infra = { sequence = [{ cmd = "terraform -chdir=infra fmt -check -recursive" }, { cmd = "terraform -chdir=infra init -backend=false -input=false" }, { cmd = "terraform -chdir=infra validate" }, { cmd = "uvx --python 3.13 checkov==3.3.25 --directory infra --framework terraform --quiet --compact --skip-download" }], help = "Check the Terraform: format, validity, then security" }
 
 # --- Lint ------------------------------------------------------------------
 

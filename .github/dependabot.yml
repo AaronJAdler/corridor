@@ -1,0 +1,36 @@
+# Weekly update proposals. Actions are pinned by commit, so without this they would never
+# move; the tag in the trailing comment is what Dependabot reads and rewrites.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      python-minor-and-patch:
+        update-types: [minor, patch]
+
+  # The linters that the poe tasks start with uvx are pinned in pyproject.toml as plain
+  # strings, which no ecosystem reads; they are raised by hand.
+
+  - package-ecosystem: terraform
+    directories:
+      - /infra
+      - /infra/modules/*
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+
