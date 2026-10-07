@@ -226,6 +226,12 @@ protected_modules = ["corridor.payments.models"]
 allowed_importers = ["corridor.payments"]
 
 [[tool.importlinter.contracts]]
+name = "Webhook tables are private to webhooks"
+type = "protected"
+protected_modules = ["corridor.webhooks.models"]
+allowed_importers = ["corridor.webhooks"]
+
+[[tool.importlinter.contracts]]
 name = "The simulator never imports production code"
 type = "forbidden"
 source_modules = ["corridor_sim"]

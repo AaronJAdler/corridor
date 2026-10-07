@@ -16,6 +16,7 @@ from corridor.platform.config import Settings, load_settings
 from corridor.platform.db import Database, create_engine
 from corridor.platform.logging import configure_logging
 from corridor.platform.redis import RedisStore, create_redis
+from corridor.providers import SimBank, SimCustody
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -31,16 +32,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # a token must not start, and the error says which setting is wrong.
         keys = identity.load_keyset(resolved)
         hasher = identity.PasswordHasher(resolved)
+        # A provider with an address and no key refuses to be built, as a missing signing
+        # key does. One with no address is left out, and the API runs without it.
+        bank = SimBank(resolved) if resolved.bank_rail_url else None
+        custody = SimCustody(resolved) if resolved.custody_url else None
         db = Database(create_engine(resolved, application_name="corridor-api"))
         redis = RedisStore(create_redis(resolved), resolved.redis_key_prefix)
         app.state.container = Container(
-            settings=resolved, db=db, redis=redis, keys=keys, hasher=hasher
+            settings=resolved,
+            db=db,
+            redis=redis,
+            keys=keys,
+            hasher=hasher,
+            bank=bank,
+            custody=custody,
         )
         try:
             yield
         finally:
             await redis.close()
             await db.dispose()
+            if bank is not None:
+                await bank.aclose()
+            if custody is not None:
+                await custody.aclose()
 
     interactive_docs = resolved.environment != "production"
     app = FastAPI(

@@ -6,7 +6,7 @@ from typing import Literal
 
 from corridor.identity import Principal
 
-MovementKind = Literal["transfer"]
+MovementKind = Literal["transfer", "withdrawal", "conversion"]
 
 
 @dataclass(frozen=True, slots=True)
