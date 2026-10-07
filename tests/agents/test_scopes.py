@@ -341,6 +341,14 @@ ADMIN_ROUTES: Final[frozenset[Route]] = frozenset(
         ("/v1/admin/adjustments/{adjustment_id}/reject", "POST"),
         ("/v1/admin/adjustments/suspense-release", "POST"),
         ("/v1/admin/adjustments/suspense-return", "POST"),
+        ("/v1/admin/recon/runs", "GET"),
+        ("/v1/admin/reviews", "GET"),
+        ("/v1/admin/reviews/{review_id}/clear", "POST"),
+        ("/v1/admin/reviews/{review_id}/reject", "POST"),
+        ("/v1/admin/risk/denylist", "POST"),
+        ("/v1/admin/risk/denylist", "GET"),
+        ("/v1/admin/risk/limits", "PUT"),
+        ("/v1/admin/risk/limits", "GET"),
     }
 )
 

@@ -18,6 +18,7 @@ from corridor.identity import Principal, Scope
 from corridor.platform.config import Settings
 from corridor.platform.db import Database
 from corridor.platform.ids import new_id
+from tests.agents.support import give_open_policy
 from tests.support.auth import RegisteredUser, register_user
 from tests.support.ledger import fund
 
@@ -296,6 +297,7 @@ async def test_an_agent_with_the_create_scope_sends_its_owners_money(
     joao: RegisteredUser,
 ) -> None:
     agent = agent_for(maria, Scope.TRANSFERS_CREATE)
+    await give_open_policy(db, agent)
     app.dependency_overrides[get_principal] = lambda: agent
 
     response = await client.post(URL, json=body_for(joao), headers={"Idempotency-Key": "k"})

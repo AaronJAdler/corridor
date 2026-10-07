@@ -35,7 +35,6 @@ from corridor.agents.types import (
 from corridor.identity import Principal
 from corridor.platform.clock import utcnow
 from corridor.platform.money import MAX_MINOR_UNITS, format_amount
-from corridor.risk.limits import usd_value
 
 _policies = cast(Table, AgentPolicyRow.__table__)
 _recipients = cast(Table, AgentAllowedRecipientRow.__table__)
@@ -191,7 +190,7 @@ async def check_policy(
     ):
         raise RecipientNotAllowed
 
-    value = await usd_value(session, asset, amount)
+    value = await risk.usd_value(session, asset, amount)
     if policy.per_tx_usd is not None and value > policy.per_tx_usd:
         # Risk would refuse it too when the movement is made. Refused here as well, so
         # that the owner is never asked to approve what could not be carried out.

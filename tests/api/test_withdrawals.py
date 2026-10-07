@@ -19,6 +19,7 @@ from corridor.platform.config import Settings
 from corridor.platform.db import Database
 from corridor.platform.ids import new_id
 from corridor.providers import ProviderMisconfigured, SimBank, SimCustody
+from tests.agents.support import give_open_policy
 from tests.support.auth import RegisteredUser, register_user
 from tests.support.ledger import fund
 from tests.support.providers import (  # noqa: F401
@@ -378,6 +379,7 @@ async def test_withdrawals_need_a_credential_with_their_scopes(
     assert (await api.get(URL)).status_code == 200
 
     as_agent[0] = agent_for(maria, Scope.WITHDRAWALS_CREATE)
+    await give_open_policy(db, as_agent[0])
     assert_problem(await api.get(URL), 403, "insufficient_scope")
     assert_problem(await api.get(f"{URL}/{new_id()}"), 403, "insufficient_scope")
     made = await api.post(URL, json=body, headers={"Idempotency-Key": "k"})

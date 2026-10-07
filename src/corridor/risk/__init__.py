@@ -12,7 +12,7 @@ from corridor.risk.errors import (
     ReviewNotFound,
     UserRestricted,
 )
-from corridor.risk.limits import list_limits, release_usage, set_limit
+from corridor.risk.limits import list_limits, release_usage, set_limit, usd_value
 from corridor.risk.screening import (
     add_to_denylist,
     find_review,
@@ -72,4 +72,5 @@ __all__ = [
     "resolve_review",
     "screen_party",
     "set_limit",
+    "usd_value",
 ]

@@ -29,10 +29,10 @@ Updated in the same change that lands each phase.
 | 7 | Outbound money | 6 | **done** 2026-10-06 | `gate.sh tests`: 2772 passed |
 | — | **Checkpoint B: money in and out** | | **reached** 2026-10-06 | S4 observed: failure-injection suite, one payout per withdrawal in every case |
 | 8 | FX | 3 | **done** 2026-10-06 | `gate.sh tests`: 2772 passed |
-| 9 | Risk | 4 | not started | |
-| 10 | Reconciliation and operations | 4 | not started | |
-| 11 | Agents | 4 | not started | |
-| — | **Checkpoint C: feature complete** | | | |
+| 9 | Risk | 4 | **done** 2026-10-07 | full suite: 3798 passed, 3 route-table tests then fixed and rerun |
+| 10 | Reconciliation and operations | 4 | **done** 2026-10-07 | full suite: 3798 passed, 3 route-table tests then fixed and rerun |
+| 11 | Agents | 4 | **done** 2026-10-07 | full suite: 3798 passed, 3 route-table tests then fixed and rerun |
+| — | **Checkpoint C: feature complete** | | **reached** 2026-10-07 | S5 observed: a deposit whose webhook is dropped is credited once by reconciliation |
 | 12 | Hardening | 5 | not started | |
 | 13 | Local stack | 4 | not started | |
 | 14 | Deployment | 6 | not started | |
@@ -735,3 +735,7 @@ during the build are appended here with the date and the reason.
 | 2026-10-06 | New withdrawal state `submitting`, committed before the provider call; cancel only from `held` | A cancellation during the provider call released funds for a payout that then went out |
 | 2026-10-06 | A provider refusal is checked against what the provider holds before funds are released | The failure-injection suite found two cases where a refusal followed a payout that had in fact been made |
 | 2026-10-06 | Open after checkpoint B: a dropped deposit webhook is not recovered until reconciliation (phase 10); a withdrawal left `submitting` whose event went dead needs an operator requeue; expired quotes are never purged; the minimum transfer fee is one number for all assets; revisions 0005 and 0011 were edited in place | Recorded so they are not mistaken for done |
+| 2026-10-07 | Checkpoint B reviews: no Critical or High. Fixed: held withdrawal paid after restriction, return before deposit, sweeper starvation, fee floor, authenticated rate cache, production settings check, provider client limits, simulator guard, write-once triggers | Two independent reviewers; each fix has a test that fails without it |
+| 2026-10-07 | Migrations are 0012 risk, 0013 recon, 0014 ops, 0015 agents, 0016 review fixes; admin routes are split into one router per area | The numbering in the task list above is one behind |
+| 2026-10-07 | An agent with no policy can pay nobody; over the threshold nothing moves and the owner approves | Deny by default |
+| 2026-10-07 | Accepted limits: a deposit repaired from a provider statement is credited unscreened (the statement names no sender); usage counts conversions; an agent's conversion is capped but never sent for approval; no cap on pending approval requests, agents or beneficiaries per user; tier 0 may withdraw | Recorded so they are not mistaken for done |
