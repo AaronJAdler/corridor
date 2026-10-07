@@ -8,7 +8,8 @@ Money leaves suspense as the deposit it arrived as, and in no other way. Releasi
 deposit to a user, or sending it back to where it came from, is an adjustment that names
 the deposit: its postings are worked out here instead of typed, and the approval hands it
 to payments, which looks at the deposit under its lock and moves it out of suspense once.
-An adjustment written by hand cannot debit suspense at all.
+An adjustment written by hand cannot debit suspense at all, nor a held balance: what is on
+hold belongs to a withdrawal, and leaves as that withdrawal ends.
 
 Each function takes the caller's session and runs inside the caller's transaction.
 """
@@ -67,11 +68,12 @@ async def request_adjustment(
     The postings are checked now, so that what waits for approval is something that can
     be posted: each names an existing account once, in the asset it says, and they balance
     in every asset. None of them takes money out of suspense: that is asked for by naming
-    the deposit, with ``request_suspense_release`` or ``request_suspense_return``.
+    the deposit, with ``request_suspense_release`` or ``request_suspense_return``. Nor
+    does any take money off hold, which belongs to the withdrawals that reserved it.
     """
     identity.require_admin(principal)
     await _check(session, legs)
-    await _refuse_suspense_debit(session, legs)
+    await _refuse_reserved_debit(session, legs)
     return await _record(session, principal, adjustment_id, reason, legs, kind="manual")
 
 
@@ -180,8 +182,9 @@ async def approve_adjustment(
         "approved_by": str(principal.user_id),
     }
     if pending.deposit_id is None:
-        # Asked for before suspense was closed to adjustments written by hand, perhaps.
-        await _refuse_suspense_debit(session, pending.legs)
+        # Asked for before suspense and held balances were closed to adjustments written
+        # by hand, perhaps.
+        await _refuse_reserved_debit(session, pending.legs)
         entry = await ledger.post_entry(
             session,
             EntryDraft(
@@ -368,21 +371,35 @@ async def _record(
     return adjustment
 
 
-async def _refuse_suspense_debit(session: AsyncSession, legs: Sequence[Leg]) -> None:
-    """Refuse postings written by hand that take money out of suspense.
+# Why each kind of account that a hand-written adjustment may not debit is closed to it.
+_NOT_BY_HAND: Final = {
+    AccountKind.SUSPENSE: (
+        "Money leaves suspense by releasing or returning the deposit it arrived as."
+    ),
+    AccountKind.USER_HELD: (
+        "Money on hold leaves it as the withdrawal it is reserved for is settled, canceled"
+        " or released."
+    ),
+}
+
+
+async def _refuse_reserved_debit(session: AsyncSession, legs: Sequence[Leg]) -> None:
+    """Refuse postings written by hand that take money out of suspense or off hold.
 
     Suspense holds deposits, each of which leaves it once, under its own row's lock. A
     debit that names no deposit would take the money and leave the deposit there, to be
     released or returned a second time.
+
+    A held balance is what the user's withdrawals in flight have reserved, each of which
+    takes its amount back out once, under its own row's lock. A debit that names no
+    withdrawal would leave one that is still to be paid out with nothing behind it.
     """
     for leg in legs:
         if leg.direction is not Direction.DEBIT:
             continue
-        if (await ledger.get_account(session, leg.account_id)).kind is AccountKind.SUSPENSE:
-            raise InvalidAdjustment(
-                "Money leaves suspense by releasing or returning the deposit it arrived as.",
-                field="legs",
-            )
+        refusal = _NOT_BY_HAND.get((await ledger.get_account(session, leg.account_id)).kind)
+        if refusal is not None:
+            raise InvalidAdjustment(refusal, field="legs")
 
 
 async def _check(session: AsyncSession, legs: Sequence[Leg]) -> None:

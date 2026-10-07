@@ -19,6 +19,7 @@ jobs:
     environment: production
     permissions:
       contents: read
+      checks: read # to see that CI passed for the commit being deployed
       id-token: write # exchanged for short-lived AWS credentials; there are no stored keys
     env:
       AWS_REGION: ${{ vars.AWS_REGION }}
@@ -34,6 +35,47 @@ jobs:
         run: |
           echo "::error::Deploys run from main only."
           exit 1
+
+      # Nothing is built from a commit the CI workflow has not passed. Every job of that
+      # workflow, by the name it reports under, must have a check run on this commit that
+      # ended in success: one that failed, was skipped, is still running or never ran
+      # stops the deploy here, before any credential is asked for. The names are the CI
+      # workflow's own; a test keeps this list and that workflow's jobs the same.
+      - name: Refuse to deploy a commit that CI has not passed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+          REQUIRED_CHECKS: |
+            Lint, types, contracts
+            Tests (PostgreSQL 16)
+            Tests (PostgreSQL 17)
+            Tests (PostgreSQL 18)
+            Secret scan
+            Dependency audit
+            Workflow lint
+            Terraform lint
+            Image build
+        run: |
+          set -euo pipefail
+          # The latest run of each check on the commit, which is what the API returns
+          # unless asked for all of them: a job that was run again counts as it ended last.
+          gh api --paginate "repos/$REPOSITORY/commits/$COMMIT/check-runs?per_page=100" \
+            --jq '.check_runs[] | select(.app.slug == "github-actions") | [.name, (.conclusion // "not finished")] | @tsv' \
+            > "$RUNNER_TEMP/check-runs.tsv"
+          failed=0
+          while IFS= read -r name; do
+            if [ -z "$name" ]; then continue; fi
+            conclusion=$(awk -F '\t' -v name="$name" '$1 == name { print $2 }' "$RUNNER_TEMP/check-runs.tsv" | sort -u | paste -sd ',' -)
+            if [ "$conclusion" != "success" ]; then
+              echo "::error::CI check \"$name\" has not succeeded for $COMMIT: ${conclusion:-it was not run}."
+              failed=1
+            fi
+          done <<< "$REQUIRED_CHECKS"
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::Deploys need a commit that the CI workflow has passed."
+            exit 1
+          fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

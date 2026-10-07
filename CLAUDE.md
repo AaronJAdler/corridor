@@ -30,12 +30,14 @@ uv run poe demo             the same stack, narrating a deposit, conversion, tra
 uv run poe audit            pip-audit over the installed dependencies
 uv run poe lint-docs        links, diagrams and docs/openapi.json against the code
 uv run poe lint-docker      also lint-compose (needs the Docker CLI), lint-ci, lint-infra (needs Terraform)
-uv run corridor serve       run the API (needs CORRIDOR_DATABASE_URL, CORRIDOR_REDIS_URL, a signing key)
-uv run corridor worker      run the worker
+uv run corridor serve       run the API (needs CORRIDOR_ENVIRONMENT, CORRIDOR_DATABASE_URL,
+                            CORRIDOR_REDIS_URL, a signing key)
+uv run corridor worker      run the worker (needs CORRIDOR_ENVIRONMENT too: neither starts without it)
 uv run corridor db migrate  apply migrations (needs CORRIDOR_DATABASE_OWNER_URL)
 uv run corridor keys generate --out DIR     generate a signing key pair (--mode 644 for the compose stack)
 uv run corridor users make-admin --email ADDRESS --yes    the first administrator (owner URL)
-uv run corridor verify-ledger               recompute the ledger's invariants; exit 1 on a finding
+uv run corridor verify-ledger               recompute the ledger's invariants, and that held and suspense
+                                            balances are accounted for; exit 1 on a finding
 uv run python scripts/lint_docs.py --write-openapi    regenerate docs/openapi.json after an API change
 ```
 
@@ -71,15 +73,20 @@ CORRIDOR_TEST_POSTGRES_CLONE_STRATEGY   optional: FILE_COPY is faster on a throw
 10. **Funds are given back without asking the provider only from `held`.** Once a
     withdrawal is `submitting`, a refusal is checked against what the provider holds.
 11. **Money leaves suspense only under a lock on its deposit**, whose status must be
-    `suspense`, in the transaction that posts the entry.
+    `suspense`, in the transaction that posts the entry. Money leaves a held balance only
+    with its withdrawal. No adjustment written by hand debits either.
 
 ## Lock order
 
 1. The idempotency key: an advisory lock on the actor and the key (`api/idempotency.py`).
 2. Per-user money-out advisory locks (`risk.MONEY_OUT_LOCK`), in ascending key order
-   (`platform.db.advisory_xact_lock` sorts them). Every path that takes money out of a
-   wallet takes the owner's lock first: transfer, withdrawal, conversion, approving an
-   agent's request, an adjustment that debits a user, a returned deposit, restricting a user.
+   (`platform.db.advisory_xact_lock` sorts them, so every lock a path needs goes into one
+   call). Every path that takes money out of a wallet takes the owner's lock first:
+   transfer, withdrawal, conversion, approving an agent's request, an adjustment that
+   debits a user, a returned deposit, restricting a user. Closing a user takes it while it
+   reads that the account is empty, so the two paths that credit a user take the
+   recipient's as well: a transfer (with the sender's, and the approval of an agent's
+   transfer takes both before the request's row) and a deposit (before its row).
 3. The business row (`SELECT … FOR UPDATE`): withdrawal, deposit, quote, approval request,
    adjustment.
 4. Balance rows (`FOR NO KEY UPDATE`) in ascending account id, inside `ledger.post_entry`.
@@ -103,6 +110,10 @@ CORRIDOR_TEST_POSTGRES_CLONE_STRATEGY   optional: FILE_COPY is faster on a throw
 - **SQL.** SQLAlchemy 2.1 Core-style statements, async sessions, no relationships, no lazy
   loading. `MinorUnits` for amounts. Named constraints (`pk_`, `uq_`, `fk_`, `ix_`, `ck_`).
   `timestamptz` everywhere. `text` plus `CHECK` instead of enum types. No column defaults.
+- **Settings.** `platform.config.load_settings(role)` with the process's role (`api`,
+  `worker`, `tool`); the role decides what a production configuration must have. A new
+  production rule goes into the validator, the settings test and, if a task is given the
+  setting, `infra/main.tf`, which `tests/assembly/test_deployed_settings.py` reads.
 - **Migrations.** Hand-written SQL, one statement per `op.execute`, `NNNN_name.py`, a real
   `downgrade`. Triggers and grants are part of the migration: revoke what the application
   role must not do, and grant `UPDATE` on named columns only.

@@ -2,6 +2,8 @@
 
 from datetime import timedelta
 
+from sqlalchemy import text
+
 from corridor import fx, identity, ledger, outbox, payments, recon, webhooks
 from corridor.platform.clock import utcnow
 from corridor.platform.config import Settings
@@ -27,7 +29,9 @@ UNUSED_QUOTE_RETENTION = timedelta(hours=24)
 # A count of failed logins that nothing has added to for a day locks nobody out and slows
 # nothing down: the longest lock is an hour and the throttle's window is minutes.
 LOGIN_FAILURE_RETENTION = timedelta(hours=24)
-# The verifier reads the whole ledger, so it runs as often as an answer is worth that.
+# The verifier reads the whole ledger, so it runs as often as an answer is worth that. It
+# is the ledger's verifier and the one of payments, which checks what the ledger cannot:
+# that held and suspense balances are accounted for by withdrawals and deposits.
 LEDGER_VERIFY_JOB = "ledger.verify"
 LEDGER_VERIFY_INTERVAL_SECONDS = 3600.0
 WEBHOOK_REDACTION_JOB = "webhooks.redact_payloads"
@@ -95,7 +99,13 @@ def build_jobs(
 
     async def verify_ledger(db: Database) -> None:
         async with db.transaction() as session:
-            findings = await ledger.verify(session)
+            # One snapshot for both verifiers: the checks of payments compare the ledger
+            # with the withdrawals and deposits in separate statements, and a movement
+            # that committed between two of them would be reported as a difference.
+            await session.execute(
+                text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            )
+            findings = [*await ledger.verify(session), *await payments.verify(session)]
         LEDGER_VERIFIER_FINDINGS.set(len(findings))
         LEDGER_VERIFIER_LAST_RUN.set(utcnow().timestamp())
         if findings:

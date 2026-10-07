@@ -79,6 +79,8 @@ _SETTLEMENT: Final[Mapping[FlowKind, AccountKind]] = {
 _ASSET_KIND: Final[Mapping[FlowKind, str]] = {"bank": "fiat", "chain": "stablecoin"}
 
 _IN_FLIGHT: Final = frozenset({"submitting", "submitted"})
+# The states of a deposit that is on the books and has not been taken back off them.
+_RECEIVED: Final = frozenset({"completed", "suspense"})
 
 _Statement = Callable[[str, datetime, datetime], Awaitable[ProviderStatement]]
 _Lookup = Callable[[Withdrawal], Awaitable[Sent | None]]
@@ -390,6 +392,7 @@ class _Sides:
         *,
         transaction: ProviderTransaction | None = None,
         returned: bool = False,
+        recall: ProviderTransaction | None = None,
         sent: Sent | None = None,
         withdrawal_id: uuid.UUID | None = None,
     ) -> Finding:
@@ -402,9 +405,27 @@ class _Sides:
             actual=actual,
             transaction=transaction,
             returned=returned,
+            recall=recall,
             sent=sent,
             withdrawal_id=withdrawal_id,
         )
+
+    def unbooked_recalls(self) -> list[tuple[ProviderTransaction, Deposit]]:
+        """The recalls on the statement, made in the window, whose deposit is still on the
+        books as received, each with that deposit: the provider took the money back and
+        nothing here has.
+
+        One from before the window is left out, as a deposit from before it is: it shows
+        in the balance, for a person.
+        """
+        found: list[tuple[ProviderTransaction, Deposit]] = []
+        for line in self.recalled:
+            deposit = self.deposits.get(line.related_id or "")
+            if deposit is None or deposit.status not in _RECEIVED:
+                continue
+            if line.occurred_at >= self.window_start:
+                found.append((line, deposit))
+        return found
 
     def withdrawal_of(self, withdrawal_id: uuid.UUID | None) -> Withdrawal | None:
         """The withdrawal a payout names, if it is one of this provider's in this asset."""
@@ -494,6 +515,15 @@ async def _deposit_findings(session: AsyncSession, sides: _Sides) -> list[Findin
                     returned=deposit is None and sides.came_and_went(line),
                 )
             )
+
+    # Deposits the provider took back, against the books. The repair gives payments the
+    # recall, as the provider's own event would have.
+    found.extend(
+        sides.finding("missing_return", deposit.provider_ref, deposit.amount, 0, recall=line)
+        for line, deposit in sides.unbooked_recalls()
+        # One made in the last moments is too new: its event may still arrive.
+        if line.occurred_at <= sides.settled_before
+    )
 
     # Deposits on the books, against the provider. A recalled deposit is one it knows.
     known = {line.id for line in sides.arrived} | {line.related_id for line in sides.recalled}
@@ -627,9 +657,13 @@ async def _balance_finding(session: AsyncSession, sides: _Sides) -> Finding | No
                 in_transit += line.amount
         elif not await _credited_before(session, deposit, sides.window_end):
             in_transit += line.amount
+    # A recall in the window that is not booked yet is on its way onto the books, as a
+    # deposit that is missing is: its event or the repair books it, and the balance is
+    # not a second break about the same money.
+    in_transit -= sum(line.amount for line, _ in sides.unbooked_recalls())
     for line in sides.recalled:
         deposit = sides.deposits.get(line.related_id or "")
-        # A return that is not on the books at all is not in transit: it is a difference.
+        # Any other return that is not on the books is not in transit: it is a difference.
         # Nor is the return of a deposit that was never booked: see above.
         if (
             deposit is not None

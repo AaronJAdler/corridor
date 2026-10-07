@@ -1,11 +1,13 @@
 """The payout sweeper: a scheduled job that asks a provider what became of a withdrawal
 when nothing has been heard.
 
-Webhooks get lost, and so can the answer to the request that sends a withdrawal. Neither
-may leave a user's funds reserved for ever. The sweeper finds the withdrawals that have
-been in flight for too long and reads their payouts from the provider, then applies what
-it reads through the same functions the webhooks use, so it can be run at any time, any
-number of times, alongside them.
+Webhooks get lost, and so can the answer to the request that sends a withdrawal, and so
+can the event that was to send it. None of them may leave a user's funds reserved for
+ever. The sweeper finds the withdrawals that have been in flight for too long and reads
+their payouts from the provider, then applies what it reads through the same functions the
+webhooks use, so it can be run at any time, any number of times, alongside them. It also
+finds the withdrawals that are still only held and that nothing is going to send, and asks
+for them again.
 """
 
 import uuid
@@ -45,8 +47,13 @@ async def sweep_payouts(
     Every overdue withdrawal gets its turn in every run. They are read in batches, each
     starting after the id the last one ended on, so the ones that cannot be advanced do
     not stand in front of the ones that can.
+
+    Before that, the withdrawals that are still only held, and have been for as long, are
+    looked at: one that is free to go and has no event left to send it is asked for again.
+    That asks nothing of a provider and moves nothing, so it is not counted.
     """
     before = utcnow() - timedelta(seconds=settings.payout_sweep_after_seconds)
+    await _resend_held(db, before)
 
     advanced = 0
     last_seen: uuid.UUID | None = None
@@ -69,6 +76,24 @@ async def sweep_payouts(
         if len(due) < BATCH_SIZE:
             return advanced
         last_seen = due[-1].id
+
+
+async def _resend_held(db: Database, before: datetime) -> None:
+    """Write a new submission event for every held withdrawal that nothing will send."""
+    last_seen: uuid.UUID | None = None
+    while True:
+        after = last_seen
+
+        async def read(session: AsyncSession, after: uuid.UUID | None = after) -> list[Withdrawal]:
+            return await withdrawals.waiting_unsent(session, before, after=after, limit=BATCH_SIZE)
+
+        waiting = await db.run(read)
+        for withdrawal in waiting:
+            if await handlers.resend_held(db, withdrawal.id, before):
+                log.info("payout_sweep.resent_held", withdrawal_id=str(withdrawal.id))
+        if len(waiting) < BATCH_SIZE:
+            return
+        last_seen = waiting[-1].id
 
 
 def _batch_after(

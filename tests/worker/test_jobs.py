@@ -6,7 +6,10 @@ from datetime import timedelta
 import pytest
 from prometheus_client import REGISTRY
 from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from corridor import ledger, payments
+from corridor.ledger import AccountKind
 from corridor.platform.clock import ManualClock
 from corridor.platform.config import Settings
 from corridor.platform.db import Database
@@ -14,7 +17,7 @@ from corridor.worker import Scheduler, build_jobs
 from corridor.worker.jobs import LEDGER_VERIFY_JOB
 from corridor.worker.scheduler import Job
 from tests.outbox.helpers import LogReader
-from tests.support.ledger import funded_user
+from tests.support.ledger import fund, funded_user
 
 PURGE_JOB = "auth.purge_login_failures"
 
@@ -89,6 +92,40 @@ async def test_the_verifier_job_reports_what_it_finds_and_does_not_fail(
             {"name": LEDGER_VERIFY_JOB},
         )
         assert error.scalar_one() is None
+
+
+async def test_the_verifier_job_also_reports_what_the_payments_verifier_finds(
+    db: Database, settings: Settings, logs: LogReader
+) -> None:
+    # Money in suspense that no deposit accounts for. The ledger's own checks see nothing
+    # wrong with it: the entry balances.
+    async with db.transaction() as session:
+        suspense = await ledger.open_account(session, AccountKind.SUSPENSE, "USD")
+        await fund(session, suspense.id, 12_00)
+
+    assert LEDGER_VERIFY_JOB in await Scheduler(db, build_jobs(settings)).tick()
+
+    assert gauge("corridor_ledger_verifier_findings") == 1
+    (failed,) = [line for line in logs() if line["event"] == "ledger.verify_failed"]
+    assert (failed["findings"], failed["checks"]) == (1, ["suspense_mismatch"])
+
+
+async def test_the_verifier_job_reads_both_verifiers_in_one_snapshot(
+    db: Database, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[tuple[str, str]] = []
+
+    async def isolation(session: AsyncSession, **_options: object) -> list[ledger.Finding]:
+        level = await session.execute(text("SHOW transaction_isolation"))
+        read_only = await session.execute(text("SHOW transaction_read_only"))
+        seen.append((level.scalar_one(), read_only.scalar_one()))
+        return []
+
+    monkeypatch.setattr(payments, "verify", isolation)
+
+    await job_named(settings, LEDGER_VERIFY_JOB).run(db)
+
+    assert seen == [("repeatable read", "on")]
 
 
 # --- old login failure counts ------------------------------------------------------------------

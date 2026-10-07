@@ -491,6 +491,8 @@ async def test_twenty_cancellations_at_once_release_the_funds_once(
     assert (await available(db, maria), await held(db, maria)) == (500_00, 0)
 
 
+# The state is written by hand, so the funds stay held whatever it says.
+@pytest.mark.usefixtures("written_by_hand")
 @pytest.mark.parametrize(
     "status",
     ["submitting", "submitted", "completed", "failed", "canceled"],

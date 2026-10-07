@@ -12,6 +12,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from corridor import ledger
+from corridor.ledger import AccountKind
 from corridor.platform.db import (
     CHECK_VIOLATION,
     UNIQUE_VIOLATION,
@@ -432,6 +434,58 @@ async def test_even_the_owner_cannot_edit_history(
     assert await count(db, "postings") == 2
 
 
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE ledger_accounts SET normal_side = 'D'",
+        "UPDATE ledger_accounts SET owner_id = NULL WHERE false",
+        "DELETE FROM ledger_accounts",
+        "DELETE FROM ledger_accounts WHERE false",
+        "TRUNCATE ledger_accounts CASCADE",
+    ],
+)
+async def test_even_the_owner_cannot_change_or_remove_an_account(
+    db: Database, owner_db: Database, statement: str
+) -> None:
+    # An account whose normal side was turned over would give every balance on it the
+    # opposite sign, and one that was removed would take its postings' meaning with it.
+    await balanced_entry(db)
+
+    with pytest.raises(DBAPIError) as failure:
+        async with owner_db.transaction() as session:
+            await session.execute(text(statement))
+
+    assert sqlstate_of(failure.value) == APPEND_ONLY
+    assert "ledger_accounts" in str(failure.value)
+    assert await count(db, "ledger_accounts") == 2
+
+
+@pytest.mark.parametrize(
+    "statement", ["UPDATE ledger_accounts SET normal_side = 'D'", "DELETE FROM ledger_accounts"]
+)
+async def test_the_application_role_has_no_privilege_to_change_an_account(
+    db: Database, statement: str
+) -> None:
+    await balanced_entry(db)
+
+    with pytest.raises(DBAPIError) as failure:
+        async with db.transaction() as session:
+            await session.execute(text(statement))
+
+    assert sqlstate_of(failure.value) == INSUFFICIENT_PRIVILEGE
+
+
+async def test_opening_an_account_that_exists_is_not_taken_for_a_change(db: Database) -> None:
+    # The service opens accounts with INSERT ... ON CONFLICT DO NOTHING, which must not
+    # set off the guard against updates.
+    async with db.transaction() as session:
+        first = await ledger.open_account(session, AccountKind.FEE_REVENUE, "USD")
+    async with db.transaction() as session:
+        again = await ledger.open_account(session, AccountKind.FEE_REVENUE, "USD")
+
+    assert again.id == first.id
+
+
 async def test_the_application_role_holds_exactly_the_privileges_it_needs(db: Database) -> None:
     async with db.transaction() as session:
         rows = await session.execute(
@@ -562,23 +616,26 @@ async def test_a_user_has_one_account_per_kind_and_asset(db: Database) -> None:
         ("user_available", "owner", "simbank"),
         ("bank_settlement", None, None),  # a settlement account without a provider
         ("fee_revenue", "owner", None),  # a system account that claims an owner
-        ("made_up_kind", None, None),
     ],
 )
 async def test_an_account_must_have_the_shape_of_its_kind(
     db: Database, kind: str, owner: str | None, provider: str | None
 ) -> None:
+    # The category and the side are the chart's, so that the shape is all that is wrong.
+    spec = ledger.CHART[AccountKind(kind)]
     with pytest.raises(DBAPIError) as failure:
         async with db.transaction() as session:
             await session.execute(
                 text(
                     "INSERT INTO ledger_accounts (id, asset_code, kind, category, normal_side,"
                     " owner_id, provider, is_constrained, created_at) VALUES (:id, 'USD', :kind,"
-                    " 'liability', 'C', :owner, :provider, :constrained, :now)"
+                    " :category, :side, :owner, :provider, :constrained, :now)"
                 ),
                 {
                     "id": new_id(),
                     "kind": kind,
+                    "category": spec.category,
+                    "side": spec.normal_side.value,
                     "owner": new_id() if owner else None,
                     "provider": provider,
                     "constrained": kind.startswith("user_"),
@@ -587,6 +644,62 @@ async def test_an_account_must_have_the_shape_of_its_kind(
             )
 
     assert constraint_of(failure.value) == "ck_ledger_accounts_kind"
+
+
+async def test_an_account_of_a_kind_the_chart_does_not_have_is_refused(db: Database) -> None:
+    with pytest.raises(DBAPIError) as failure:
+        async with db.transaction() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO ledger_accounts (id, asset_code, kind, category, normal_side,"
+                    " is_constrained, created_at) VALUES (:id, 'USD', 'made_up_kind',"
+                    " 'liability', 'C', false, :now)"
+                ),
+                {"id": new_id(), "now": NOW},
+            )
+
+    assert sqlstate_of(failure.value) == CHECK_VIOLATION
+
+
+async def test_an_account_is_accepted_only_with_the_category_and_side_the_chart_gives_its_kind(
+    db: Database,
+) -> None:
+    """Every kind with every category and side: the database takes the one combination in
+    ``ledger.CHART`` and refuses the other seven, so the constraint and the chart agree."""
+    accepted: set[tuple[str, str, str]] = set()
+    refused_by: set[str | None] = set()
+    for kind, spec in ledger.CHART.items():
+        for category in ("asset", "liability", "revenue", "expense"):
+            for side in ("D", "C"):
+                try:
+                    async with db.transaction() as session:
+                        await session.execute(
+                            text(
+                                "INSERT INTO ledger_accounts (id, asset_code, kind, category,"
+                                " normal_side, owner_id, provider, is_constrained, created_at)"
+                                " VALUES (:id, 'USD', :kind, :category, :side, :owner, :provider,"
+                                " :constrained, :now)"
+                            ),
+                            {
+                                "id": new_id(),
+                                "kind": kind.value,
+                                "category": category,
+                                "side": side,
+                                "owner": new_id() if spec.scope == "user" else None,
+                                "provider": "simbank" if spec.scope == "provider" else None,
+                                "constrained": spec.constrained,
+                                "now": NOW,
+                            },
+                        )
+                except DBAPIError as refusal:
+                    refused_by.add(constraint_of(refusal))
+                else:
+                    accepted.add((kind.value, category, side))
+
+    assert accepted == {
+        (kind.value, spec.category, spec.normal_side.value) for kind, spec in ledger.CHART.items()
+    }
+    assert refused_by == {"ck_ledger_accounts_chart"}
 
 
 async def test_a_user_account_cannot_be_marked_unconstrained(db: Database) -> None:

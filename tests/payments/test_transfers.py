@@ -1,5 +1,6 @@
 """A transfer between two users: what moves, what is recorded, and what is refused."""
 
+import asyncio
 import uuid
 
 import pytest
@@ -525,27 +526,67 @@ async def test_a_transfer_waits_for_the_senders_money_out_lock(
     assert await available(db, maria) == 10_00
 
 
-async def test_receiving_does_not_wait_for_the_recipients_money_out_lock(
+async def test_a_transfer_waits_for_the_recipients_money_out_lock(
     db: Database, settings: Settings, maria: User, joao: User
 ) -> None:
+    """Closing an account holds this lock while it reads the balances, so a transfer that
+    is about to credit the account cannot slip in between that read and the closing."""
     await deposit(db, maria, 10_00)
 
     async with db.transaction() as holder:
         await advisory_xact_lock(holder, [lock_key("money_out", joao.id)])
-        async with db.transaction() as session:
-            await session.execute(text("SET LOCAL lock_timeout = '100ms'"))
-            await payments.create_transfer(
-                session,
-                acting_as(maria),
-                transfer_id=new_id(),
-                recipient="@joao",
-                asset="USD",
-                amount=1_00,
-                memo=None,
-                settings=settings,
-            )
+        with pytest.raises(DBAPIError) as failure:
+            async with db.transaction() as blocked:
+                await blocked.execute(text("SET LOCAL lock_timeout = '100ms'"))
+                await payments.create_transfer(
+                    blocked,
+                    acting_as(maria),
+                    transfer_id=new_id(),
+                    recipient="@joao",
+                    asset="USD",
+                    amount=1_00,
+                    memo=None,
+                    settings=settings,
+                )
 
-    assert await available(db, joao) == 1_00
+    assert sqlstate_of(failure.value) == LOCK_NOT_AVAILABLE
+    assert (await available(db, maria), await available(db, joao)) == (10_00, 0)
+
+
+async def until_a_transaction_is_waiting_for_a_lock(db: Database) -> None:
+    for _ in range(1000):
+        async with db.transaction() as session:
+            waiting = (
+                await session.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity"
+                        " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                    )
+                )
+            ).scalar_one()
+        if waiting:
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("no transaction ever waited for a lock")
+
+
+async def test_a_recipient_closed_while_the_transfer_waited_is_not_paid(
+    db: Database, settings: Settings, maria: User, joao: User
+) -> None:
+    await deposit(db, maria, 10_00)
+
+    async with db.transaction() as closing:
+        # As closing an account does: the lock, and then the account is closed under it.
+        await advisory_xact_lock(closing, [lock_key("money_out", joao.id)])
+        await identity.close_user(closing, joao.id)
+        # Found open, because the closing has not committed, and now waiting for the lock.
+        sending = asyncio.create_task(send(db, settings, maria, "@joao", 1_00))
+        await until_a_transaction_is_waiting_for_a_lock(db)
+
+    with pytest.raises(payments.RecipientNotFound):
+        await sending
+    assert (await available(db, maria), await available(db, joao)) == (10_00, 0)
+    assert await count(db, "transfers") == 0
 
 
 async def test_a_refused_scope_or_recipient_never_takes_the_lock(

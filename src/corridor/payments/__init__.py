@@ -81,6 +81,7 @@ from corridor.payments.types import (
     Withdrawal,
     WithdrawalStatus,
 )
+from corridor.payments.verify import verify
 from corridor.payments.withdrawals import (
     cancel_withdrawal,
     get_withdrawal,
@@ -164,6 +165,7 @@ __all__ = [
     "send_cleared_withdrawal",
     "submit_withdrawal",
     "sweep_payouts",
+    "verify",
     "withdrawals_completed_between",
     "withdrawals_in_flight",
 ]

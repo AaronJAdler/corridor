@@ -5,6 +5,7 @@ through the function the webhook would have reached, and a deposit through the o
 deposits read from a statement. S5 is the first test here.
 """
 
+import uuid
 from datetime import timedelta
 from typing import Any
 
@@ -12,11 +13,12 @@ import pytest
 
 from corridor import payments, recon, risk
 from corridor.ledger import AccountKind
-from corridor.providers import SimBank, SimCustody
+from corridor.providers import ProviderTransaction, SimBank, SimCustody
 from corridor.recon import repair as repair_module
 from tests.payments.support import entries, rows
 from tests.recon.conftest import Reconcile
 from tests.recon.support import BANK, breaks, chain_submitted, funded, kinds, let_pass, submitted
+from tests.support.auth import RegisteredUser
 from tests.support.providers import CLOSED_ACCOUNT_NUMBER
 from tests.support.stack import PROVIDER_FEE, Stack
 
@@ -276,6 +278,169 @@ async def test_a_repaired_deposit_is_not_credited_again_when_its_webhook_arrives
     assert await stack.wallet(user) == (250_00, 0)
     assert len(await entries(stack.db, "deposit", f"{BANK}:{deposit_id}")) == 1
     assert len(await stack.deposits()) == 1
+
+
+# --- a return that never arrived -------------------------------------------------------------
+
+
+async def audit_events(stack: Stack, action: str) -> list[dict[str, Any]]:
+    return await rows(
+        stack.db,
+        "SELECT actor_type, actor_id, details FROM audit_events WHERE action = :action ORDER BY id",
+        action=action,
+    )
+
+
+async def recalled_unheard(stack: Stack, spend: str | None = None) -> tuple[RegisteredUser, str]:
+    """A credited bank deposit of 500.00 that the bank took back, whose return was dropped."""
+    user, deposit_id = await funded(stack)
+    if spend is not None:
+        other = await stack.person()
+        sent = await stack.transfer(user, other, spend)
+        assert sent.status_code == 201, sent.text
+    await stack.webhooks_behave(drop_types=["deposit.returned"])
+    await stack.sim.control("POST", f"/bank/deposits/{deposit_id}/return", {"reason": "recalled"})
+    await let_pass(stack)
+    return user, deposit_id
+
+
+async def test_a_return_whose_webhook_was_dropped_is_taken_back_by_the_run(
+    stack: Stack, reconcile: Reconcile
+) -> None:
+    user, deposit_id = await recalled_unheard(stack)
+
+    result = await reconcile()
+
+    assert (kinds(result.breaks), result.repaired) == (["missing_return"], 1)
+    (deposit,) = await stack.deposits()
+    assert (deposit["provider_ref"], deposit["status"]) == (deposit_id, "returned")
+    assert await stack.wallet(user) == (0, 0)
+    assert await stack.book_balance(AccountKind.BANK_SETTLEMENT, "USD", provider=BANK) == 0
+    (closed,) = await breaks(stack)
+    assert (closed["status"], closed["resolved_by"]) == ("resolved", "system")
+    assert closed["note"] == "The return is on the books."
+    # Through the function the bank's own event would have reached, and recorded as the
+    # bank's doing, with the reason that says where it was read.
+    (audited,) = await audit_events(stack, "deposit.returned")
+    assert (audited["actor_type"], audited["actor_id"]) == ("provider", BANK)
+    assert audited["details"]["reason"] == "statement"
+
+
+async def test_a_repaired_return_of_money_that_was_spent_books_what_is_owed(
+    stack: Stack, reconcile: Reconcile
+) -> None:
+    user, _ = await recalled_unheard(stack, spend="200.00")
+    left, _ = await stack.wallet(user)
+    assert 0 < left < 500_00
+
+    result = await reconcile()
+
+    assert result.repaired == 1
+    assert await stack.wallet(user) == (0, 0)
+    (owed,) = await rows(
+        stack.db,
+        "SELECT b.balance FROM account_balances b JOIN ledger_accounts a ON a.id = b.account_id"
+        " WHERE a.kind = 'user_receivable'",
+    )
+    assert owed["balance"] == 500_00 - left
+    (standing,) = await rows(
+        stack.db, "SELECT status FROM users WHERE id = :id", id=uuid.UUID(user.id)
+    )
+    assert standing["status"] == "restricted"
+
+
+async def test_the_run_after_a_return_was_repaired_finds_nothing(
+    stack: Stack, reconcile: Reconcile
+) -> None:
+    await recalled_unheard(stack)
+    await reconcile()
+    await let_pass(stack)
+
+    again = await reconcile()
+
+    assert (again.breaks, again.repaired) == ((), 0)
+    assert [row["status"] for row in await breaks(stack)] == ["resolved"]
+
+
+async def test_a_repaired_return_is_not_taken_back_again_when_its_webhook_arrives_late(
+    stack: Stack, reconcile: Reconcile
+) -> None:
+    user, deposit_id = await funded(stack)
+    await stack.webhooks_behave(hold=True)
+    await stack.sim.control("POST", f"/bank/deposits/{deposit_id}/return", {"reason": "recalled"})
+    await let_pass(stack)
+    assert (await reconcile()).repaired == 1
+    entries_before = await rows(stack.db, "SELECT count(*) AS entries FROM journal_entries")
+
+    await stack.webhooks_behave(hold=False)
+    await stack.settle()
+
+    assert await rows(stack.db, "SELECT count(*) AS entries FROM journal_entries") == entries_before
+    assert await stack.wallet(user) == (0, 0)
+
+
+async def test_a_return_that_payments_refuses_leaves_its_break_open(
+    stack: Stack, reconcile: Reconcile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await recalled_unheard(stack)
+    monkeypatch.setattr(payments, "apply_bank_deposit_returned", refuse)
+
+    result = await reconcile()
+
+    assert (kinds(result.breaks), result.repaired) == (["missing_return"], 0)
+    assert [(row["kind"], row["status"]) for row in await breaks(stack)] == [
+        ("missing_return", "open")
+    ]
+    assert [deposit["status"] for deposit in await stack.deposits()] == ["completed"]
+
+
+async def test_a_missing_return_that_its_late_webhook_put_right_is_closed_by_the_next_run(
+    stack: Stack, reconcile: Reconcile, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, deposit_id = await funded(stack)
+    await stack.webhooks_behave(hold=True)
+    await stack.sim.control("POST", f"/bank/deposits/{deposit_id}/return", {"reason": "recalled"})
+    await let_pass(stack)
+    with monkeypatch.context() as patch:
+        patch.setattr(payments, "apply_bank_deposit_returned", refuse)
+        assert (await reconcile()).repaired == 0
+    await stack.webhooks_behave(hold=False)
+    await stack.settle()
+    await let_pass(stack)
+
+    result = await reconcile()
+
+    assert (result.breaks, result.repaired) == ((), 1)
+    assert [row["status"] for row in await breaks(stack)] == ["resolved"]
+
+
+async def test_a_recall_on_a_custodians_statement_is_not_given_to_the_bank_return(
+    stack: Stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a bank takes a deposit back. A statement line that says a custodian did is not
+    something the bank's return can be made of, and is left for a person."""
+    given: list[Any] = []
+
+    async def record(_db: Any, data: Any) -> None:
+        given.append(data)
+
+    monkeypatch.setattr(payments, "apply_bank_deposit_returned", record)
+    line = ProviderTransaction(
+        id="ctx_1",
+        type="deposit_return",
+        direction="debit",
+        asset_code="USDC",
+        amount=25_000_000,
+        reference=None,
+        related_id="cdep_1",
+        occurred_at=stack.clock.now(),
+        tx_hash=None,
+    )
+
+    await repair_module._apply_recall(stack.db, "simcustody", "cdep_1", line)
+    assert given == []
+    await repair_module._apply_recall(stack.db, BANK, "dep_1", line)
+    assert [said["deposit_id"] for said in given] == ["dep_1"]
 
 
 async def test_a_paid_payout_whose_webhook_was_dropped_is_settled_by_the_run(

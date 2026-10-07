@@ -396,7 +396,7 @@ async def overdue(
     keep every later one from ever being looked at.
 
     A withdrawal that is only held is not among them however old it is: it has never been
-    sent, so there is nothing a provider could say about it.
+    sent, so there is nothing a provider could say about it. ``waiting_unsent`` reads those.
     """
     query = select(_withdrawals).where(
         or_(
@@ -404,6 +404,26 @@ async def overdue(
             # The mark, or the sweeper's last request to send it again, whichever is later.
             and_(_withdrawals.c.status == "submitting", _withdrawals.c.updated_at <= before),
         )
+    )
+    if after is not None:
+        query = query.where(_withdrawals.c.id > after)
+    rows = await session.execute(query.order_by(_withdrawals.c.id).limit(limit))
+    return [as_withdrawal(row) for row in rows.mappings()]
+
+
+async def waiting_unsent(
+    session: AsyncSession, before: datetime, *, after: uuid.UUID | None = None, limit: int
+) -> list[Withdrawal]:
+    """One batch of the withdrawals that are still only held and were last touched before
+    ``before``, oldest first: reserved, never sent, and with nothing recorded of them for
+    as long as a submission is given to happen.
+
+    Most of them are waiting for a person, a review or their user. The ones that are
+    waiting for nothing are for the sweeper to find. ``after`` is the id the batch before
+    this one ended on, as for ``overdue``.
+    """
+    query = select(_withdrawals).where(
+        _withdrawals.c.status == "held", _withdrawals.c.updated_at <= before
     )
     if after is not None:
         query = query.where(_withdrawals.c.id > after)

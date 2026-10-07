@@ -24,6 +24,11 @@ History is never changed; a correction is a new entry. The database enforces thi
 - `UNIQUE (source_type, source_id, kind)` means one business event posts at most once.
 - A verifier recomputes every invariant and reports what differs. It runs hourly in the
   worker, after every test, and on demand as `corridor verify-ledger`.
+- `ledger_accounts` is written once as well: the same trigger refuses any change to an
+  account, and a constraint holds its category and normal side to its kind.
+- The verifier compares rows that exist. A whole entry deleted together with its postings,
+  with the balances rewritten to match, would need a hash chain over the journal to be
+  seen, and there is none.
 
 `ledger.post_entry` is the only function that writes these tables.
 

@@ -198,9 +198,17 @@ async def approve(
     approval it asked for.
     """
     identity.require_user_session(principal)
-    # Before the request's row, as the lock order has it: the movement takes this lock
-    # again, and by then the row is held.
-    await advisory_xact_lock(session, [lock_key(risk.MONEY_OUT_LOCK, principal.user_id)])
+    # Before the request's row, as the lock order has it: the movement takes these locks
+    # again, and by then the row is held. The owner's, and for a transfer the recipient's
+    # too, which the transfer takes so that it cannot pay into an account being closed.
+    await advisory_xact_lock(
+        session,
+        [
+            lock_key(risk.MONEY_OUT_LOCK, user_id)
+            for user_id in (principal.user_id, await _payee_of(session, principal, approval_id))
+            if user_id is not None
+        ],
+    )
     row = await _lock_pending(session, principal, approval_id)
     now = utcnow()
     if row["expires_at"] <= now:
@@ -267,6 +275,27 @@ async def _move(
             to_address=intent.to_address,
             settings=settings,
         )
+
+
+async def _payee_of(
+    session: AsyncSession, principal: Principal, approval_id: uuid.UUID
+) -> uuid.UUID | None:
+    """The user a requested transfer would pay, if the request is the principal's and is
+    for a transfer to someone who can be found.
+
+    Read without a lock, only to learn whose money-out lock comes before the request's
+    row. What a request asks for is written once, with the request.
+    """
+    found = await session.execute(
+        select(_requests.c.kind, _requests.c.request).where(
+            _requests.c.id == approval_id, _requests.c.owner_user_id == principal.user_id
+        )
+    )
+    row = found.mappings().one_or_none()
+    if row is None or row["kind"] != "transfer":
+        return None
+    payee = await identity.find_user(session, row["request"]["recipient"])
+    return payee.id if payee is not None else None
 
 
 async def _lock_pending(

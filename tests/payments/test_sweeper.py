@@ -6,14 +6,16 @@ from typing import Any
 import pytest
 from sqlalchemy import text
 
-from corridor import payments
+from corridor import identity, payments, risk
 from corridor.identity import User
-from corridor.payments import handlers, sweeper
+from corridor.payments import handlers, sweeper, withdrawals
 from corridor.platform.clock import ManualClock
 from corridor.platform.config import Settings
 from corridor.platform.db import Database
 from corridor.providers import ProviderOutcomeUnknown, SimBank, SimCustody
+from tests.identity.support import close_account
 from tests.payments.support import (
+    acting_as,
     add_beneficiary,
     available,
     count,
@@ -446,6 +448,8 @@ async def test_the_sweeper_settles_a_chain_withdrawal_from_the_custodians_record
     assert polls(sim) == []
 
 
+# A withdrawal is marked failed by hand, with its funds still held.
+@pytest.mark.usefixtures("written_by_hand")
 async def test_a_payout_that_is_another_withdrawals_settles_nothing(
     db: Database,
     charging: Settings,
@@ -506,3 +510,284 @@ async def test_two_payouts_under_one_reference_are_not_chosen_between(
     row = await withdrawal_row(db, withdrawal.id)
     assert (row["status"], row["provider_ref"]) == ("submitting", None)
     assert await held(db, maria) == 101_50
+
+
+# --- a held withdrawal that nothing is going to send -------------------------------------------
+
+
+async def end_events(db: Database, status: str) -> None:
+    """Leave every submission event as a worker would that gave up on it, or finished it."""
+    async with db.transaction() as session:
+        await session.execute(
+            text(
+                "UPDATE outbox_events SET status = :status, finished_at = available_at"
+                " WHERE topic = 'withdrawal.submit'"
+            ),
+            {"status": status},
+        )
+
+
+async def test_a_held_withdrawal_whose_event_went_dead_is_asked_for_again(
+    db: Database,
+    charging: Settings,
+    sim: Sim,
+    bank: SimBank,
+    custody: SimCustody,
+    clock: ManualClock,
+    maria: User,
+) -> None:
+    withdrawal = await held_bank_withdrawal(db, charging, bank, maria)
+    await end_events(db, "dead")
+    clock.advance(seconds=SWEEP_AFTER - 1)
+    assert await payments.sweep_payouts(db, bank, custody, charging) == 0
+    assert await submissions_asked_for(db) == 1
+
+    clock.advance(seconds=1)
+    # Asked for again, which moves nothing by itself: it does not count as advanced.
+    assert await payments.sweep_payouts(db, bank, custody, charging) == 0
+
+    (_, again) = await rows(
+        db,
+        "SELECT status, payload FROM outbox_events WHERE topic = 'withdrawal.submit' ORDER BY id",
+    )
+    assert again == {"status": "pending", "payload": {"withdrawal_id": str(withdrawal.id)}}
+    # Nothing was asked of the provider, and the withdrawal can still be called back.
+    assert polls(sim) == []
+    row = await withdrawal_row(db, withdrawal.id)
+    assert (row["status"], row["updated_at"]) == ("held", clock.now())
+    assert await held(db, maria) == 101_50
+    # The event it wrote sends it.
+    await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
+    assert (await withdrawal_row(db, withdrawal.id))["status"] == "submitted"
+
+
+async def test_a_held_withdrawal_is_asked_for_again_at_most_once_in_each_sweep_period(
+    db: Database,
+    charging: Settings,
+    bank: SimBank,
+    custody: SimCustody,
+    clock: ManualClock,
+    maria: User,
+) -> None:
+    await held_bank_withdrawal(db, charging, bank, maria)
+    await end_events(db, "dead")
+    clock.advance(seconds=SWEEP_AFTER)
+    await payments.sweep_payouts(db, bank, custody, charging)
+    assert await submissions_asked_for(db) == 2
+
+    # The new event goes dead as well, at once.
+    await end_events(db, "dead")
+    await payments.sweep_payouts(db, bank, custody, charging)
+    clock.advance(seconds=SWEEP_AFTER - 1)
+    await payments.sweep_payouts(db, bank, custody, charging)
+    assert await submissions_asked_for(db) == 2
+
+    clock.advance(seconds=1)
+    await payments.sweep_payouts(db, bank, custody, charging)
+    assert await submissions_asked_for(db) == 3
+
+
+@pytest.mark.parametrize("status", ["pending", "processing"])
+async def test_a_held_withdrawal_whose_event_is_still_to_be_handled_is_left_to_it(
+    db: Database,
+    charging: Settings,
+    bank: SimBank,
+    custody: SimCustody,
+    clock: ManualClock,
+    maria: User,
+    status: str,
+) -> None:
+    await held_bank_withdrawal(db, charging, bank, maria)
+    async with db.transaction() as session:
+        await session.execute(
+            text("UPDATE outbox_events SET status = :status WHERE topic = 'withdrawal.submit'"),
+            {"status": status},
+        )
+    clock.advance(seconds=10 * SWEEP_AFTER)
+
+    assert await payments.sweep_payouts(db, bank, custody, charging) == 0
+
+    assert await submissions_asked_for(db) == 1
+
+
+async def test_another_withdrawals_event_does_not_stand_in_for_a_held_withdrawals_own(
+    db: Database,
+    charging: Settings,
+    bank: SimBank,
+    custody: SimCustody,
+    clock: ManualClock,
+    maria: User,
+) -> None:
+    first = await held_bank_withdrawal(db, charging, bank, maria, 10_00)
+    await end_events(db, "dead")
+    beneficiary = await add_beneficiary(db, bank, maria)
+    # The second one's event is pending, and is the second one's alone.
+    await withdraw(db, charging, maria, 10_00, beneficiary=beneficiary)
+    clock.advance(seconds=SWEEP_AFTER)
+
+    await payments.sweep_payouts(db, bank, custody, charging)
+
+    asked = await rows(
+        db,
+        "SELECT payload FROM outbox_events WHERE topic = 'withdrawal.submit' AND status = 'pending'"
+        " ORDER BY id",
+    )
+    assert str(first.id) in {event["payload"]["withdrawal_id"] for event in asked}
+    assert len(asked) == 2
+
+
+async def under_review(
+    db: Database, charging: Settings, bank: SimBank, maria: User
+) -> payments.Withdrawal:
+    """A held withdrawal that screening wants an operator to see, whose own event has run
+    and left it held, as it does while the review is open."""
+    async with db.transaction() as session:
+        await risk.add_to_denylist(session, kind="name", value="Maria Silva", outcome="review")
+    withdrawal = await held_bank_withdrawal(db, charging, bank, maria)
+    await end_events(db, "done")
+    return withdrawal
+
+
+async def test_a_held_withdrawal_under_review_is_not_asked_for_again(
+    db: Database,
+    charging: Settings,
+    bank: SimBank,
+    custody: SimCustody,
+    clock: ManualClock,
+    maria: User,
+) -> None:
+    await under_review(db, charging, bank, maria)
+    clock.advance(seconds=10 * SWEEP_AFTER)
+
+    assert await payments.sweep_payouts(db, bank, custody, charging) == 0
+
+    assert await submissions_asked_for(db) == 1
+
+
+async def test_a_held_withdrawal_whose_review_was_rejected_is_not_asked_for_again(
+    db: Database,
+    charging: Settings,
+    bank: SimBank,
+    custody: SimCustody,
+    clock: ManualClock,
+    maria: User,
+) -> None:
+    withdrawal = await under_review(db, charging, bank, maria)
+    async with db.transaction() as session:
+        await risk.resolve_review(
+            session, subject_type="withdrawal", subject_id=withdrawal.id, cleared=False
+        )
+    clock.advance(seconds=10 * SWEEP_AFTER)
+
+    await payments.sweep_payouts(db, bank, custody, charging)
+
+    assert await submissions_asked_for(db) == 1
+
+
+async def test_a_held_withdrawal_whose_review_was_cleared_and_never_sent_is_asked_for_again(
+    db: Database,
+    charging: Settings,
+    bank: SimBank,
+    custody: SimCustody,
+    clock: ManualClock,
+    maria: User,
+) -> None:
+    withdrawal = await under_review(db, charging, bank, maria)
+    # Cleared, and the event that clearing writes was lost with whatever wrote it.
+    async with db.transaction() as session:
+        await risk.resolve_review(
+            session, subject_type="withdrawal", subject_id=withdrawal.id, cleared=True
+        )
+    clock.advance(seconds=SWEEP_AFTER)
+
+    await payments.sweep_payouts(db, bank, custody, charging)
+
+    assert await submissions_asked_for(db) == 2
+
+
+@pytest.mark.parametrize("standing", ["restricted", "closed"])
+async def test_a_held_withdrawal_of_an_account_that_is_not_active_is_not_asked_for_again(
+    db: Database,
+    charging: Settings,
+    bank: SimBank,
+    custody: SimCustody,
+    clock: ManualClock,
+    maria: User,
+    standing: str,
+) -> None:
+    await held_bank_withdrawal(db, charging, bank, maria)
+    await end_events(db, "dead")
+    async with db.transaction() as session:
+        if standing == "restricted":
+            await identity.restrict_user(session, maria.id, "under review")
+        else:
+            await close_account(session, maria.id)
+    clock.advance(seconds=10 * SWEEP_AFTER)
+
+    await payments.sweep_payouts(db, bank, custody, charging)
+
+    assert await submissions_asked_for(db) == 1
+
+
+async def test_a_withdrawal_canceled_while_the_sweeper_looked_is_not_asked_for_again(
+    db: Database,
+    charging: Settings,
+    bank: SimBank,
+    custody: SimCustody,
+    clock: ManualClock,
+    maria: User,
+) -> None:
+    withdrawal = await held_bank_withdrawal(db, charging, bank, maria)
+    await end_events(db, "dead")
+    async with db.transaction() as session:
+        await payments.cancel_withdrawal(session, acting_as(maria), withdrawal.id)
+    # Long enough ago that only its state says it is no longer waiting to be sent.
+    clock.advance(seconds=SWEEP_AFTER)
+
+    # As the sweeper does for a withdrawal it read as held a moment ago.
+    assert await handlers.resend_held(db, withdrawal.id, clock.now()) is False
+
+    assert await submissions_asked_for(db) == 1
+
+
+async def test_a_held_withdrawal_touched_since_the_sweeper_read_it_is_not_asked_for_again(
+    db: Database,
+    charging: Settings,
+    bank: SimBank,
+    clock: ManualClock,
+    maria: User,
+) -> None:
+    withdrawal = await held_bank_withdrawal(db, charging, bank, maria)
+    await end_events(db, "dead")
+    read_as_of = clock.now() - timedelta(seconds=1)
+
+    # Another worker's sweep asked for it a moment ago, say: the row is newer than the read.
+    assert await handlers.resend_held(db, withdrawal.id, read_as_of) is False
+    assert await submissions_asked_for(db) == 1
+    assert await handlers.resend_held(db, withdrawal.id, clock.now()) is True
+    assert await submissions_asked_for(db) == 2
+
+
+async def test_only_held_withdrawals_untouched_for_the_sweep_period_are_read_as_waiting(
+    db: Database,
+    charging: Settings,
+    bank: SimBank,
+    custody: SimCustody,
+    clock: ManualClock,
+    maria: User,
+) -> None:
+    old = await held_bank_withdrawal(db, charging, bank, maria, 10_00)
+    beneficiary = await add_beneficiary(db, bank, maria)
+    sent = await withdraw(db, charging, maria, 10_00, beneficiary=beneficiary)
+    await payments.submit_withdrawal(db, bank, custody, sent.id)
+    clock.advance(seconds=SWEEP_AFTER)
+    read_as_of = clock.now() - timedelta(seconds=SWEEP_AFTER)
+    new = await withdraw(db, charging, maria, 10_00, beneficiary=beneficiary)
+
+    async with db.transaction() as session:
+        waiting = await withdrawals.waiting_unsent(session, read_as_of, limit=10)
+        after_it = await withdrawals.waiting_unsent(session, read_as_of, after=old.id, limit=10)
+
+    assert [withdrawal.id for withdrawal in waiting] == [old.id]
+    assert after_it == []
+    assert new.status == "held"

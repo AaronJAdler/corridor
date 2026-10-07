@@ -36,7 +36,9 @@ def serve(
     from corridor.platform.config import load_settings
     from corridor.platform.logging import configure_logging
 
-    settings = load_settings()
+    # Read here too, although the app reads them again when uvicorn builds it: a
+    # configuration that is refused stops the command before a port is bound.
+    settings = load_settings("api")
     configure_logging(settings.log_level, settings.log_format)
     uvicorn.run(
         "corridor.api.app:create_app",
@@ -191,26 +193,28 @@ async def make_admin(owner_url: str, email: str) -> tuple[identity.User, bool] |
 
 
 def _report_ledger() -> None:
-    """Recompute the ledger's invariants and say what was found. Exits 1 if any is violated."""
+    """Recompute the ledger's invariants, and what ties withdrawals and deposits to it,
+    and say what was found. Exits 1 if any is violated."""
     import asyncio
 
     from sqlalchemy import text
 
-    from corridor import ledger
+    from corridor import ledger, payments
     from corridor.platform.config import load_settings
     from corridor.platform.db import Database, create_engine
 
     async def run() -> list[ledger.Finding]:
-        db = Database(create_engine(load_settings(), application_name="corridor-verify"))
+        db = Database(create_engine(load_settings("tool"), application_name="corridor-verify"))
         try:
             async with db.transaction() as session:
                 # One snapshot for the whole report, and no time limit: this reads every
-                # posting.
+                # posting. The checks of payments compare the ledger with its own tables
+                # in separate statements, and are only right in one snapshot.
                 await session.execute(
                     text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
                 )
                 await session.execute(text("SET LOCAL statement_timeout = 0"))
-                return await ledger.verify(session)
+                return [*await ledger.verify(session), *await payments.verify(session)]
         finally:
             await db.dispose()
 
@@ -225,7 +229,8 @@ def _report_ledger() -> None:
 
 @app.command("verify-ledger")
 def verify_ledger() -> None:
-    """Recompute the ledger's invariants. Exits 1 if any is violated."""
+    """Recompute the ledger's invariants, and that every held and suspense balance is
+    accounted for by a withdrawal or a deposit. Exits 1 if any is violated."""
     _report_ledger()
 
 
@@ -274,4 +279,4 @@ def worker() -> None:
     from corridor.platform.config import load_settings
     from corridor.worker.main import run
 
-    run(load_settings())
+    run(load_settings("worker"))

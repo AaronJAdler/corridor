@@ -153,7 +153,7 @@ src/corridor/
   wallets/      a user's accounts per asset, balances, statements
   risk/         limits and usage, reference rates, deny list, screening, reviews
   payments/     transfers, deposits, deposit instructions, beneficiaries, withdrawals,
-                returns, payout sweeper
+                returns, payout sweeper, the verifier of held and suspense balances
   fx/           rate cache, quotes, conversions
   webhooks/     inbound provider webhooks: verify, store once, process later, redact
   recon/        reconciliation runs, breaks and repair
@@ -265,7 +265,14 @@ distinction drives the locking design in section 4.6.
 is not meant to go below zero: every debit of it is tied to a deposit that is checked to
 be in suspense under a row lock (section 8.2), an adjustment written by hand may not debit
 it, and the ledger verifier reports a suspense balance below zero as the finding
-`negative_suspense`.
+`negative_suspense`. The payments verifier goes further and compares what suspense holds
+in each asset with the deposits that are in suspense (section 4.5).
+
+An account is written once. Its kind, category, normal side and owner are what give every
+posting on it its meaning, so `ledger_accounts` has the guard the journal has: a
+statement-level trigger refuses `UPDATE`, `DELETE` and `TRUNCATE` (`CR001`), for the owner
+role as well as the application, and a `CHECK` holds each account's category and normal
+side to the ones this table gives its kind.
 
 A user's `user_available` and `user_held` accounts are opened when the user registers. The
 `user_receivable` account and the system accounts are opened the first time they are needed.
@@ -369,11 +376,35 @@ database refuses to store one, and a verifier detects one after the fact.
 | A constrained account never goes below zero | Balance check under lock | `CHECK (balance >= 0)` on the balance row and on `balance_after` | `negative_balance` |
 | A cached balance equals the sum of its postings | One code path updates both | n/a | `balance_mismatch`, `broken_balance_chain`, `stale_balance_pointer` |
 | A constrained account has a balance row and no other account does | `open_account` | `CHECK` on account kind, owner, provider and `is_constrained` | `missing_balance_row`, `unexpected_balance_row`, `stray_balance_after` |
+| An account has the category, normal side, owner and constraint the chart gives its kind, and never changes | `open_account` writes them from the chart; no update or delete code exists | `CHECK` on kind, category and normal side (`ck_ledger_accounts_chart`); the `forbid_mutation` trigger on `ledger_accounts` (`CR001`); no `UPDATE` or `DELETE` grant | `account_off_chart` |
 | One business event posts at most once | `post_entry` returns the existing entry | `UNIQUE (source_type, source_id, kind)` | n/a |
 | An entry is reversed at most once | `reverse_entry` | `UNIQUE (reverses_entry_id)` | n/a |
+| A reversal is its original with every posting turned over | `reverse_entry` builds it from the original | n/a | `reversal_mismatch` |
 | Suspense never goes below zero | Deposit status check under a row lock; no hand-written debit | n/a | `negative_suspense` |
+| What suspense holds in an asset is the deposits in suspense in that asset | Money enters and leaves suspense only as a deposit, whose status changes in the same transaction | n/a | `suspense_mismatch` (payments verifier) |
+| A user's held balance in an asset is the amount and fee of that user's withdrawals that are `held`, `submitting` or `submitted` | Every hold, settlement and release posts with the withdrawal's change of state; no hand-written debit of `user_held` | n/a | `held_mismatch` (payments verifier) |
 
 Corrections are new entries. Nothing in the ledger is ever changed.
+
+**Two verifiers.** The ledger's verifier (`ledger.verify`) recomputes what the ledger alone
+can know: the first rows of the table. The last two rows tie the ledger to the withdrawals
+and deposits above it, which the ledger knows nothing of, so they are checked by a second
+verifier in `payments` (`payments.verify`). `corridor verify-ledger` and the hourly
+`ledger.verify` job run both, in one `REPEATABLE READ` snapshot: the payments checks read
+the ledger and their own tables in separate statements, and a movement that committed
+between two of them would otherwise be reported as a difference.
+
+**What neither verifier can see.** Every check compares rows that exist with each other.
+A whole balanced entry that was deleted, together with its postings and with the cached
+balances and `balance_after` values rewritten to match, leaves nothing behind to compare:
+the books still add up, to a different history. Detecting that needs each entry to carry a
+hash of the one before it (a hash chain), with the latest hash kept somewhere the database
+owner cannot write. That is not built. What stands in its way today is privilege, not
+detection: the application role cannot update or delete these tables, the triggers stop
+the owner role, and only a superuser who switches the triggers off can do it. The payments
+verifier narrows the gap for the entries that belong to a withdrawal or to a deposit in
+suspense, and reconciliation for the ones that moved money at a provider. It is listed
+among the known limits in section 22.
 
 The same `forbid_mutation` trigger makes `audit_events` append-only and makes `transfers`,
 `fx_conversions`, `beneficiaries` and `deposit_instructions` write-once. Every trigger
@@ -455,13 +486,26 @@ check race-free without serialising anyone else. It is taken by:
 
 | Path | Whose lock |
 |---|---|
-| Transfer, withdrawal request, conversion | The user whose money moves out |
-| Approving an agent's request | The owner, before the request's row |
+| Withdrawal request, conversion | The user whose money moves out |
+| Transfer | The sender, and the recipient too (see below), in one call and so in ascending order of the two keys |
+| Approving an agent's request | The owner, and for a transfer the recipient, before the request's row |
 | Approving an adjustment | Every user whose available balance the adjustment debits |
 | A returned deposit | The user the deposit was credited to |
+| Crediting a deposit | The user the deposit is attributed to, before the deposit's row |
 | Restricting a user | That user, so the restriction waits for a movement in flight and every later movement sees it |
+| Closing a user | That user, while the balances are read and the account is closed |
 
-A recipient is not locked: only the sender moves money out.
+**The same lock keeps money out of an account that is being closed.** An account is closed
+only when nothing is in it, and closing reads the balances under the user's money-out
+lock. A credit that took no lock could land between that read and the closing, in an
+account nothing can move money out of again. So the two paths that credit a user take the
+recipient's lock as well: a transfer, which then looks at the recipient again under it and
+answers `recipient_not_found` if the account was closed while it waited, and a deposit,
+which is booked to suspense with a review if its owner is closed (section 8.2). Either the
+credit commits first and the closing is refused (`account_holds_funds`), or the closing
+commits first and the credit sees it. The cost is that transfers to one recipient, and
+that recipient's own outgoing movements, queue behind each other for the length of one
+short transaction.
 
 **Other advisory locks.** A login takes a lock on the digest of the email address in its own
 short transaction, so failure counts are not lost. Asking for an approval takes a lock per
@@ -622,9 +666,9 @@ not due. A job that fails records its error on the row and is due again after it
 
 | Job | Every | What it does |
 |---|---|---|
-| `payments.sweep_payouts` | 30 seconds | Asks the provider about withdrawals that have been in flight too long (section 7.5) |
+| `payments.sweep_payouts` | 30 seconds | Asks the provider about withdrawals that have been in flight too long, and asks again for a held withdrawal that nothing is going to send (section 7.5) |
 | `recon.run` | `reconciliation_interval_seconds` (5 minutes) | Reconciles each provider against the books (section 10) |
-| `ledger.verify` | 1 hour | Runs the ledger verifier and sets its gauges |
+| `ledger.verify` | 1 hour | Runs the ledger verifier and the payments verifier in one snapshot and sets their gauges (section 4.5) |
 | `outbox.purge_finished` | 1 hour | Deletes outbox events that finished more than 7 days ago |
 | `idempotency.purge_expired` | 1 hour | Deletes idempotency keys older than 24 hours |
 | `fx.purge_unused_quotes` | 1 hour | Deletes quotes that expired more than 24 hours ago and were never converted |
@@ -681,7 +725,13 @@ Webhooks get lost. Two mechanisms make that survivable:
   `submitting`, for longer than `payout_sweep_after_seconds` (2 minutes) are checked against
   the provider's API and advanced through the same functions the webhooks use. A withdrawal
   left `submitting` that the provider knows nothing of is asked to be sent again, under the
-  same idempotency key, because its own outbox event may be dead.
+  same idempotency key, because its own outbox event may be dead. The same job looks at
+  the withdrawals that are still only `held` after that long. One is asked to be sent
+  again if it is free to go (its user is active and no review stands in the way) and has
+  no `withdrawal.submit` event that is pending or being processed: its event went dead,
+  or was lost. One that is waiting for an operator, or for its user's standing, is left
+  alone. Asking again writes an outbox event and touches the row, so it happens at most
+  once per withdrawal in each `payout_sweep_after_seconds`.
 - **Reconciliation.** Section 10. It finds what both the webhook and the sweeper missed,
   including deposits whose webhook never arrived.
 
@@ -710,7 +760,9 @@ Webhooks get lost. Two mechanisms make that survivable:
 ### 8.1 Transfer between users
 
 Synchronous, one transaction: idempotency key, agent policy check (for an agent), recipient
-lookup, the sender's money-out lock, risk authorisation, fee calculation, ledger entry,
+lookup, the money-out locks of the sender and the recipient, a second look at the
+recipient under them (an account closed in the meantime is answered as
+`recipient_not_found`), risk authorisation, fee calculation, ledger entry,
 `transfers` row, outbox event, audit event, stored response. Recipients are addressed by
 handle (`@maria`), email address or user id. A transfer row is written once and never
 changes; its only status is `completed`.
@@ -732,9 +784,16 @@ Deposits are initiated at the provider, so Corridor learns about them by webhook
   confirmation count, credits it; it also records the deposit if the detection never
   arrived. A deposit that is dropped before finality is marked `failed` and never touched
   the ledger.
-- **Suspense.** A deposit that belongs to nobody, and a deposit whose sender is on the deny
-  list (with either outcome), is credited to `suspense` instead of to a user. A screened
-  deposit also gets a review, which remembers the user it would have gone to.
+- **Suspense.** A deposit that belongs to nobody, a deposit whose sender is on the deny
+  list (with either outcome), and a deposit for a user whose account is `closed`, is
+  credited to `suspense` instead of to a user. A screened deposit, and one for a closed
+  account, also gets a review, which remembers the user it would have gone to; the audit
+  event of the second says `reason: owner_closed`. A closed account moves no money, so
+  what was credited to it would be out of everybody's reach: an operator returns the
+  deposit instead (clearing its review is refused with `deposit_owner_closed`). The
+  deposit takes its owner's money-out lock before its row, which closing an account also
+  takes, so the account cannot be closed between the look at it and the credit
+  (section 5).
 - **Returns.** A bank can return a deposit after it was credited. The return first releases
   the user's unsent withdrawals of that asset, then debits what the user still has, books
   any shortfall to `user_receivable`, and restricts the user if there is a shortfall. A
@@ -745,11 +804,11 @@ Deposits are initiated at the provider, so Corridor learns about them by webhook
 stateDiagram-v2
     [*] --> pending: on-chain deposit detected
     [*] --> completed: bank deposit credited to its user
-    [*] --> suspense: bank deposit nobody can be credited with, or screened
+    [*] --> suspense: bank deposit nobody can be credited with, screened, or for a closed account
     [*] --> returned: return seen before the deposit
     [*] --> failed: failure seen before the detection
     pending --> completed: confirmed, credited
-    pending --> suspense: confirmed, unattributed or screened
+    pending --> suspense: confirmed, unattributed, screened, or for a closed account
     pending --> failed: dropped before finality
     suspense --> completed: released to a user
     suspense --> returned: taken back by the bank, or returned by an adjustment
@@ -773,7 +832,9 @@ release) and carries no amount of its own: its legs are worked out from the depo
 it is asked for, and the approval hands the deposit to payments, which applies the rule
 above. An adjustment written by hand is refused if any leg debits a suspense account, when
 it is asked for and again when it is approved, so there is no way to take money out of
-suspense and leave its deposit there. `GET /v1/admin/deposits/suspense` lists what is in
+suspense and leave its deposit there. A leg that debits a `user_held` account is refused
+in the same way and for the same reason: what is on hold belongs to a withdrawal, and
+leaves as that withdrawal is settled, canceled or released. `GET /v1/admin/deposits/suspense` lists what is in
 suspense.
 
 ### 8.3 Withdrawal
@@ -887,8 +948,13 @@ generated amounts and rates. A quote that expired unused is deleted a day later.
 
 A transfer fee and a withdrawal fee are each basis points of the amount, rounded down, and
 never less than a per-asset minimum. The defaults are no transfer fee, and a withdrawal fee
-of `0.25` USD, `5.00` MXN or `0.15` USDC. The provider's own fee for a payout is booked to
-`provider_fee_expense` when the payout settles.
+of `0.25` USD, `5.00` MXN, `0.50` BRL or `0.15` USDC. The provider's own fee for a payout
+is booked to `provider_fee_expense` when the payout settles.
+
+Every asset can be paid out (a fiat asset through the bank rail, a stablecoin through the
+custodian), and every payout costs its provider's fee. So the settings refuse to load, in
+every environment, when `withdrawal_fee_bps` is 0 and any asset has no minimum, or a
+minimum of nothing, in `withdrawal_min_fee`: that asset would be withdrawn for free.
 
 ---
 
@@ -958,13 +1024,14 @@ before the window for the same reason.
 |---|---|---|
 | `missing_deposit` | The provider's statement has a deposit that Corridor has not credited | **Repaired**: the statement line is handed to payments as a deposit read from a statement, which credits it once |
 | `missing_payout_result` | A withdrawal is still in flight here and the provider says it completed or failed | **Repaired**: the provider's answer is handed to the function its webhook would have reached |
+| `missing_return` | The bank's statement shows a deposit as recalled, and it is still on the books as received: `completed`, or in `suspense` | **Repaired**: the recall is handed to the function the bank's `deposit.returned` would have reached, which takes the deposit back from its user as any return does (section 8.2). `provider_ref` is the bank's id for the deposit, `expected` what is credited here and `actual` is 0 |
 | `unknown_deposit` | Corridor credited a deposit in the window that the statement does not list | Open break for an operator |
 | `unknown_payout` | The provider paid out something Corridor has no matching withdrawal for, or Corridor shows a settled or sent payout the provider does not have | Open break |
 | `amount_mismatch` | Both sides have the deposit or payout, with different amounts | Open break |
 | `settlement_balance` | The settlement account's balance at `window_end`, after in-transit items, differs from the provider's closing balance | Open break. `provider_ref` is the asset code |
 
-- **Repair is idempotent.** Both repairs go through payment functions that lock the row and
-  look at its state, so a repair that races the late webhook, the sweeper or another run
+- **Repair is idempotent.** Every repair goes through payment functions that lock the row
+  and look at its state, so a repair that races the late webhook, the sweeper or another run
   changes nothing twice. A break is closed by looking at Corridor's own records afterwards
   (`resolved_by = system`), not on the word of the repair.
 - **A deposit repaired from a statement may be unscreened.** Neither provider's statement
@@ -973,7 +1040,12 @@ before the window for the same reason.
 - **Returned before it was seen.** A `missing_deposit` whose return is on the same statement
   is not credited. It is recorded as returned (the same tombstone a return webhook that
   overtakes its deposit leaves) and the break is closed.
-- **Grace period.** A deposit the provider received less than
+- **A return that was never heard of.** A recall made in the window whose deposit is still
+  on the books is a `missing_return`, and is allowed for in the balance as on its way, so
+  the same money is not reported twice. The repaired return is recorded as the bank's,
+  with the reason `statement`: a statement gives none. A recall from before the window is
+  not repaired and shows in `settlement_balance`, as an old missing deposit does.
+- **Grace period.** A deposit the provider received, or a return it made, less than
   `reconciliation_grace_seconds` ago (2 minutes by default) is left for its webhook and not
   repaired yet.
 - **One open break per disagreement.** A unique index on `(kind, provider, provider_ref)`
@@ -1167,10 +1239,28 @@ use `https`.
 
 - No secret is committed. Configuration comes from environment variables, and from AWS
   Secrets Manager in deployment. Secret settings have no default; the process refuses to
-  start without them. A production configuration is checked at start: provider URLs must be
-  `https`, rate limiting must be on, the webhook tolerance must be at most 10 minutes, each
-  configured provider needs webhook secrets, the log level must not be `DEBUG`, and
-  `api_key_hash_key` must be set.
+  start without them.
+- **A production configuration is checked at start, for the process that is starting.**
+  The settings know which process they are for, from the command that loads them
+  (`corridor serve` the API, `corridor worker` the worker, anything else a tool). It is not
+  a setting: nothing in the environment can choose it. Each problem is named, all at once,
+  and no value is repeated.
+
+  | Asked of | What production refuses |
+  |---|---|
+  | Every process | A provider URL that is not `https`; rate limiting off; a webhook tolerance over 10 minutes; the log level `DEBUG` |
+  | The API and the worker | Argon2 parameters below both of the library's RFC 9106 profiles (unset, they are the low-memory one); `metrics_public`; a `worker_metrics_host` that is not a loopback address, unless `worker_metrics_public` is set; `forwarded_allow_ips` that names every address (`*` is refused everywhere, `0.0.0.0/0` and `::/0` here); `database_owner_url` set at all; a statement, lock or idle-in-transaction timeout of 0; an access-token lifetime over 1 hour; a `redis_url` that is not `rediss://`; a `database_url` without `ssl=require`, `ssl=verify-ca` or `ssl=verify-full` |
+  | The API alone | A configured bank or custodian with no webhook secrets; no `api_key_hash_key` |
+
+  The worker verifies no webhook and accepts no agent key, and is deployed without those
+  secrets, so the last row is not asked of it. A test reads the environment and the
+  secrets the Terraform gives each kind of task and loads the settings as that task does.
+- **The environment is named, never assumed.** `corridor serve` and `corridor worker`
+  refuse to start when `CORRIDOR_ENVIRONMENT` is not set: the default is `development`,
+  and a production task that lost the variable would otherwise start with a developer's
+  rules and say nothing. A tool may run without it.
+- **In every environment** the settings refuse an asset that would be withdrawn for free
+  (section 8.5).
 - Development keys are generated locally into `.local/`, which is ignored by git and by the
   image build.
 - Logs pass through a redaction step that removes passwords, tokens, keys and account
@@ -1358,6 +1448,7 @@ Every setting is an environment variable prefixed `CORRIDOR_`, read by
 | `CORRIDOR_OUTBOX_RETENTION_DAYS` | `int` | `7` |
 | `CORRIDOR_WORKER_METRICS_PORT` | `int` | `0` |
 | `CORRIDOR_WORKER_METRICS_HOST` | `str` | `127.0.0.1` |
+| `CORRIDOR_WORKER_METRICS_PUBLIC` | `bool` | `False` |
 | `CORRIDOR_BANK_RAIL_URL` | `str | None` | not set |
 | `CORRIDOR_CUSTODY_URL` | `str | None` | not set |
 | `CORRIDOR_FX_RATES_URL` | `str | None` | not set |
@@ -1378,7 +1469,7 @@ Every setting is an environment variable prefixed `CORRIDOR_`, read by
 | `CORRIDOR_FX_RATE_CACHE_SECONDS` | `int` | `5` |
 | `CORRIDOR_FX_CACHE_MAC_KEY` | `SecretStr (32+ characters) | None` | not set |
 | `CORRIDOR_WITHDRAWAL_FEE_BPS` | `int` | `0` |
-| `CORRIDOR_WITHDRAWAL_MIN_FEE` | `dict[str, str]` | `{"USD": "0.25", "MXN": "5.00", "USDC": "0.15"}` |
+| `CORRIDOR_WITHDRAWAL_MIN_FEE` | `dict[str, str]` | `{"USD": "0.25", "MXN": "5.00", "BRL": "0.50", "USDC": "0.15"}` |
 | `CORRIDOR_PAYOUT_SWEEP_AFTER_SECONDS` | `int` | `120` |
 | `CORRIDOR_RECONCILIATION_INTERVAL_SECONDS` | `float` | `300.0` |
 | `CORRIDOR_RECONCILIATION_WINDOW_SECONDS` | `int` | `3600` |
@@ -1387,7 +1478,12 @@ Every setting is an environment variable prefixed `CORRIDOR_`, read by
 Notes:
 
 - `CORRIDOR_DATABASE_OWNER_URL` is read only by `corridor db migrate` and
-  `corridor users make-admin`. It is not set on the API or the worker.
+  `corridor users make-admin`. It is not set on the API or the worker, and in production
+  either refuses to start if it is.
+- `CORRIDOR_ENVIRONMENT` has a default, and `corridor serve` and `corridor worker` do not
+  use it: they refuse to start unless the variable is set.
+- `CORRIDOR_WITHDRAWAL_MIN_FEE` replaces the defaults whole. While
+  `CORRIDOR_WITHDRAWAL_FEE_BPS` is 0 it must give every asset a minimum above zero.
 - Reconciliation has three: `CORRIDOR_RECONCILIATION_INTERVAL_SECONDS` (how often a run is
   made), `CORRIDOR_RECONCILIATION_WINDOW_SECONDS` (how far back each run looks) and
   `CORRIDOR_RECONCILIATION_GRACE_SECONDS` (how old a deposit on a statement must be before
@@ -1440,7 +1536,9 @@ Notes:
   metrics at `/metrics` only when `metrics_public` is set, because that port is the public
   one and the endpoint has no authentication. The worker serves its metrics on
   `worker_metrics_port` (off by default), bound to the loopback address unless
-  `worker_metrics_host` says otherwise. The outbox, verifier and reconciliation gauges
+  `worker_metrics_host` says otherwise. In production the API refuses to start with
+  `metrics_public`, and either process refuses a `worker_metrics_host` that is not
+  loopback unless `worker_metrics_public` says it is meant. The outbox, verifier and reconciliation gauges
   exist only on the worker. With several workers, each reports its own view.
 - **Tracing.** There is no distributed tracing. The request id is the correlation key: it is
   in every log line of the request and it travels with outbox events.
@@ -1483,7 +1581,10 @@ sleeps to let time pass.
 
 - **The verifier runs after every test.** The `db` fixture runs the ledger verifier when the
   test ends and fails the test on any finding. A test that damages the ledger on purpose is
-  marked `corrupts_ledger`.
+  marked `corrupts_ledger`. The tests of `payments` run the payments verifier as well; a
+  test there that writes withdrawals or deposits with plain SQL asks for the fixture
+  `written_by_hand` instead. The other directories do not run it: several of them move
+  held or suspense balances with ledger entries of their own making.
 - **Guards are proved by mutation.** For each check that refuses something on a money path,
   the check was removed and a test was required to fail. One guard is accepted as untested
   and recorded: the `ORDER BY` on the balance lock, which no test can distinguish from
@@ -1498,8 +1599,9 @@ sleeps to let time pass.
 ## 17. Local development
 
 - **One command.** `docker compose up --build --wait` starts PostgreSQL 16, Redis 7, a
-  one-shot migration, the API, the worker and the simulators. Only the API is published,
-  on `127.0.0.1:8000`. `docker compose --profile demo run --rm demo` runs the demo against
+  one-shot migration, the API, the worker and the simulators. The simulators run from an
+  image of their own (the Dockerfile's `sim` target); the image the API and the worker
+  run does not contain them. Only the API is published, on `127.0.0.1:8000`. `docker compose --profile demo run --rm demo` runs the demo against
   it. The [README](../README.md) has the steps.
 - **Without Docker.** `uv run poe e2e` and `uv run poe demo` start the simulator, the API
   and the worker as local processes against a scratch database on a PostgreSQL and a Redis
@@ -1554,8 +1656,16 @@ flowchart TB
 - **Compute.** ECS on Fargate, one image, three task definitions: `api`, `worker` and
   `migrate`. Each service runs a fixed number of tasks (`api_desired_count`,
   `worker_desired_count`). **There is no autoscaling.** The provider simulators are **not
-  deployed**; deposits, withdrawals and conversions work only if `provider_urls` names
-  providers of your own.
+  deployed**, and the image that is deployed does not contain them: the Dockerfile's
+  `runtime` target has the simulator package removed, and a separate `sim` target, built
+  only for the local stack, has it. Deposits, withdrawals and conversions work only if
+  `provider_urls` names providers of your own.
+- **Each task is given what its process needs, and the application checks exactly that.**
+  The API and the worker share the plain environment, set explicitly so that a changed
+  default cannot change a deployment; the worker is given no webhook secret and none of
+  the API's keys; the migration is given the owner connection and nothing else. The
+  database and Redis connection strings are stored with TLS asked for
+  (`?ssl=require`, `rediss://`), which the application's production check insists on.
 - **Network.** Only the load balancer is public. It forwards `/v1/*` and `/healthz` and
   answers 404 itself for everything else, so `/readyz`, `/metrics` and the documentation
   pages are not reachable from outside. Security groups allow the load balancer to reach
@@ -1570,9 +1680,11 @@ flowchart TB
   role, scoped to the secrets and log group it needs. Only the migration task gets the
   owner connection.
 - **Delivery.** A GitHub Actions workflow, run by hand (`workflow_dispatch`), authenticates
-  to AWS with OIDC, so no long-lived keys exist. It builds the image, pushes it, runs the
-  migration task and waits for it, then updates both services. Nothing is deployed
-  automatically.
+  to AWS with OIDC, so no long-lived keys exist. It first refuses a commit the CI workflow
+  has not passed: every CI job, by name, must have a successful check run on the commit
+  being deployed, read with the workflow's own token (`checks: read`). Then it builds the
+  image, pushes it, runs the migration task and waits for it, then updates both services.
+  Nothing is deployed automatically.
 - **Client address.** The API believes `X-Forwarded-For` only from the public subnets, where
   the load balancer is. Rate limiting by address depends on it, and it is to be confirmed
   against a running stack.
@@ -1695,11 +1807,29 @@ Stated plainly, so nothing is mistaken for verified.
   rules or data behind them. The reference rates used to value limits are fixed numbers in
   a migration.
 - **The container image has not been built and the compose stack has not been started** by
-  the automation that produced this repository. The Dockerfile is linted and `compose.yaml`
-  is validated with `docker compose config`. The same processes are exercised by
+  the automation that produced this repository. That includes the step that removes the
+  simulator from the `runtime` image and the separate `sim` target. The Dockerfile is
+  linted and `compose.yaml` is validated with `docker compose config`. The same processes are exercised by
   `uv run poe e2e` outside containers.
 - **The AWS infrastructure has not been applied to an account.** It is checked statically
   only. The CI and deploy workflows have been linted and not run.
+- **The verifiers cannot see a whole entry that was deleted.** They compare rows that
+  exist. An entry removed together with its postings, with the cached balances rewritten
+  to match, leaves books that still add up. Seeing that needs a hash chain over the
+  journal, anchored outside the database, which is not built; privileges and triggers are
+  what prevent it today (section 4.5).
+- **An adjustment written by hand can still credit `suspense` or `user_held`.** Only a
+  debit of either is refused. Such a credit is money no deposit or withdrawal accounts
+  for, and the payments verifier reports it as `suspense_mismatch` or `held_mismatch`
+  until it is reversed.
+- **Two operator paths credit a user without the lock that closing takes.** Releasing a
+  deposit from suspense refuses a closed account, but looks at it without the user's
+  money-out lock, so a release and a closing at the same moment can both succeed. An
+  adjustment written by hand that credits a user's account does not look at the account's
+  standing at all. Transfers and deposits, the paths nobody has to approve, do take the
+  lock (section 5).
+- **The deploy workflow's CI check has never run against GitHub.** Its script was
+  exercised against made-up check-run listings only.
 - **There is no load test.** No throughput or latency figure exists for this build.
 - **No MFA, email verification or device binding.** A production wallet needs all three.
 - **Single region, single database.** No failover has been exercised.

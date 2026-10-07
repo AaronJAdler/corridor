@@ -19,7 +19,7 @@ from pydantic import Field
 from sqlalchemy import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from corridor import audit, identity, ledger, risk, wallets
+from corridor import audit, identity, ledger, outbox, risk, wallets
 from corridor.ledger import AccountKind, EntryDraft, PostingDraft, credit, debit
 from corridor.payments import beneficiaries, withdrawals
 from corridor.payments.errors import MalformedProviderEvent, ProviderEventMismatch
@@ -451,6 +451,43 @@ async def resubmit(db: Database, withdrawal_id: uuid.UUID, before: datetime) -> 
         row = await _lock(session, withdrawal_id)
         if row["status"] != "submitting" or row["updated_at"] > before:
             # Sent, settled or released since the sweeper read it, or already asked for.
+            return False
+        await withdrawals.ask_to_be_sent(session, withdrawal_id)
+        await withdrawals.advance(session, withdrawal_id)
+        return True
+
+    return await db.run(work)
+
+
+async def resend_held(db: Database, withdrawal_id: uuid.UUID, before: datetime) -> bool:
+    """Ask again for a held withdrawal to be sent that nothing is going to send: last
+    touched before ``before``, free to go, and with no event left to send it. For the
+    sweeper. Says whether it did.
+
+    A held withdrawal is sent by its ``withdrawal.submit`` event, and only by that. An
+    event that failed until it went dead, because a provider was not configured, say, or
+    one that was lost with a queue that was restored from a backup, leaves the funds
+    reserved with nothing on its way to move them. Free to go is what the handler itself
+    asks before it sends: the user is active and no review stands in the way. A
+    withdrawal that is waiting for an operator or for its user's standing is left alone,
+    and so is one whose event is pending or being handled.
+
+    The row is touched as the event is written, as for ``resubmit``, so one withdrawal is
+    asked for again at most once in each ``payout_sweep_after_seconds``.
+    """
+
+    async def work(session: AsyncSession) -> bool:
+        row = await _lock(session, withdrawal_id)
+        if row["status"] != "held" or row["updated_at"] > before:
+            # Sent, canceled or given back since the sweeper read it, or already asked for.
+            return False
+        if (await identity.get_user(session, row["user_id"])).status != "active":
+            return False
+        if not await risk.is_cleared(session, "withdrawal", withdrawal_id):
+            return False
+        if await outbox.is_queued(
+            session, withdrawals.WITHDRAWAL_SUBMIT, {"withdrawal_id": str(withdrawal_id)}
+        ):
             return False
         await withdrawals.ask_to_be_sent(session, withdrawal_id)
         await withdrawals.advance(session, withdrawal_id)

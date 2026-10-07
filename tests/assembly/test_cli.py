@@ -14,7 +14,7 @@ from typer.testing import CliRunner
 
 from corridor import cli, identity
 from corridor.platform.clock import ManualClock
-from corridor.platform.config import Settings
+from corridor.platform.config import EnvironmentNotSet, Settings
 from corridor.platform.db import Database
 from tests.identity.support import add_user, close_account
 from tests.payments.support import rows
@@ -228,3 +228,88 @@ def test_a_mode_that_would_let_others_change_the_key_or_is_not_one_is_refused(
 
     assert result.exit_code == 2
     assert not (tmp_path / "keys").exists()
+
+
+# --- which settings a server command loads ---------------------------------------------------
+
+
+@pytest.fixture
+def bare_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> pytest.MonkeyPatch:
+    """Only the two connection settings, and no .env file to read the rest from."""
+    for name in list(os.environ):
+        if name.startswith("CORRIDOR_") and not name.startswith("CORRIDOR_TEST_"):
+            monkeypatch.delenv(name)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CORRIDOR_DATABASE_URL", "postgresql+asyncpg://app@db.invalid/corridor")
+    monkeypatch.setenv("CORRIDOR_REDIS_URL", "redis://cache.invalid:6379/0")
+    return monkeypatch
+
+
+@pytest.fixture
+def started(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """What `corridor serve` and `corridor worker` would have run, instead of running it."""
+    import uvicorn
+
+    from corridor.worker import main as worker_main
+
+    calls: list[Any] = []
+    monkeypatch.setattr(uvicorn, "run", lambda *args, **kwargs: calls.append(("serve", kwargs)))
+    monkeypatch.setattr(worker_main, "run", lambda settings: calls.append(("worker", settings)))
+    return calls
+
+
+@pytest.mark.parametrize("command", ["serve", "worker"])
+def test_a_server_command_refuses_to_start_without_being_told_its_environment(
+    bare_environment: pytest.MonkeyPatch, started: list[Any], command: str
+) -> None:
+    result = CliRunner().invoke(cli.app, [command])
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, EnvironmentNotSet)
+    assert started == []
+
+
+def test_the_worker_command_loads_the_workers_settings(
+    bare_environment: pytest.MonkeyPatch, started: list[Any]
+) -> None:
+    bare_environment.setenv("CORRIDOR_ENVIRONMENT", "development")
+
+    result = CliRunner().invoke(cli.app, ["worker"])
+
+    assert result.exit_code == 0, result.output
+    ((name, settings),) = started
+    assert (name, settings.process_role, settings.environment) == (
+        "worker",
+        "worker",
+        "development",
+    )
+
+
+def test_the_serve_command_checks_the_apis_settings_before_it_binds_a_port(
+    bare_environment: pytest.MonkeyPatch, started: list[Any]
+) -> None:
+    # A production API without what a production API needs: refused before uvicorn runs.
+    bare_environment.setenv("CORRIDOR_ENVIRONMENT", "production")
+
+    refused = CliRunner().invoke(cli.app, ["serve"])
+
+    assert refused.exit_code != 0
+    assert "api_key_hash_key" in str(refused.exception)
+    assert started == []
+    bare_environment.setenv("CORRIDOR_ENVIRONMENT", "development")
+    accepted = CliRunner().invoke(cli.app, ["serve"])
+    assert accepted.exit_code == 0, accepted.output
+    assert [name for name, _ in started] == ["serve"]
+
+
+def test_the_app_built_without_settings_loads_the_apis_and_asks_for_the_environment(
+    bare_environment: pytest.MonkeyPatch,
+) -> None:
+    from corridor.api.app import create_app
+
+    # How uvicorn builds it for `corridor serve`: with nothing passed in.
+    with pytest.raises(EnvironmentNotSet):
+        create_app()
+    bare_environment.setenv("CORRIDOR_ENVIRONMENT", "production")
+    with pytest.raises(ValueError, match="api_key_hash_key"):
+        create_app()

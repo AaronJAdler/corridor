@@ -30,6 +30,7 @@ from tests.recon.support import (
     let_pass,
     submitted,
 )
+from tests.support.auth import RegisteredUser
 from tests.support.ledger import fund
 from tests.support.providers import CLOSED_ACCOUNT_NUMBER
 from tests.support.stack import PROVIDER_FEE, Stack
@@ -323,11 +324,12 @@ async def test_a_balance_that_differs_by_more_than_what_is_in_transit_is_a_break
     stack: Stack, reconcile: Reconcile
 ) -> None:
     _, deposit_id = await funded(stack)
-    # The bank takes a deposit back and Corridor never hears of it. Nothing that is on its
-    # way explains the difference.
+    # The bank takes a deposit back and Corridor never hears of it, and by the time a run
+    # looks the return is older than its window. Nothing that is on its way explains the
+    # difference, and nothing in the window is there to repair.
     await stack.webhooks_behave(drop_types=["deposit.returned"])
     await stack.sim.control("POST", f"/bank/deposits/{deposit_id}/return", {"reason": "recalled"})
-    await let_pass(stack)
+    await let_pass(stack, 2 * 3600)
 
     result = await reconcile()
 
@@ -339,6 +341,96 @@ async def test_a_balance_that_differs_by_more_than_what_is_in_transit_is_a_break
         "USD",
     )
     assert (found.expected, found.actual) == (500_00, 0)
+    assert result.repaired == 0
+
+
+async def recalled_unheard(stack: Stack, **hold: Any) -> tuple[RegisteredUser, str]:
+    """A credited bank deposit that the bank took back, whose return never arrived."""
+    user, deposit_id = await funded(stack)
+    await stack.webhooks_behave(**(hold or {"drop_types": ["deposit.returned"]}))
+    await stack.sim.control("POST", f"/bank/deposits/{deposit_id}/return", {"reason": "recalled"})
+    return user, deposit_id
+
+
+async def test_a_deposit_the_bank_recalled_that_is_still_credited_here_is_a_missing_return(
+    stack: Stack, reconcile: Reconcile
+) -> None:
+    _, deposit_id = await recalled_unheard(stack)
+    await let_pass(stack)
+
+    result = await reconcile()
+
+    # The one break. The balance is not a second one: the return is known to be on its way
+    # onto the books, exactly as a deposit that is missing is.
+    (found,) = result.breaks
+    assert (found.kind, found.provider, found.provider_ref, found.asset) == (
+        "missing_return",
+        BANK,
+        deposit_id,
+        "USD",
+    )
+    # What is credited here, and what the bank still holds of it.
+    assert (found.expected, found.actual) == (500_00, 0)
+
+
+async def test_a_recalled_deposit_whose_return_is_on_the_books_is_no_break(
+    stack: Stack, reconcile: Reconcile
+) -> None:
+    _, deposit_id = await funded(stack)
+    await stack.sim.control("POST", f"/bank/deposits/{deposit_id}/return", {"reason": "recalled"})
+    await stack.settle()
+    await let_pass(stack)
+
+    assert (await reconcile()).breaks == ()
+
+
+async def test_a_return_the_bank_made_a_moment_ago_is_given_time_to_arrive(
+    stack: Stack, bank: SimBank, custody: SimCustody
+) -> None:
+    await recalled_unheard(stack, hold=True)
+    await let_pass(stack, 30)
+
+    async def run(grace: int) -> recon.RunResult:
+        return await recon.run(
+            stack.db,
+            bank,
+            custody,
+            window_start=stack.clock.now() - WINDOW,
+            window_end=stack.clock.now(),
+            grace=timedelta(seconds=grace),
+        )
+
+    # Within the grace it is neither called missing nor counted against the balance.
+    assert (await run(grace=120)).breaks == ()
+    assert kinds((await run(grace=10)).breaks) == ["missing_return"]
+
+
+async def test_a_recalled_deposit_in_suspense_is_a_missing_return_too(
+    stack: Stack, reconcile: Reconcile
+) -> None:
+    arrived = await stack.sim.control(
+        "POST",
+        "/bank/deposits",
+        {
+            "virtual_account_id": "va_nobody",
+            "amount": "40.00",
+            "sender_name": "Somebody Else",
+            "reference": "INV-1",
+        },
+        expect=201,
+    )
+    deposit_id = str(arrived["id"])
+    await stack.settle()
+    assert [deposit["status"] for deposit in await stack.deposits()] == ["suspense"]
+    await stack.webhooks_behave(drop_types=["deposit.returned"])
+    await stack.sim.control("POST", f"/bank/deposits/{deposit_id}/return", {"reason": "recalled"})
+    await let_pass(stack)
+
+    result = await reconcile()
+
+    assert [(found.kind, found.provider_ref) for found in result.breaks] == [
+        ("missing_return", deposit_id)
+    ]
 
 
 async def test_the_balance_is_compared_as_it_was_at_the_end_of_the_window(

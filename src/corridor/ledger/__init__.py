@@ -12,6 +12,7 @@ from corridor.ledger.errors import (
     UnknownAccount,
 )
 from corridor.ledger.service import (
+    balances_by_kind,
     derive_balances,
     find_account,
     find_entry,
@@ -59,6 +60,7 @@ __all__ = [
     "PostingDraft",
     "StatementLine",
     "UnknownAccount",
+    "balances_by_kind",
     "credit",
     "debit",
     "derive_balances",

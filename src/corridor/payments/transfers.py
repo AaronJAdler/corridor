@@ -70,10 +70,10 @@ async def create_transfer(
     The sender pays the amount and the fee; the recipient receives the amount. The caller
     makes ``transfer_id``, a new one for each attempt.
 
-    The steps run in the order the locks have to be taken in: the sender's money-out lock
-    before anything is decided about their money, and the balance rows, inside
-    ``ledger.post_entry``, after it. Every refusal comes before the first write, so it
-    leaves the caller's transaction usable and nothing behind.
+    The steps run in the order the locks have to be taken in: the money-out locks of the
+    sender and the recipient before anything is decided about the money, and the balance
+    rows, inside ``ledger.post_entry``, after them. Every refusal comes before the first
+    write, so it leaves the caller's transaction usable and nothing behind.
     """
     identity.require_scope(principal, Scope.TRANSFERS_CREATE)
     if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
@@ -91,10 +91,20 @@ async def create_transfer(
     if payee.id == sender_id:
         raise CannotTransferToSelf
 
-    # Only the sender moves money out, so only the sender is locked. Balance rows are per
-    # asset and limits are not: this is what makes one user's outgoing movements queue,
-    # whatever assets they are in.
-    await advisory_xact_lock(session, [lock_key(MONEY_OUT_LOCK, sender_id)])
+    # The sender's lock, because the sender moves money out: balance rows are per asset
+    # and limits are not, and this is what makes one user's outgoing movements queue,
+    # whatever assets they are in. The recipient's too, because closing an account takes
+    # it while it reads that the account is empty: a transfer that is about to pay the
+    # account in either finishes before that read or waits until the account is closed.
+    # Both in one call, which takes them in ascending order of their keys, so two
+    # transfers in opposite directions queue instead of each holding what the other wants.
+    await advisory_xact_lock(
+        session, [lock_key(MONEY_OUT_LOCK, sender_id), lock_key(MONEY_OUT_LOCK, payee.id)]
+    )
+    # Looked at again under the lock: the recipient was found before it, and may have
+    # been closed while this transfer waited. Answered as a recipient that was never there.
+    if (await identity.get_user(session, payee.id)).status == "closed":
+        raise RecipientNotFound
 
     await risk.authorize(
         session,

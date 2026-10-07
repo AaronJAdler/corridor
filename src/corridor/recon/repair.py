@@ -1,10 +1,11 @@
-"""Repair: the two kinds of break a run can put right by itself.
+"""Repair: the three kinds of break a run can put right by itself.
 
-Both are an event that never arrived. The provider's own record of it is given to
-payments: a payout's result through the function its webhook would have reached, and a
+Each is an event that never arrived. The provider's own record of it is given to
+payments: a payout's result through the function its webhook would have reached, a
 deposit through the one for deposits read from a statement, or, when the statement shows
 the bank took it back again, through the one that records it as returned and credits
-nothing. Both are idempotent, so a
+nothing, and the recall of a deposit that is still credited through the function the
+bank's own ``deposit.returned`` would have reached. All of them are idempotent, so a
 repair that races the late webhook, the payout sweeper or another run changes nothing
 twice. Nothing else is repaired: every other break needs a person to decide what is true.
 
@@ -29,7 +30,14 @@ from corridor.recon.types import Break, BreakKind, Finding, Sent
 
 log = get_logger(__name__)
 
-REPAIRABLE: Final[tuple[BreakKind, ...]] = ("missing_deposit", "missing_payout_result")
+REPAIRABLE: Final[tuple[BreakKind, ...]] = (
+    "missing_deposit",
+    "missing_payout_result",
+    "missing_return",
+)
+
+# The reason recorded on a return that was read from a statement: the statement gives none.
+STATEMENT_REASON: Final = "statement"
 
 # How many withdrawals in flight one run looks at, oldest first. A run that meets more is
 # recorded as incomplete.
@@ -54,6 +62,8 @@ async def repair(db: Database, found: Sequence[tuple[Break, Finding]], *, comple
                     await _record_deposit(db, finding.provider, finding.transaction)
             elif finding.kind == "missing_payout_result" and finding.sent is not None:
                 await _apply_result(db, finding.provider, finding.sent)
+            elif finding.kind == "missing_return" and finding.recall is not None:
+                await _apply_recall(db, finding.provider, finding.provider_ref, finding.recall)
         except (payments.MalformedProviderEvent, payments.ProviderEventMismatch) as refusal:
             # Payments would not take the provider's record. The break stays open, for a
             # person, and the next one still gets its turn.
@@ -99,6 +109,29 @@ async def _record_returned(db: Database, provider: str, line: ProviderTransactio
     """
     await payments.apply_statement_return(
         db, provider=provider, provider_ref=line.id, asset=line.asset_code, amount=line.amount
+    )
+
+
+async def _apply_recall(
+    db: Database, provider: str, deposit_ref: str, line: ProviderTransaction
+) -> None:
+    """Hand payments the recall of a deposit as the bank's own event would have said it.
+
+    Through the same function, so everything a return does is done: what is left of the
+    deposit is taken out of its user's wallet, what is not is booked as owed and the user
+    restricted, and the deposit is recorded as returned. Only a bank takes a deposit
+    back; a recall read on any other statement is left for a person.
+    """
+    if provider != payments.BANK_PROVIDER:
+        return
+    await payments.apply_bank_deposit_returned(
+        db,
+        {
+            "deposit_id": deposit_ref,
+            "asset": line.asset_code,
+            "amount": format_amount(line.amount, line.asset_code),
+            "reason": STATEMENT_REASON,
+        },
     )
 
 
@@ -148,7 +181,7 @@ async def _close_settled(
 
     missing: dict[str, list[Break]] = defaultdict(list)
     for item in still_open:
-        if item.kind == "missing_deposit":
+        if item.kind in ("missing_deposit", "missing_return"):
             missing[item.provider].append(item)
     for provider, items in missing.items():
         recorded = await payments.find_deposits(
@@ -157,6 +190,12 @@ async def _close_settled(
         for item in items:
             deposit = recorded.get(item.provider_ref)
             if deposit is None:
+                continue
+            if item.kind == "missing_return":
+                # Returned by the repair, or by the bank's own event arriving late.
+                if deposit.status == "returned":
+                    await breaks.resolve_as_system(session, item.id, "The return is on the books.")
+                    closed += 1
                 continue
             # A journal entry is the proof: the row alone may be a deposit still pending.
             if deposit.entry_id is not None:

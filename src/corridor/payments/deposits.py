@@ -41,7 +41,7 @@ from corridor.payments.types import (
     SuspenseSettlement,
 )
 from corridor.platform.clock import utcnow
-from corridor.platform.db import Database
+from corridor.platform.db import Database, advisory_xact_lock, lock_key
 from corridor.platform.ids import new_id
 from corridor.platform.logging import get_logger
 from corridor.platform.money import get_asset
@@ -67,6 +67,8 @@ DEPOSIT_COMPLETED: Final = "deposit.completed"
 CURSOR_KIND: Final = "deposits"
 SUSPENSE_CURSOR_KIND: Final = "suspense_deposits"
 _ALL: Final = "all"
+# Why a deposit that was somebody's went to suspense: their account had been closed.
+OWNER_CLOSED: Final = "owner_closed"
 
 # Where the money of a deposit is, on Corridor's side of the provider.
 ASSET_ACCOUNT: Final[Mapping[str, AccountKind]] = {
@@ -129,6 +131,7 @@ async def apply_bank_deposit_received(db: Database, data: Mapping[str, Any]) -> 
 
     async def work(session: AsyncSession) -> None:
         user_id = await _attribute(session, BANK_PROVIDER, event.virtual_account_id, event.asset)
+        await _lock_owner(session, user_id)
         screened = await risk.screen_party(session, kind="name", value=event.sender_name)
         deposit = await _insert(
             session,
@@ -171,6 +174,10 @@ async def apply_chain_deposit_confirmed(db: Database, data: Mapping[str, Any]) -
     amount = _amount(event.amount, event.asset, "chain")
 
     async def work(session: AsyncSession) -> None:
+        # Decided now, from the address it arrived at, whatever the detection recorded.
+        # An instruction is written once, so this is still the answer when the row is held.
+        user_id = await _attribute(session, CUSTODY_PROVIDER, event.address_id, event.asset)
+        await _lock_owner(session, user_id)
         await _insert_chain(session, event, amount)
         deposit = await _lock(session, CUSTODY_PROVIDER, event.deposit_id)
         check_same(deposit, event.asset, amount)
@@ -178,8 +185,6 @@ async def apply_chain_deposit_confirmed(db: Database, data: Mapping[str, Any]) -
             if deposit["status"] == "failed":
                 log.error("deposit.confirmed_after_failure", deposit_id=str(deposit["id"]))
             return
-        # Decided now, from the address it arrived at, whatever the detection recorded.
-        user_id = await _attribute(session, CUSTODY_PROVIDER, event.address_id, event.asset)
         screened = await risk.screen_party(session, kind="address", value=event.from_address)
         await _credit_screened(session, deposit, user_id, screened)
 
@@ -276,9 +281,12 @@ async def apply_statement_deposit(
     can_screen = sender is not None and sender.strip() != ""
 
     async def work(session: AsyncSession) -> None:
+        # Decided from where it arrived, whatever an earlier detection recorded.
+        user_id = await _attribute(session, provider, account_ref, asset)
+        await _lock_owner(session, user_id)
         await _insert(
             session,
-            user_id=await _attribute(session, provider, account_ref, asset),
+            user_id=user_id,
             asset=asset,
             amount=amount,
             provider=provider,
@@ -292,8 +300,6 @@ async def apply_statement_deposit(
         if deposit["status"] != "pending":
             # Credited by its event after all, or failed, or returned before it was seen.
             return
-        # Decided now, from where it arrived, whatever an earlier detection recorded.
-        user_id = await _attribute(session, provider, account_ref, asset)
         screened: risk.ScreeningOutcome = "clear"
         if can_screen and sender is not None:
             screened = await risk.screen_party(session, kind=party, value=sender)
@@ -575,6 +581,19 @@ async def _attribute(
     return instruction.user_id
 
 
+async def _lock_owner(session: AsyncSession, user_id: uuid.UUID | None) -> None:
+    """Take the money-out lock of the user a deposit is about to be credited to, before
+    the deposit's row, which is where the lock order puts it.
+
+    Nothing leaves the wallet here. The lock is taken because closing an account takes it
+    while it reads that the account is empty: a credit either lands before that read, and
+    the closing is refused, or waits and finds the account closed. A deposit that is
+    nobody's has nobody to wait for.
+    """
+    if user_id is not None:
+        await advisory_xact_lock(session, [lock_key(risk.MONEY_OUT_LOCK, user_id)])
+
+
 async def _insert_chain(session: AsyncSession, event: _ChainDeposit, amount: int) -> None:
     await _insert(
         session,
@@ -656,21 +675,38 @@ async def _credit_screened(
     *,
     was_screened: bool | None = None,
 ) -> None:
-    """Credit a pending deposit to its user, unless screening stopped its sender.
+    """Credit a pending deposit to its user, unless screening stopped its sender or the
+    user's account is closed.
 
     Money from a sender on the deny list did arrive, so it is booked, but to suspense and
     to nobody, exactly as a deposit that could not be attributed. The review is what
     remembers whose it would have been, for the operator who releases or returns it.
+
+    So is money for an account that has been closed: a closed account moves nothing, and
+    what was credited to it would be out of everybody's reach. The caller holds the
+    user's money-out lock, which closing an account takes, so the account is not closed
+    between this look and the credit.
     """
-    if screened == "clear":
+    owner_closed = (
+        user_id is not None and (await identity.get_user(session, user_id)).status == "closed"
+    )
+    if screened == "clear" and not owner_closed:
         await _credit(session, deposit, user_id, was_screened=was_screened)
         return
-    await _credit(session, deposit, None, was_screened=was_screened)
+    await _credit(
+        session,
+        deposit,
+        None,
+        was_screened=was_screened,
+        reason=OWNER_CLOSED if owner_closed else None,
+    )
     await risk.open_review(
         session,
         subject_type="deposit",
         subject_id=deposit["id"],
-        outcome=screened,
+        # What screening said, if it said anything. A closed owner alone is for a person
+        # to look at: nothing says the sender is to be refused.
+        outcome="review" if screened == "clear" else screened,
         user_id=user_id,
     )
 
@@ -681,13 +717,15 @@ async def _credit(
     user_id: uuid.UUID | None,
     *,
     was_screened: bool | None = None,
+    reason: str | None = None,
 ) -> None:
     """Post the entry for a pending deposit whose row this transaction holds, and close it.
 
     To the available balance of ``user_id`` if the deposit is somebody's, and to suspense
     if it is nobody's. Either way the provider's side is debited: the money did arrive.
     ``was_screened`` is given for a deposit read from a statement, and is written to the
-    audit record: such a deposit may have had no sender to screen.
+    audit record: such a deposit may have had no sender to screen. ``reason`` is written
+    there too, when there is more to say than that the deposit could not be attributed.
     """
     asset, amount, provider = deposit["asset_code"], deposit["amount"], deposit["provider"]
     received = await ledger.open_account(
@@ -727,6 +765,7 @@ async def _credit(
             "amount": str(amount),
             "entry_id": str(entry.id),
             **({} if was_screened is None else {"screened": was_screened}),
+            **({} if reason is None else {"reason": reason}),
         },
     )
     if user_id is not None:

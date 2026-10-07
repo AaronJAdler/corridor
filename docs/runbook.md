@@ -83,7 +83,8 @@ docker compose exec postgres psql --username postgres --dbname corridor
 ```
 
 **The ledger verifier.** `corridor verify-ledger` recomputes every ledger invariant from
-the postings and prints each finding. It only reads. It needs the same database and Redis
+the postings, and that every held and suspense balance is accounted for by a withdrawal
+or a deposit, and prints each finding. It only reads. It needs the same database and Redis
 settings as the API (`CORRIDOR_DATABASE_URL`, `CORRIDOR_REDIS_URL`). It exits with code 1
 if it finds anything.
 
@@ -134,9 +135,20 @@ during the run. The job is due again one interval after `last_started_at`.
 
 ## Ledger verifier finding
 
-**What it means.** The ledger broke one of its own rules. The application refuses to write
+**What it means.** The ledger broke one of its own rules, or holds money for withdrawals or
+in suspense that no withdrawal or deposit accounts for. The application refuses to write
 a violation and the database refuses to store one, so a finding means both failed, or that
 someone changed data outside the application. Treat it as serious until explained.
+
+Two verifiers run together, in `corridor verify-ledger` and in the worker's hourly
+`ledger.verify` job, and report into the same gauge. The ledger's checks what the ledger
+alone can know. The one in payments (`held_mismatch`, `suspense_mismatch`) compares the
+ledger with the withdrawals and the deposits.
+
+Neither can see a whole balanced entry that was deleted together with its postings and
+with the balances rewritten to match: nothing is left to compare. Only a superuser with
+the triggers switched off can do that, and reconciliation against the providers is what
+would notice the money.
 
 **Diagnose.**
 
@@ -153,6 +165,10 @@ someone changed data outside the application. Treat it as serious until explaine
 | `stale_balance_pointer` | account id | A balance row that does not point at the account's latest posting |
 | `missing_balance_row`, `unexpected_balance_row`, `stray_balance_after` | account id | A cached balance where there should be none, or none where there should be one |
 | `negative_suspense` | account id | More was taken out of a suspense account than was put in |
+| `account_off_chart` | account id | An account whose category, normal side, owner, provider or constraint is not what the chart of accounts gives its kind. Every balance on it may be read with the wrong sign |
+| `reversal_mismatch` | entry id (the reversal) | A reversal whose postings are not the mirror image of the entry it says it reverses |
+| `held_mismatch` | `user id:asset` | A user's held balance is not the amount plus fee of their withdrawals that are `held`, `submitting` or `submitted` |
+| `suspense_mismatch` | asset | What suspense holds in an asset is not the sum of the deposits in `suspense` in that asset |
 
 2. Find what the subject is.
 
@@ -205,6 +221,38 @@ SELECT e.id, e.kind, e.source_type, e.source_id, e.posted_at, p.direction, p.amo
  ORDER BY p.seq DESC LIMIT 50;
 ```
 
+- `account_off_chart` cannot be produced through the application or by the owner role: a
+  trigger refuses any change to `ledger_accounts` and a constraint holds each account to
+  the chart. It means a superuser changed the table with both out of the way. Compare the
+  account with the chart in section 4.2 of the architecture; putting it right is a change
+  made by a superuser, with a second person watching, and a defect report.
+- `reversal_mismatch`: read both entries with the queries above. `reverses_entry_id` on
+  the reversal names the original. The one that was changed after it was posted is the
+  one whose postings no longer match its business object.
+- `held_mismatch`: list the user's withdrawals of that asset and the postings on their
+  held account, and find the one without the other.
+
+```sql
+SELECT id, status, amount, fee, hold_entry_id, final_entry_id, updated_at
+  FROM withdrawals WHERE user_id = '<user id>' AND asset_code = '<asset>' ORDER BY id DESC;
+SELECT p.seq, e.kind, e.source_type, e.source_id, p.direction, p.amount, p.balance_after
+  FROM postings p
+  JOIN journal_entries e ON e.id = p.entry_id
+  JOIN ledger_accounts a ON a.id = p.account_id
+ WHERE a.kind = 'user_held' AND a.owner_id = '<user id>' AND a.asset_code = '<asset>'
+ ORDER BY p.seq DESC LIMIT 50;
+```
+
+  The application moves a held balance only together with its withdrawal, and an
+  adjustment written by hand may not debit one, so there is no operator action that
+  corrects this. Restrict the user, so that nothing else moves while it is looked at, and
+  report it as a defect with both listings. If an adjustment credited the held account by
+  hand, that adjustment is the cause: its entry id is on the posting.
+- `suspense_mismatch`: compare the deposits in suspense
+  (`GET /v1/admin/deposits/suspense`) with the suspense postings from the query above. An
+  adjustment written by hand that credited suspense is the likely cause: it put money
+  there that no deposit names, and nothing can release or return money without a deposit.
+  It is a defect to report; do not try to debit suspense by hand, which is refused.
 - Run `corridor verify-ledger` again afterwards. The gauge returns to 0 at the next hourly
   run.
 
@@ -304,6 +352,7 @@ of an open break changed: a break that keeps moving is one whose cause is still 
 | Kind | What happened | What to check | What to do |
 |---|---|---|---|
 | `missing_deposit` | The provider's statement has a deposit Corridor has not credited. Normally the run repairs this itself and closes the break with `resolved_by: system` | An open one means the repair was refused: log line `recon.repair_refused`. Usually the statement line names an asset or amount that differs from a deposit Corridor already recorded | Compare `SELECT * FROM deposits WHERE provider = '<provider>' AND provider_ref = '<ref>'` with the provider's record. If the provider is right, credit the difference with an adjustment. Then resolve the break |
+| `missing_return` | The bank's statement shows a deposit as recalled, and it is still credited here (or still in suspense). Normally the run repairs this itself, exactly as the bank's own `deposit.returned` would have: the money is taken back from the user, a shortfall is booked as owed and the user restricted, and the break is closed with `resolved_by: system` | An open one means the repair was refused (`recon.repair_refused`): the recall's asset or amount differs from the deposit Corridor recorded | Compare the deposit (`SELECT * FROM deposits WHERE provider = 'simbank' AND provider_ref = '<ref>'`) with the bank's record. If the bank is right about a different amount, that is an `amount_mismatch` to settle with an adjustment; then resolve the break. After a repair, see [A restricted user](#a-restricted-user) if the user was left owing |
 | `missing_payout_result` | A withdrawal is in flight here and the provider says it finished. Normally repaired by the run | An open one means the repair was refused, or the run was `incomplete` | Read the withdrawal (`SELECT * FROM withdrawals WHERE provider_ref = '<ref>'`). If it has finished since, the next complete run closes the break. If not, see [A withdrawal that does not finish](#a-withdrawal-that-does-not-finish) |
 | `unknown_deposit` | Corridor credited a deposit that is not on the provider's statement | Whether the provider really has no record. A statement window that ends too early also causes this | If the provider confirms it never received the money, the credit must be reversed with an adjustment, and the user may need restricting. This needs a decision by a person |
 | `unknown_payout` | The provider paid out something Corridor cannot match, or Corridor shows a payout the provider does not have | The log lines `withdrawal.paid_out_after_release` and `payout_sweep.mismatch`. Find the withdrawal by the payout's reference, which is the withdrawal id | If the provider paid a withdrawal whose funds went back to the user, the user has the money twice: recover it with an adjustment, or record the loss. If Corridor settled something the provider never paid, the user is owed a payout |
@@ -411,7 +460,15 @@ SELECT id, status, provider, provider_ref, updated_at
   subject_id = '<id>'`. See [The review queue](#the-review-queue).
 - Its `withdrawal.submit` event has not run: see [Outbox backlog](#outbox-backlog).
 - Its event is dead with "no bank rail is configured" or "no custodian is configured": the
-  worker has no provider settings. Fix them, restart the worker, requeue the dead letter.
+  worker has no provider settings. Fix them and restart the worker. The dead letter can
+  be requeued, and need not be: see the next point.
+- It has no event left at all, or only a dead one. After 2 minutes
+  (`CORRIDOR_PAYOUT_SWEEP_AFTER_SECONDS`) the payout sweeper writes a new
+  `withdrawal.submit` event for a held withdrawal whose user is active, that has no open
+  or rejected review, and that has no such event pending or being processed. It does so
+  at most once every 2 minutes for one withdrawal, and logs `payout_sweep.resent_held`.
+  A withdrawal that keeps being asked for and stays `held` has an event that keeps
+  failing: read the dead letters.
 
 A `held` withdrawal has not been sent. Its user can cancel it, also while Redis is down.
 An agent can cancel only a withdrawal it asked for itself (`403 withdrawal_not_agents`
@@ -455,9 +512,12 @@ submission run: a refusal from the provider releases them.
 
 ## The review queue
 
-**What it means.** Screening found a party on the deny list. A withdrawal whose destination
-is listed as `review` is held with its funds reserved. A deposit whose sender is listed (as
-`review` or `deny`) is in suspense. Each has one open review.
+**What it means.** Screening found a party on the deny list, or a deposit arrived for an
+account that has been closed. A withdrawal whose destination is listed as `review` is held
+with its funds reserved. A deposit whose sender is listed (as `review` or `deny`) is in
+suspense, and so is a deposit for a closed account (its review has the outcome `review`,
+and its `deposit.suspended` audit event says `reason: owner_closed`). Each has one open
+review.
 
 **Diagnose.**
 
@@ -475,6 +535,10 @@ according to your compliance procedure, which is outside this system.
 |---|---|---|
 | `POST /v1/admin/reviews/{id}/clear` | Sent to the provider | Credited to the user on the review. Refused if the review has no user (`409 review_has_no_user`) or the user's account is closed (`409 deposit_owner_closed`) |
 | `POST /v1/admin/reviews/{id}/reject` | Funds returned to the user; the withdrawal ends as `failed` with `review_rejected` | Stays in suspense. Send it back as described under [Funds in suspense](#funds-in-suspense) |
+
+A deposit for a closed account cannot be cleared: a closed account receives nothing. Reject
+its review and send the deposit back as described under
+[Funds in suspense](#funds-in-suspense).
 
 A review can outlive its subject. If the user cancels a held withdrawal before the review
 is decided, the review stays open, and clearing or rejecting it changes no money. If a
@@ -527,7 +591,9 @@ Invoke-RestMethod -Method Post -Headers ($admin + $key) -Uri "$api/v1/admin/adju
 ```
 
 An adjustment written by hand (`POST /v1/admin/adjustments`) cannot be used for this: one
-with a leg that debits a suspense account is refused with `422 invalid_adjustment`.
+with a leg that debits a suspense account is refused with `422 invalid_adjustment`. So is
+one with a leg that debits a user's held account: what is on hold leaves as its
+withdrawal is settled, canceled or released.
 
 A suspense adjustment is refused when it is asked for if the deposit is not in suspense
 (`409 deposit_not_in_suspense`) or, for a release, if the user's account is closed

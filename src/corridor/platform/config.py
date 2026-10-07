@@ -4,15 +4,19 @@ Everything comes from environment variables prefixed ``CORRIDOR_``. Values that 
 have no default: the process refuses to start without them rather than run with a guess.
 """
 
+import ipaddress
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated, Final, Literal, Self
+from typing import Annotated, ClassVar, Final, Literal, Self
+from urllib.parse import parse_qs, urlsplit
 
+from argon2 import DEFAULT_MEMORY_COST, DEFAULT_PARALLELISM, DEFAULT_TIME_COST
+from argon2.profiles import RFC_9106_HIGH_MEMORY, RFC_9106_LOW_MEMORY
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from corridor.platform.errors import InvalidRequest
-from corridor.platform.money import parse_amount
+from corridor.platform.money import ASSETS, parse_amount
 
 # The role name is interpolated into GRANT statements, so it is restricted to a plain
 # identifier.
@@ -26,13 +30,37 @@ WebhookSecret = Annotated[SecretStr, Field(min_length=MIN_WEBHOOK_SECRET_LENGTH)
 # captured delivery can be replayed for that long.
 MAX_PRODUCTION_WEBHOOK_TOLERANCE_SECONDS: Final = 600
 
+# The longest a production deployment lets an access token live: how long a stolen one
+# works when nothing has ended it, and it cannot be renewed without the refresh token.
+MAX_PRODUCTION_ACCESS_TOKEN_TTL_SECONDS: Final = 3600
+
 # What a withdrawal costs at the least, per asset, as decimal strings in major units. A fee
 # in basis points alone rounds to nothing on a small withdrawal, which still costs a payout.
+# Every asset is here, because every asset can be paid out: a fiat one through the bank
+# rail and a stablecoin through the custodian.
 DEFAULT_WITHDRAWAL_MIN_FEE: Final[Mapping[str, str]] = {
     "USD": "0.25",
     "MXN": "5.00",
+    "BRL": "0.50",
     "USDC": "0.15",
 }
+
+# Which process the settings are for. The API is the one that takes requests; the worker
+# runs the outbox and the scheduled jobs; a tool is a command run from a shell, such as
+# `corridor verify-ledger`.
+ProcessRole = Literal["api", "worker", "tool"]
+
+# The Argon2id parameters a production deployment may not go below: either of the two
+# profiles of RFC 9106 as the library carries them, met in every parameter.
+_ARGON2_PROFILES: Final = (RFC_9106_LOW_MEMORY, RFC_9106_HIGH_MEMORY)
+
+# What `ssl` in a database URL has to say for the connection to be refused without TLS.
+_DATABASE_TLS_MODES: Final = frozenset({"require", "verify-ca", "verify-full"})
+_LOOPBACK_NAMES: Final = frozenset({"localhost"})
+
+
+class EnvironmentNotSet(ValueError):
+    """A server process was started without being told which environment it is in."""
 
 
 class Settings(BaseSettings):
@@ -46,6 +74,11 @@ class Settings(BaseSettings):
         # The error names the setting and never repeats what it was given.
         hide_input_in_errors=True,
     )
+
+    # Not a field, so nothing in the environment can set it: the command that starts the
+    # process says which one it is, by the class it loads. The API's rules are the
+    # strictest, and are what settings built without saying get.
+    process_role: ClassVar[ProcessRole] = "api"
 
     environment: Literal["development", "test", "production"] = "development"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
@@ -143,6 +176,9 @@ class Settings(BaseSettings):
     # the loopback address unless told otherwise: the endpoint has no authentication.
     worker_metrics_port: int = Field(default=0, ge=0, le=65535)
     worker_metrics_host: str = "127.0.0.1"
+    # Said aloud by a deployment that means its worker's metrics to be reachable from
+    # another host, such as a scraper on the same private network.
+    worker_metrics_public: bool = False
 
     # The providers: where each one is, and the key presented to it. None means the
     # provider is not configured, and its adapter refuses to be built. One deadline covers
@@ -233,8 +269,37 @@ class Settings(BaseSettings):
         return value
 
     @model_validator(mode="after")
+    def _no_payout_for_nothing(self) -> Self:
+        """Refuse, in every environment, an asset that would be paid out at no charge.
+
+        With no percentage, the minimum is the whole fee. An asset that has none, or one of
+        nothing, would be withdrawn for free while each payout still costs its provider's
+        fee.
+        """
+        if self.withdrawal_fee_bps > 0:
+            return self
+        free = sorted(
+            code
+            for code in ASSETS
+            if parse_amount(self.withdrawal_min_fee.get(code, "0"), code, allow_zero=True) == 0
+        )
+        if free:
+            raise ValueError(
+                "withdrawal_min_fee must be more than nothing for "
+                + ", ".join(free)
+                + " while withdrawal_fee_bps is 0"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _safe_in_production(self) -> Self:
         """Refuse a production configuration that is only fit for a developer's machine.
+
+        What is asked depends on the process. A tool run from a shell is held to the rules
+        about what it would call and log. The API and the worker are also held to the
+        rules about how a server reaches its stores and what it exposes, and the API alone
+        to the rules about what only it is given: the worker verifies no webhook and
+        accepts no agent key, so it is deployed without their secrets.
 
         Each message names settings and never repeats a value.
         """
@@ -252,6 +317,19 @@ class Settings(BaseSettings):
                 "webhook_tolerance_seconds must be at most "
                 f"{MAX_PRODUCTION_WEBHOOK_TOLERANCE_SECONDS}"
             )
+        if self.log_level == "DEBUG":
+            problems.append("log_level must not be DEBUG")
+        if self.process_role != "tool":
+            problems.extend(self._server_problems())
+        if self.process_role == "api":
+            problems.extend(self._api_problems())
+        if problems:
+            raise ValueError("not a production configuration: " + "; ".join(problems))
+        return self
+
+    def _api_problems(self) -> list[str]:
+        """What is wrong for production with the settings only the API is given."""
+        problems: list[str] = []
         # A provider that is called and whose webhooks cannot be verified would have its
         # payouts settled by the sweeper alone, and its deposits never.
         for url_name, secrets_name in (
@@ -260,15 +338,101 @@ class Settings(BaseSettings):
         ):
             if getattr(self, url_name) is not None and not getattr(self, secrets_name):
                 problems.append(f"{secrets_name} must be set when {url_name} is")
-        if self.log_level == "DEBUG":
-            problems.append("log_level must not be DEBUG")
         # Without it no agent key is accepted, and the first sign would be an owner whose
         # agent stopped working.
         if self.api_key_hash_key is None:
             problems.append("api_key_hash_key must be set")
-        if problems:
-            raise ValueError("not a production configuration: " + "; ".join(problems))
-        return self
+        return problems
+
+    def _server_problems(self) -> list[str]:
+        """What is wrong for production with how the API or the worker would run."""
+        problems: list[str] = []
+        if not self._argon2_meets_a_profile():
+            problems.append(
+                "argon2_time_cost, argon2_memory_cost_kib and argon2_parallelism must not be"
+                " below the library's recommended parameters (unset, they are those)"
+            )
+        # The endpoint has no authentication, and the API's port is the public one.
+        if self.metrics_public:
+            problems.append("metrics_public must be off")
+        if not self.worker_metrics_public and not _is_loopback(self.worker_metrics_host):
+            problems.append(
+                "worker_metrics_host must be a loopback address unless worker_metrics_public is set"
+            )
+        if any(_is_every_address(entry) for entry in self.forwarded_allow_ips.split(",")):
+            problems.append("forwarded_allow_ips must name the proxies, not every address")
+        # The owner role can change the schema and switch the ledger's triggers off. Only
+        # a migration is given it.
+        if self.database_owner_url is not None:
+            problems.append("database_owner_url must not be set for the API or the worker")
+        # Zero switches a timeout off, and then one stuck statement holds its locks for ever.
+        problems.extend(
+            f"{name} must not be 0"
+            for name in (
+                "db_statement_timeout_ms",
+                "db_lock_timeout_ms",
+                "db_idle_in_transaction_timeout_ms",
+            )
+            if getattr(self, name) == 0
+        )
+        if self.access_token_ttl_seconds > MAX_PRODUCTION_ACCESS_TOKEN_TTL_SECONDS:
+            problems.append(
+                "access_token_ttl_seconds must be at most "
+                f"{MAX_PRODUCTION_ACCESS_TOKEN_TTL_SECONDS}"
+            )
+        if urlsplit(self.redis_url.get_secret_value()).scheme.lower() != "rediss":
+            problems.append("redis_url must be a rediss URL, which is Redis over TLS")
+        if not _asks_for_tls(self.database_url.get_secret_value()):
+            problems.append("database_url must ask for TLS with ssl=require or ssl=verify-full")
+        return problems
+
+    def _argon2_meets_a_profile(self) -> bool:
+        time_cost = self.argon2_time_cost or DEFAULT_TIME_COST
+        memory_cost = self.argon2_memory_cost_kib or DEFAULT_MEMORY_COST
+        parallelism = self.argon2_parallelism or DEFAULT_PARALLELISM
+        return any(
+            time_cost >= profile.time_cost
+            and memory_cost >= profile.memory_cost
+            and parallelism >= profile.parallelism
+            for profile in _ARGON2_PROFILES
+        )
+
+
+class WorkerSettings(Settings):
+    """The settings as `corridor worker` loads them."""
+
+    process_role: ClassVar[ProcessRole] = "worker"
+
+
+class ToolSettings(Settings):
+    """The settings as a command run from a shell loads them."""
+
+    process_role: ClassVar[ProcessRole] = "tool"
+
+
+def _is_loopback(host: str) -> bool:
+    if host.strip().lower() in _LOOPBACK_NAMES:
+        return True
+    try:
+        return ipaddress.ip_address(host.strip()).is_loopback
+    except ValueError:
+        # A name, which may resolve to anything.
+        return False
+
+
+def _is_every_address(entry: str) -> bool:
+    """Whether one entry of a list of trusted proxies is a network that holds every address."""
+    try:
+        return ipaddress.ip_network(entry.strip(), strict=False).prefixlen == 0
+    except ValueError:
+        # A name or a socket path: not a network at all.
+        return False
+
+
+def _asks_for_tls(database_url: str) -> bool:
+    """Whether a database URL makes the driver refuse a connection that is not encrypted."""
+    modes = parse_qs(urlsplit(database_url).query).get("ssl", [])
+    return bool(modes) and all(mode.lower() in _DATABASE_TLS_MODES for mode in modes)
 
 
 class MigrationSettings(BaseSettings):
@@ -290,5 +454,28 @@ class MigrationSettings(BaseSettings):
     database_app_role: str = Field(default="corridor_app", pattern=APP_ROLE_PATTERN)
 
 
-def load_settings() -> Settings:
-    return Settings()
+_SETTINGS: Final[Mapping[ProcessRole, type[Settings]]] = {
+    "api": Settings,
+    "worker": WorkerSettings,
+    "tool": ToolSettings,
+}
+
+
+def settings_for(process_role: ProcessRole) -> type[Settings]:
+    """The settings class a process of this kind loads."""
+    return _SETTINGS[process_role]
+
+
+def load_settings(process_role: ProcessRole) -> Settings:
+    """Read the settings from the environment, for the process that is starting.
+
+    The API and the worker must be told which environment they are in. The default is
+    development, and a production task whose variable was lost would otherwise start with
+    a developer's rules and say nothing.
+    """
+    settings = settings_for(process_role)()
+    if process_role != "tool" and "environment" not in settings.model_fields_set:
+        raise EnvironmentNotSet(
+            "CORRIDOR_ENVIRONMENT is not set: say development, test or production"
+        )
+    return settings

@@ -19,6 +19,10 @@ from corridor.platform.ids import new_id
 from tests.support import postgres
 from tests.support.providers import EXTERNAL_ADDRESS
 
+# These tests write rows with plain SQL and post nothing to the ledger for them, so what
+# they leave behind is not what the payments verifier expects of the service.
+pytestmark = pytest.mark.usefixtures("written_by_hand")
+
 NOW = datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
 INSUFFICIENT_PRIVILEGE = "42501"
 APPEND_ONLY = "CR001"

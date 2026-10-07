@@ -9,13 +9,21 @@ from typing import Any
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 
-from corridor import identity, payments
+from corridor import identity, payments, risk
 from corridor.identity import InsufficientScope, Scope, User
 from corridor.payments import DepositNotFound, MalformedProviderEvent, ProviderEventMismatch
-from corridor.platform.db import Database
+from corridor.platform.db import (
+    LOCK_NOT_AVAILABLE,
+    Database,
+    advisory_xact_lock,
+    lock_key,
+    sqlstate_of,
+)
 from corridor.platform.pagination import InvalidCursor
 from corridor.providers import SimBank, SimCustody
+from tests.identity.support import close_account
 from tests.payments.support import (
     acting_as,
     agent_of,
@@ -664,3 +672,140 @@ async def test_the_reason_of_a_failed_deposit_is_kept_only_if_it_is_a_plain_code
 
     (audited,) = await rows(db, "SELECT * FROM audit_events WHERE action = 'deposit.failed'")
     assert audited["details"]["reason"] == kept
+
+
+# --- a closed account receives nothing -------------------------------------------------------
+
+
+async def close(db: Database, user: User) -> None:
+    async with db.transaction() as session:
+        await close_account(session, user.id)
+
+
+async def review_of(db: Database) -> dict[str, Any]:
+    (review,) = await rows(db, "SELECT * FROM risk_reviews")
+    return review
+
+
+async def test_a_bank_deposit_for_a_closed_account_goes_to_suspense_with_a_review(
+    db: Database, sim: Sim, bank: SimBank, custody: SimCustody, maria: User
+) -> None:
+    data = await received(db, sim, bank, custody, maria)
+    await close(db, maria)
+
+    await payments.apply_bank_deposit_received(db, data)
+
+    # The money did arrive, so it is booked: to nobody, for an operator to send back.
+    assert (await available(db, maria), await suspense(db), await settlement(db)) == (
+        0,
+        250_00,
+        250_00,
+    )
+    (row,) = await deposit_rows(db)
+    assert (row["user_id"], row["status"]) == (None, "suspense")
+    review = await review_of(db)
+    assert (review["subject_type"], review["subject_id"]) == ("deposit", row["id"])
+    # The review remembers whose it would have been.
+    assert (review["user_id"], review["outcome"], review["status"]) == (maria.id, "review", "open")
+    (audited,) = await rows(db, "SELECT * FROM audit_events WHERE action = 'deposit.suspended'")
+    assert audited["details"]["reason"] == "owner_closed"
+    assert await count(db, "outbox_events") == 0
+
+
+async def test_a_confirmed_chain_deposit_for_a_closed_account_goes_to_suspense_with_a_review(
+    db: Database, sim: Sim, bank: SimBank, custody: SimCustody, maria: User
+) -> None:
+    await payments.apply_chain_deposit_detected(db, await detected(db, sim, bank, custody, maria))
+    await close(db, maria)
+
+    await payments.apply_chain_deposit_confirmed(db, await confirmed(sim))
+
+    assert (await available(db, maria, "USDC"), await suspense(db, "USDC")) == (0, 25_000_000)
+    (row,) = await deposit_rows(db)
+    assert (row["user_id"], row["status"]) == (None, "suspense")
+    assert (await review_of(db))["user_id"] == maria.id
+
+
+async def test_a_statement_deposit_for_a_closed_account_goes_to_suspense_with_a_review(
+    db: Database, bank: SimBank, custody: SimCustody, maria: User
+) -> None:
+    instruction = await instruction_for(db, maria, "USD", bank, custody)
+    await close(db, maria)
+
+    await payments.apply_statement_deposit(
+        db,
+        provider="simbank",
+        provider_ref="dep_statement_1",
+        account_ref=instruction.provider_ref,
+        asset="USD",
+        amount=250_00,
+    )
+
+    assert (await available(db, maria), await suspense(db)) == (0, 250_00)
+    assert (await review_of(db))["user_id"] == maria.id
+
+
+async def test_a_deposit_from_a_denied_sender_to_a_closed_account_keeps_the_screening_outcome(
+    db: Database, sim: Sim, bank: SimBank, custody: SimCustody, maria: User
+) -> None:
+    data = await received(db, sim, bank, custody, maria)
+    async with db.transaction() as session:
+        await risk.add_to_denylist(session, kind="name", value=data["sender_name"], outcome="deny")
+    await close(db, maria)
+
+    await payments.apply_bank_deposit_received(db, data)
+
+    assert (await review_of(db))["outcome"] == "deny"
+
+
+async def test_a_restricted_account_still_receives_its_deposits(
+    db: Database, sim: Sim, bank: SimBank, custody: SimCustody, maria: User
+) -> None:
+    data = await received(db, sim, bank, custody, maria)
+    async with db.transaction() as session:
+        await identity.restrict_user(session, maria.id, "under review")
+
+    await payments.apply_bank_deposit_received(db, data)
+
+    assert (await available(db, maria), await suspense(db)) == (250_00, 0)
+
+
+@pytest.mark.parametrize("arrives", ["bank", "chain", "statement"])
+async def test_a_deposit_waits_for_its_owners_money_out_lock(
+    db: Database,
+    impatient_db: Database,
+    sim: Sim,
+    bank: SimBank,
+    custody: SimCustody,
+    maria: User,
+    arrives: str,
+) -> None:
+    """Closing an account holds this lock while it reads the balances, so a deposit that
+    is being credited cannot slip in between that read and the account being closed."""
+    if arrives == "bank":
+        data = await received(db, sim, bank, custody, maria)
+    elif arrives == "chain":
+        await detected(db, sim, bank, custody, maria)
+        data = await confirmed(sim)
+    else:
+        instruction = await instruction_for(db, maria, "USD", bank, custody)
+
+    async with db.transaction() as holder:
+        await advisory_xact_lock(holder, [lock_key("money_out", maria.id)])
+        with pytest.raises(DBAPIError) as failure:
+            if arrives == "bank":
+                await payments.apply_bank_deposit_received(impatient_db, data)
+            elif arrives == "chain":
+                await payments.apply_chain_deposit_confirmed(impatient_db, data)
+            else:
+                await payments.apply_statement_deposit(
+                    impatient_db,
+                    provider="simbank",
+                    provider_ref="dep_statement_1",
+                    account_ref=instruction.provider_ref,
+                    asset="USD",
+                    amount=250_00,
+                )
+
+    assert sqlstate_of(failure.value) == LOCK_NOT_AVAILABLE
+    assert await count(db, "journal_entries") == 0

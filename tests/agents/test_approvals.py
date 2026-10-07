@@ -16,7 +16,7 @@ from corridor import agents
 from corridor.identity import InsufficientScope, Principal, Scope
 from corridor.platform.clock import ManualClock
 from corridor.platform.config import Settings
-from corridor.platform.db import Database
+from corridor.platform.db import Database, advisory_xact_lock, lock_key
 from corridor.platform.ids import new_id
 from corridor.providers import SimBank, SimCustody
 from tests.agents.support import (
@@ -346,6 +346,50 @@ async def test_20_approvals_at_once_make_exactly_one_payment(
     assert (await available(client, maria), await available(client, joao)) == ("950.00", "50.00")
     assert [row["status"] for row in await stored(db)] == ["executed"]
     assert len(await events(db, "agent.approval_approved")) == 1
+
+
+async def test_an_approved_transfer_takes_the_recipients_money_out_lock_before_the_request(
+    client: httpx.AsyncClient,
+    db: Database,
+    settings: Settings,
+    maria: RegisteredUser,
+    joao: RegisteredUser,
+    agent: Acting,
+) -> None:
+    """The transfer takes the recipient's lock as well as the owner's. Taken only when the
+    transfer is made, it would come after the request's row, which is out of order: an
+    approval and a transfer the other way could each hold what the other waits for."""
+    approval_id = uuid.UUID(await asked(client, agent, joao, "50.00"))
+    owner = Principal.for_user(uuid.UUID(maria.id), "user", new_id())
+
+    async def approve() -> agents.ApprovalOutcome:
+        async with db.transaction() as session:
+            return await agents.approve(session, owner, approval_id, settings=settings)
+
+    async with db.transaction() as holder:
+        await advisory_xact_lock(holder, [lock_key("money_out", uuid.UUID(joao.id))])
+        approving = asyncio.create_task(approve())
+        for _ in range(1000):
+            waiting = await rows(
+                db,
+                "SELECT 1 FROM pg_stat_activity WHERE datname = current_database()"
+                " AND wait_event_type = 'Lock'",
+            )
+            if waiting:
+                break
+            await asyncio.sleep(0.005)
+        else:
+            raise AssertionError("the approval never waited for a lock")
+        # Waiting for the recipient's lock, and the request's row is not held yet.
+        async with db.transaction() as session:
+            await session.execute(
+                text("SELECT 1 FROM agent_approval_requests WHERE id = :id FOR UPDATE NOWAIT"),
+                {"id": approval_id},
+            )
+
+    outcome = await approving
+    assert (outcome.request.status, outcome.refusal) == ("executed", None)
+    assert await available(client, joao) == "50.00"
 
 
 async def test_approving_and_rejecting_at_once_ends_one_way_only(

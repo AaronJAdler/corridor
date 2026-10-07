@@ -5,16 +5,19 @@ deposit out of suspense is in ``test_suspense.py``.
 """
 
 import asyncio
+import json
 import uuid
 from typing import Any
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
 from corridor import ledger, ops, risk, wallets
 from corridor.identity import Principal, User
 from corridor.ledger import AccountKind, Direction
 from corridor.ops import Adjustment, Leg
+from corridor.platform.clock import utcnow
 from corridor.platform.db import (
     LOCK_NOT_AVAILABLE,
     Database,
@@ -27,6 +30,7 @@ from corridor.platform.ids import new_id
 from tests.identity.support import add_user
 from tests.ops.support import audited
 from tests.payments.support import acting_as, available, balance_of, entries, rows
+from tests.support.ledger import fund
 
 BANK = "simbank"
 
@@ -533,3 +537,70 @@ async def test_approving_an_adjustment_that_does_not_exist_is_not_found(
     with pytest.raises(ops.AdjustmentNotFound):
         async with db.transaction() as session:
             await ops.approve_adjustment(session, bruno, new_id())
+
+
+# --- what is reserved for a withdrawal is not an adjustment's to take ----------------------------
+
+
+async def held_debit(db: Database, user: User, amount: int = 25_00) -> list[Leg]:
+    """Postings that give a user back what is on hold for them, written by hand."""
+    async with db.transaction() as session:
+        wallet = await wallets.get_wallet(session, user.id, "USD")
+        # Something on hold, as a withdrawal that was asked for leaves it.
+        await fund(session, wallet.held_account_id, amount)
+    return [
+        Leg(wallet.held_account_id, "USD", Direction.DEBIT, amount),
+        Leg(wallet.available_account_id, "USD", Direction.CREDIT, amount),
+    ]
+
+
+async def test_an_adjustment_written_by_hand_cannot_take_money_off_hold(
+    db: Database, ana: Principal, maria: User
+) -> None:
+    legs = await held_debit(db, maria)
+
+    with pytest.raises(ops.InvalidAdjustment) as refusal:
+        await request(db, ana, legs)
+
+    assert refusal.value.extra == {"field": "legs"}
+    assert "withdrawal" in refusal.value.detail
+    assert await stored(db) == []
+
+
+async def test_a_pending_adjustment_from_before_that_debits_a_held_balance_cannot_be_approved(
+    db: Database, ana: Principal, bruno: Principal, maria: User
+) -> None:
+    legs = await held_debit(db, maria)
+    adjustment_id = new_id()
+    async with db.transaction() as session:
+        # As one asked for before held balances were closed to adjustments written by hand.
+        await session.execute(
+            text(
+                "INSERT INTO ops_adjustments (id, requested_by, status, kind, reason, legs,"
+                " created_at) VALUES (:id, :by, 'pending', 'manual', 'from before',"
+                " CAST(:legs AS jsonb), :now)"
+            ),
+            {
+                "id": adjustment_id,
+                "by": ana.user_id,
+                "now": utcnow(),
+                "legs": json.dumps(
+                    [
+                        {
+                            "account_id": str(leg.account_id),
+                            "asset": leg.asset,
+                            "direction": leg.direction.value,
+                            "amount": str(leg.amount),
+                        }
+                        for leg in legs
+                    ]
+                ),
+            },
+        )
+
+    with pytest.raises(ops.InvalidAdjustment):
+        async with db.transaction() as session:
+            await ops.approve_adjustment(session, bruno, adjustment_id)
+
+    assert await available(db, maria) == 0
+    assert [row["status"] for row in await stored(db)] == ["pending"]

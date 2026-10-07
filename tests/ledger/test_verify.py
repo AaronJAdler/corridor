@@ -359,6 +359,129 @@ async def test_suspense_that_holds_nothing_or_something_is_no_finding(db: Databa
     assert await findings(db) == []
 
 
+# --- accounts that left the chart ------------------------------------------------------------
+
+
+async def rewrite_account(superuser_db: Database, account: uuid.UUID, change: str) -> None:
+    """Change an account as nothing short of a superuser can: with the constraints that
+    hold it to the chart dropped and the guard against updates switched off."""
+    async with superuser_db.transaction() as session:
+        for constraint in ("ck_ledger_accounts_chart", "ck_ledger_accounts_kind"):
+            await session.execute(text(f"ALTER TABLE ledger_accounts DROP CONSTRAINT {constraint}"))
+        await session.execute(text("SET LOCAL session_replication_role = replica"))
+        await session.execute(
+            text(f"UPDATE ledger_accounts SET {change} WHERE id = :account"),  # noqa: S608
+            {"account": account},
+        )
+
+
+@pytest.mark.parametrize(
+    ("change", "said"),
+    [
+        ("normal_side = 'D'", "fee_revenue account is revenue, normal side D"),
+        ("category = 'asset'", "fee_revenue account is asset, normal side C"),
+        ("kind = 'made_up'", "made_up account is revenue, normal side C"),
+        ("owner_id = id", "fee_revenue account is revenue, normal side C"),
+        ("provider = 'simbank'", "fee_revenue account is revenue, normal side C"),
+    ],
+)
+async def test_an_account_that_does_not_follow_the_chart_is_found(
+    db: Database,
+    superuser_db: Database,
+    books: tuple[UserAccounts, UserAccounts, uuid.UUID],
+    change: str,
+    said: str,
+) -> None:
+    _, _, fees = books
+    await rewrite_account(superuser_db, fees, change)
+
+    found = [finding for finding in await findings(db) if finding.check == "account_off_chart"]
+
+    assert [(finding.subject, finding.detail) for finding in found] == [
+        (str(fees), f"{said}, which is not what the chart of accounts gives its kind")
+    ]
+
+
+async def test_a_user_account_recorded_as_unconstrained_is_found(
+    db: Database, superuser_db: Database, books: tuple[UserAccounts, UserAccounts, uuid.UUID]
+) -> None:
+    maria, _, _ = books
+    await rewrite_account(superuser_db, maria.held, "is_constrained = false")
+
+    assert ("account_off_chart", str(maria.held)) in {
+        (finding.check, finding.subject) for finding in await findings(db)
+    }
+
+
+# --- reversals -------------------------------------------------------------------------------
+
+
+async def reversed_transfer(db: Database) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    """A transfer that was reversed, and another that was not: the first entry, its
+    reversal and the other entry."""
+    async with db.transaction() as session:
+        maria = await funded_user(session, 100_00)
+        joao = await open_user(session)
+        first = await ledger.post_entry(
+            session, transfer_draft(maria.available, joao.available, 10_00)
+        )
+        other = await ledger.post_entry(
+            session, transfer_draft(maria.available, joao.available, 10_00)
+        )
+        reversal = await ledger.reverse_entry(session, first.id)
+    return first.id, reversal.id, other.id
+
+
+async def test_a_reversal_that_mirrors_its_original_is_no_finding(db: Database) -> None:
+    await reversed_transfer(db)
+
+    assert await findings(db) == []
+
+
+async def test_a_reversal_that_does_not_mirror_its_original_is_found(
+    db: Database, superuser_db: Database
+) -> None:
+    # It balances, and every balance agrees with its postings: only the comparison with
+    # the entry it says it reverses shows that it undid twice what was done.
+    first, reversal, _ = await reversed_transfer(db)
+    await damage(
+        superuser_db, "UPDATE postings SET amount = amount * 2 WHERE entry_id = :entry", entry=first
+    )
+
+    found = [finding for finding in await findings(db) if finding.check == "reversal_mismatch"]
+
+    assert [(finding.subject, finding.detail) for finding in found] == [
+        (str(reversal), f"the postings of this reversal are not the mirror image of entry {first}")
+    ]
+
+
+async def test_a_reversal_pointed_at_another_entry_is_found(
+    db: Database, superuser_db: Database
+) -> None:
+    first, reversal, other = await reversed_transfer(db)
+    # The same accounts and amounts, so the mirror image still fits: pointing a reversal
+    # at an entry of another shape is what this is about.
+    async with db.transaction() as session:
+        joao = await open_user(session)
+        maria = await funded_user(session, 5_00)
+        odd = await ledger.post_entry(
+            session, transfer_draft(maria.available, joao.available, 3_00)
+        )
+    await damage(
+        superuser_db,
+        "UPDATE journal_entries SET reverses_entry_id = :odd WHERE id = :reversal",
+        odd=odd.id,
+        reversal=reversal,
+    )
+
+    found = await findings(db)
+
+    assert [(finding.check, finding.subject) for finding in found] == [
+        ("reversal_mismatch", str(reversal))
+    ]
+    assert other != first
+
+
 async def test_findings_are_capped_per_check(db: Database, superuser_db: Database) -> None:
     async with db.transaction() as session:
         users = [await funded_user(session, 1_00) for _ in range(5)]

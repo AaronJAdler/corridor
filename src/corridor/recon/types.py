@@ -22,6 +22,9 @@ BreakKind = Literal[
     # The ledger's settlement account and the provider's balance differ by more than what
     # is known to be in transit.
     "settlement_balance",
+    # The provider's statement shows a deposit as recalled, and it is still on Corridor's
+    # books as received: credited to its user, or in suspense.
+    "missing_return",
 ]
 BreakStatus = Literal["open", "resolved"]
 RunStatus = Literal["completed", "incomplete"]
@@ -113,6 +116,8 @@ class Finding:
     # True when the same statement shows that deposit as returned: there is nothing left
     # at the provider to credit.
     returned: bool = False
+    # The statement line of the recall, for a deposit that is still on the books here.
+    recall: ProviderTransaction | None = None
     # The provider's payout for a withdrawal that is still in flight here.
     sent: Sent | None = None
     withdrawal_id: uuid.UUID | None = None

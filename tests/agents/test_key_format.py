@@ -12,9 +12,10 @@ from corridor.platform.config import Settings
 from corridor.platform.logging import REDACTED, scrub
 from tests.agents.support import HASH_KEY, OTHER_HASH_KEY
 
+# Over TLS, as a production process must be given them: one test builds production settings.
 REQUIRED = {
-    "database_url": "postgresql+asyncpg://app:example@db.invalid/corridor",  # pragma: allowlist secret
-    "redis_url": "redis://cache.invalid:6379/0",
+    "database_url": "postgresql+asyncpg://app:example@db.invalid/corridor?ssl=require",  # pragma: allowlist secret
+    "redis_url": "rediss://cache.invalid:6379/0",
 }
 
 

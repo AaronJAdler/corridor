@@ -9,7 +9,7 @@ from hypothesis import strategies as st
 from pydantic import ValidationError
 
 from corridor.payments import fees
-from corridor.platform.config import Settings
+from corridor.platform.config import DEFAULT_WITHDRAWAL_MIN_FEE, Settings
 from corridor.platform.money import MAX_MINOR_UNITS, format_amount
 
 REQUIRED: dict[str, Any] = {
@@ -140,11 +140,16 @@ def withdrawing(bps: int = 0, **more: Any) -> Settings:
 def test_a_withdrawal_has_a_least_fee_in_each_asset_that_has_a_payout_cost() -> None:
     settings = Settings(_env_file=None, **REQUIRED)
 
-    assert settings.withdrawal_min_fee == {"USD": "0.25", "MXN": "5.00", "USDC": "0.15"}
+    assert settings.withdrawal_min_fee == {
+        "USD": "0.25",
+        "MXN": "5.00",
+        "BRL": "0.50",
+        "USDC": "0.15",
+    }
     assert fees.withdrawal_fee(100_00, "USD", settings) == 25
     assert fees.withdrawal_fee(100_00, "MXN", settings) == 5_00
     assert fees.withdrawal_fee(100_000_000, "USDC", settings) == 150_000
-    assert fees.withdrawal_fee(100_00, "BRL", settings) == 0
+    assert fees.withdrawal_fee(100_00, "BRL", settings) == 50
 
 
 @pytest.mark.parametrize(
@@ -174,15 +179,18 @@ def test_a_withdrawal_with_no_minimum_configured_pays_the_percentage_alone() -> 
 def test_the_withdrawal_minimums_are_read_from_the_environment_as_json(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Replaces the defaults whole: an asset left out has no minimum, which is allowed only
+    # while a percentage is charged.
     monkeypatch.setenv("CORRIDOR_WITHDRAWAL_MIN_FEE", '{"USD": "1.00"}')
+    monkeypatch.setenv("CORRIDOR_WITHDRAWAL_FEE_BPS", "10")
 
     settings = Settings(_env_file=None, **REQUIRED)
 
     assert fees.withdrawal_fee(10_00, "USD", settings) == 1_00
-    assert fees.withdrawal_fee(10_00, "MXN", settings) == 0
+    assert fees.withdrawal_fee(10_00, "MXN", settings) == 1
 
 
-@given(amount=amounts, bps=rates, minimum=st.integers(0, 10**9))
+@given(amount=amounts, bps=st.integers(1, 1000), minimum=st.integers(0, 10**9))
 def test_the_withdrawal_fee_is_never_less_than_either_part(
     amount: int, bps: int, minimum: int
 ) -> None:
@@ -192,3 +200,10 @@ def test_the_withdrawal_fee_is_never_less_than_either_part(
 
     assert type(fee) is int
     assert fee == max(minimum, amount * bps // 10_000)
+
+
+@given(amount=amounts, minimum=st.integers(1, 10**9))
+def test_a_withdrawal_with_no_percentage_costs_the_minimum(amount: int, minimum: int) -> None:
+    least = {**DEFAULT_WITHDRAWAL_MIN_FEE, "USD": format_amount(minimum, "USD")}
+
+    assert fees.withdrawal_fee(amount, "USD", withdrawing(withdrawal_min_fee=least)) == minimum

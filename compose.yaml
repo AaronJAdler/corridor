@@ -92,6 +92,12 @@ services:
 
   sim:
     <<: *corridor
+    # An image of its own, from the Dockerfile's `sim` target: the image the API and the
+    # worker run does not contain the simulator.
+    image: corridor-sim:local
+    build:
+      context: .
+      target: sim
     command: ["python", "-m", "corridor_sim"]
     environment:
       CORRIDOR_SIM_ENVIRONMENT: development

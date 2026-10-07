@@ -1,9 +1,9 @@
 """The reconciliation tables. Private to this module: nothing outside ``corridor.recon``
 imports them.
 
-The authoritative definition, with grants, is ``migrations/versions/0013_recon.py`` and
-``0018_review_c.py``. A test
-compares the two.
+The authoritative definition, with grants, is ``migrations/versions/0013_recon.py``,
+``0018_review_c.py`` and ``0020_final_review.py`` (the kinds of break). A test compares
+the two.
 """
 
 import uuid
@@ -38,7 +38,7 @@ class ReconBreakRow(Base):
     __table_args__ = (
         CheckConstraint(
             "kind IN ('missing_deposit', 'unknown_deposit', 'amount_mismatch',"
-            " 'missing_payout_result', 'unknown_payout', 'settlement_balance')",
+            " 'missing_payout_result', 'unknown_payout', 'settlement_balance', 'missing_return')",
             name="kind",
         ),
         CheckConstraint("status IN ('open', 'resolved')", name="status"),

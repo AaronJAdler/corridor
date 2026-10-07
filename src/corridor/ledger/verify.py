@@ -11,8 +11,18 @@ from typing import Final
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from corridor.ledger.types import CHART
+
 # An account's balance is the sum of postings on its normal side less the sum on the other.
 _SIGNED: Final = "CASE WHEN p.direction = a.normal_side THEN p.amount ELSE -p.amount END"
+
+# The chart of accounts as rows, for the check that compares every account with it. Built
+# from the chart the code posts by, so the two cannot drift apart.
+_CHART_ROWS: Final = ", ".join(
+    f"('{kind.value}', '{spec.category}', '{spec.normal_side.value}',"
+    f" {'true' if spec.constrained else 'false'}, '{spec.scope}')"
+    for kind, spec in CHART.items()
+)
 
 # Each check is a query that returns one row per violation: the id it concerns and a
 # description. Each query stands alone, so each reads one consistent snapshot.
@@ -105,6 +115,46 @@ CHECKS: Final[dict[str, str]] = {
                 SELECT account_id, max(seq) AS seq FROM postings GROUP BY account_id
                ) latest ON latest.account_id = b.account_id
          WHERE b.last_posting_seq <> COALESCE(latest.seq, 0)
+    """,
+    # The database holds an account to the chart, and lets nobody change one. An account
+    # that differs all the same gives every posting on it another meaning: a normal side
+    # turned over turns the sign of its balance.
+    "account_off_chart": f"""
+        SELECT a.id::text AS subject,
+               a.kind || ' account is ' || a.category || ', normal side ' || a.normal_side
+                   || ', which is not what the chart of accounts gives its kind' AS detail
+          FROM ledger_accounts a
+          LEFT JOIN (VALUES {_CHART_ROWS})
+               AS chart (kind, category, normal_side, is_constrained, scope)
+            ON chart.kind = a.kind
+         WHERE chart.kind IS NULL
+            OR a.category <> chart.category
+            OR a.normal_side <> chart.normal_side
+            OR a.is_constrained <> chart.is_constrained
+            OR (a.owner_id IS NOT NULL) <> (chart.scope = 'user')
+            OR (a.provider IS NOT NULL) <> (chart.scope = 'provider')
+    """,  # noqa: S608 - built from a constant
+    # A reversal is its original with every posting turned over, and nothing else. An
+    # account appears once in an entry, so the two are compared posting for posting.
+    "reversal_mismatch": """
+        SELECT r.id::text AS subject,
+               'the postings of this reversal are not the mirror image of entry '
+                   || r.reverses_entry_id AS detail
+          FROM journal_entries r
+         WHERE r.reverses_entry_id IS NOT NULL
+           AND EXISTS (
+                SELECT 1
+                  FROM (SELECT account_id, direction, amount
+                          FROM postings
+                         WHERE entry_id = r.reverses_entry_id) original
+                  FULL JOIN (SELECT account_id,
+                                    CASE direction WHEN 'D' THEN 'C' ELSE 'D' END AS direction,
+                                    amount
+                               FROM postings
+                              WHERE entry_id = r.id) mirrored
+                    USING (account_id, direction, amount)
+                 WHERE original.account_id IS NULL OR mirrored.account_id IS NULL
+               )
     """,
 }
 

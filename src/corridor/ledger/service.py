@@ -482,6 +482,29 @@ async def derive_balances(
     return {row.id: row.balance or 0 for row in rows}
 
 
+async def balances_by_kind(session: AsyncSession, kind: AccountKind) -> list[tuple[Account, int]]:
+    """Every account of one kind that holds something, with what it holds, computed from
+    postings alone. An account whose postings come to nothing is left out.
+
+    For the checks above the ledger that compare what a kind of account holds with the
+    records that say why. It reads every posting on every account of the kind.
+    """
+    signed = case(
+        (_postings.c.direction == _accounts.c.normal_side, _postings.c.amount),
+        else_=-_postings.c.amount,
+    )
+    balance = func.sum(signed).label("balance")
+    rows = await session.execute(
+        select(_accounts, balance)
+        .join(_postings, _postings.c.account_id == _accounts.c.id)
+        .where(_accounts.c.kind == kind.value)
+        .group_by(_accounts.c.id)
+        .having(func.sum(signed) != 0)
+        .order_by(_accounts.c.id)
+    )
+    return [(_account(row), row["balance"]) for row in rows.mappings()]
+
+
 async def statement(
     session: AsyncSession, account_id: uuid.UUID, *, before_seq: int | None = None, limit: int = 50
 ) -> list[StatementLine]:

@@ -39,4 +39,8 @@ times, and a metric counts each re-run.
   and checked in review; nothing mechanical enforces it.
 - One user's outgoing movements are serialised, including across assets. That is the
   intended cost.
-- A recipient is not locked, so two people can pay the same person at once.
+- A transfer takes the recipient's money-out lock together with the sender's, and a
+  deposit takes its owner's, because closing an account reads that it is empty under that
+  lock: a credit must not land between the read and the closing. Payments to one person
+  therefore queue behind each other, and behind that person's own outgoing movements, for
+  the length of one short transaction.

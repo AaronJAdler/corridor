@@ -14,12 +14,17 @@ locals {
   # change of a default in the code cannot make a deployment that refuses to start, or
   # worse, one that starts with a development setting.
   common_environment = {
-    CORRIDOR_ENVIRONMENT               = "production"
-    CORRIDOR_LOG_LEVEL                 = var.log_level
-    CORRIDOR_LOG_FORMAT                = "json"
-    CORRIDOR_DATABASE_APP_ROLE         = "corridor_app"
-    CORRIDOR_RATE_LIMIT_ENABLED        = "true"
-    CORRIDOR_WEBHOOK_TOLERANCE_SECONDS = tostring(var.webhook_tolerance_seconds)
+    CORRIDOR_ENVIRONMENT                       = "production"
+    CORRIDOR_LOG_LEVEL                         = var.log_level
+    CORRIDOR_LOG_FORMAT                        = "json"
+    CORRIDOR_DATABASE_APP_ROLE                 = "corridor_app"
+    CORRIDOR_RATE_LIMIT_ENABLED                = "true"
+    CORRIDOR_WEBHOOK_TOLERANCE_SECONDS         = tostring(var.webhook_tolerance_seconds)
+    CORRIDOR_METRICS_PUBLIC                    = "false"
+    CORRIDOR_ACCESS_TOKEN_TTL_SECONDS          = "900"
+    CORRIDOR_DB_STATEMENT_TIMEOUT_MS           = "10000"
+    CORRIDOR_DB_LOCK_TIMEOUT_MS                = "5000"
+    CORRIDOR_DB_IDLE_IN_TRANSACTION_TIMEOUT_MS = "15000"
   }
 
   api_environment = merge(
@@ -35,7 +40,8 @@ locals {
   )
 
   # The worker calls the bank rail and the custodian. It takes no requests and fetches no
-  # rates.
+  # rates, so it is given no webhook secret and no key of the API's: the application's
+  # production check asks a worker for neither.
   worker_environment = merge(
     local.common_environment,
     local.providers_configured.bank_rail ? { CORRIDOR_BANK_RAIL_URL = var.provider_urls.bank_rail } : {},

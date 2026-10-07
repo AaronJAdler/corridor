@@ -16,7 +16,7 @@ from corridor.platform.clock import ManualClock
 from corridor.platform.db import Database
 from corridor.platform.ids import new_id
 from corridor.platform.logging import bind_context, clear_context
-from tests.outbox.helpers import NotifyProbe, until
+from tests.outbox.helpers import TOPIC, NotifyProbe, until
 
 
 class Untouchable:
@@ -266,3 +266,32 @@ async def test_an_event_enqueued_outside_a_request_has_an_empty_context(db: Data
 
     assert event_id is not None
     assert (await load(db, event_id)).context == {}
+
+
+# --- whether an event is still to be handled -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("status", "queued"),
+    [("pending", True), ("processing", True), ("done", False), ("dead", False)],
+)
+async def test_an_event_is_queued_while_it_is_pending_or_being_processed(
+    db: Database, status: str, queued: bool
+) -> None:
+    async with db.transaction() as session:
+        await outbox.enqueue(session, TOPIC, {"order": "a", "more": 1})
+        await session.execute(text("UPDATE outbox_events SET status = :status"), {"status": status})
+
+    async with db.transaction() as session:
+        assert await outbox.is_queued(session, TOPIC, {"order": "a"}) is queued
+
+
+async def test_only_an_event_of_the_topic_with_the_payload_counts_as_queued(db: Database) -> None:
+    async with db.transaction() as session:
+        await outbox.enqueue(session, TOPIC, {"order": "a"})
+
+    async with db.transaction() as session:
+        assert await outbox.is_queued(session, TOPIC, {"order": "a"})
+        assert not await outbox.is_queued(session, TOPIC, {"order": "b"})
+        assert not await outbox.is_queued(session, "test.other", {"order": "a"})
+        assert not await outbox.is_queued(session, TOPIC, {"order": "a", "more": 1})

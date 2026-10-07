@@ -441,6 +441,8 @@ def start_worker_process(
 ) -> subprocess.Popen[str]:
     environment = {
         **os.environ,
+        # A worker does not start without being told which environment it is in.
+        "CORRIDOR_ENVIRONMENT": "test",
         "CORRIDOR_DATABASE_URL": database.app_url,
         "CORRIDOR_REDIS_URL": settings.redis_url.get_secret_value(),
     }

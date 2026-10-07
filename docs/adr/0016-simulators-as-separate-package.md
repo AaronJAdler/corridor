@@ -30,6 +30,8 @@ because they do not have state, time or a network between them and the caller.
   changes.
 - The contract can drift from either side. Tests exist for both sides, and the document
   has to be kept in step by hand.
-- The simulator is shipped in the same wheel and image as Corridor. It is inert unless
-  started, and it cannot start in production.
+- The simulator is in the same wheel as Corridor and not in the same image: the image that
+  is deployed has the package removed, and the local stack builds the simulator from a
+  target of its own. Where it is installed it is inert unless started, and it cannot
+  start in production.
 - The adapters have never met a real provider's quirks. That remains unproved.

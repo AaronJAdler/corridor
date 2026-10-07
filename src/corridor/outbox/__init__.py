@@ -11,6 +11,7 @@ from corridor.outbox.dispatcher import Dispatcher, Handler, Registry
 from corridor.outbox.service import (
     enqueue,
     get_event,
+    is_queued,
     list_dead,
     purge_finished,
     requeue,
@@ -28,6 +29,7 @@ __all__ = [
     "Registry",
     "enqueue",
     "get_event",
+    "is_queued",
     "list_dead",
     "purge_finished",
     "requeue",

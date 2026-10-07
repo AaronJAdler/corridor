@@ -19,7 +19,9 @@ Settling the withdrawal debits `user_held`. Releasing it moves the money back.
 ## Consequences
 
 - A hold is in the same history as everything else and is covered by the same triggers and
-  the same verifier.
+  the same verifier. A second verifier, in payments, checks that each user's held balance
+  is exactly what their withdrawals in flight reserved, and no adjustment written by hand
+  may debit a held balance.
 - The available balance is one number. Nothing can forget to subtract a hold.
 - A user's wallet shows `available`, `held` and `total` directly.
 - Each withdrawal writes two or three entries (hold, then settle or release) instead of

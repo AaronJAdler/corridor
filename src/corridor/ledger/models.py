@@ -1,7 +1,8 @@
 """Ledger tables. Private to this module: nothing outside ``corridor.ledger`` imports them.
 
-The authoritative definition, with triggers and grants, is ``migrations/versions/0002_ledger.py``.
-A test compares the two.
+The authoritative definition, with triggers and grants, is ``migrations/versions/0002_ledger.py``
+and ``0020_final_review.py`` (accounts are written once, and follow the chart). A test
+compares the two.
 """
 
 import uuid

@@ -21,7 +21,7 @@ from corridor.providers import SimBank, SimCustody, SimRates
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Build the API. Connections are opened when the app starts and closed when it stops."""
-    resolved = settings if settings is not None else load_settings()
+    resolved = settings if settings is not None else load_settings("api")
     # Here rather than only in the command line, so the redacting pipeline is in place
     # however the app is started.
     configure_logging(resolved.log_level, resolved.log_format)

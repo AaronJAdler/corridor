@@ -1809,7 +1809,7 @@ afterwards. Read the withdrawal to learn what became of it.
 - A fiat asset needs `beneficiary_id`. A stablecoin needs `to_address`. Exactly one.
 - The wallet is debited `amount` plus `fee`. The fee is `CORRIDOR_WITHDRAWAL_FEE_BPS` basis
   points of the amount, never less than the asset's entry in `CORRIDOR_WITHDRAWAL_MIN_FEE`
-  (by default `0.25` USD, `5.00` MXN and `0.15` USDC).
+  (by default `0.25` USD, `5.00` MXN, `0.50` BRL and `0.15` USDC).
 
 ```http
 POST /v1/withdrawals
@@ -3129,6 +3129,12 @@ Closes an account for good. Every session is revoked and every access token stop
 A closed account cannot log in, cannot be paid, and is answered as "not found" to other
 users. Closing a closed account changes nothing. There is no request body.
 
+An account is closed only when nothing is in it, available or on hold
+(`409 account_holds_funds` otherwise). A transfer or a deposit that is on its way to the
+account when it is closed either lands first, and the closing is refused, or finds the
+account closed: the transfer is answered `404 recipient_not_found`, and the deposit is
+booked to suspense with a review, for an operator to send back.
+
 ```http
 POST /v1/admin/users/01a116dd-0b19-74cb-b642-6d6ea4eb4875/close
 Authorization: Bearer <access token>
@@ -3711,6 +3717,9 @@ until a different administrator approves it.
   asset. A request that does not balance is refused with `422 invalid_adjustment`.
 - No leg may debit a suspense account. Money leaves suspense only as the deposit it
   arrived as, through one of the two endpoints below.
+- No leg may debit a user's held account. What is on hold is reserved for a withdrawal,
+  and leaves as that withdrawal is settled, canceled or released. Both refusals are
+  `422 invalid_adjustment`, and both are made again when the adjustment is approved.
 
 ```http
 POST /v1/admin/adjustments

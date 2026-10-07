@@ -87,7 +87,9 @@ are shown.
 ## Quick start with Docker Compose
 
 `compose.yaml` defines the whole system: PostgreSQL, Redis, a migration run, the API, the
-worker and the provider simulators.
+worker and the provider simulators. It builds two images from the one Dockerfile: the
+`runtime` target for the API, the worker and the migration, which does not contain the
+simulator, and the `sim` target for the simulator.
 
 **This stack has not been started by the automation that wrote this repository.** No
 container registry was reachable from where it was built, so the image has never been
@@ -302,7 +304,7 @@ Unix-only feature.
 | `uv run corridor db migrate` | Apply migrations. Needs `CORRIDOR_DATABASE_OWNER_URL` |
 | `uv run corridor keys generate --out DIRECTORY` | Generate a signing key pair. `--mode 644` writes a private key that another user, such as a container's, can read |
 | `uv run corridor users make-admin --email ADDRESS --yes` | Make a registered user an administrator. Needs `CORRIDOR_DATABASE_OWNER_URL`. Without `--yes` it changes nothing |
-| `uv run corridor verify-ledger` | Recompute the ledger's invariants. Exits 1 on any finding |
+| `uv run corridor verify-ledger` | Recompute the ledger's invariants, and that every held and suspense balance is accounted for by a withdrawal or a deposit. Exits 1 on any finding |
 | `uv run corridor demo` | Run the demo against a stack that is already running |
 
 `poe test`, `check`, `smoke`, `e2e` and `demo` need the two `CORRIDOR_TEST_` variables from
@@ -338,7 +340,8 @@ docs/                architecture, API guide, runbook, provider contract, decisi
 infra/               Terraform for AWS
 deploy/              the database init script the compose stack uses
 compose.yaml         the local stack
-Dockerfile           one image for the API, the worker, the migration run and the simulators
+Dockerfile           one image for the API, the worker and the migration run (`runtime`),
+                     and one for the simulators (`sim`)
 .github/workflows/   CI and the manual deploy workflow
 CLAUDE.md            the rules and conventions for working in this repository
 ```

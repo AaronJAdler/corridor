@@ -156,7 +156,16 @@ copies the newest task definition and changes only its image.
   check that the address in the API's access log is yours and not the load balancer's.
 - **TLS to the database.** `ssl=require` encrypts without checking the server's
   certificate. To check it, the image must carry the RDS certificate bundle and the
-  connection string must name it.
+  connection string must name it. The application refuses to start in production with a
+  database URL that does not ask for TLS (`ssl=require`, `verify-ca` or `verify-full`) or
+  a Redis URL that is not `rediss://`, so a connection string stored without them shows
+  as a task that stops at start, with the setting named in its log.
+- **Each task starts with what it is given.** The API and the worker check their
+  configuration for production when they start, each against what that process needs: the
+  worker is given no webhook secret and none of the API's keys, and is not asked for
+  them. `tests/assembly/test_deployed_settings.py` reads `main.tf` and the identity
+  module and loads the settings as each task does; it has not been tried against tasks
+  that really ran.
 - **Read-only filesystem.** The containers run with a read-only root filesystem and a
   writable `/tmp`. If the image writes anywhere else, the task stops at start with the
   path in its log.

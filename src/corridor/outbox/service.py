@@ -20,6 +20,7 @@ from sqlalchemy import (
     and_,
     case,
     delete,
+    exists,
     func,
     literal,
     null,
@@ -236,6 +237,28 @@ async def get_event(session: AsyncSession, event_id: uuid.UUID) -> OutboxEvent |
     rows = await session.execute(select(_events).where(_events.c.id == event_id))
     row = rows.mappings().one_or_none()
     return _event(row) if row is not None else None
+
+
+async def is_queued(session: AsyncSession, topic: str, payload: Mapping[str, Any]) -> bool:
+    """Whether an event of this topic whose payload has these values is still to be
+    handled: pending, or claimed by a worker that is handling it.
+
+    For a caller that would write the event again if nothing is going to handle it: one
+    that is done has been handled, and one that is dead waits for an operator. The payload
+    is matched by containment, so the caller names the values that say what the event is
+    about and need not know the rest. Read without a lock: an event that is being claimed
+    or finished at this moment may be seen either way.
+    """
+    found = await session.execute(
+        select(
+            exists().where(
+                _events.c.topic == topic,
+                or_(_events.c.status == _PENDING, _events.c.status == _PROCESSING),
+                _events.c.payload.contains(dict(payload)),
+            )
+        )
+    )
+    return bool(found.scalar_one())
 
 
 async def list_dead(
