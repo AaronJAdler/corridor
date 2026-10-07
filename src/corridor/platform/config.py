@@ -105,6 +105,11 @@ class Settings(BaseSettings):
     bank_rail_webhook_secrets: list[SecretStr] = Field(default_factory=list)
     custody_webhook_secrets: list[SecretStr] = Field(default_factory=list)
 
+    # What a transfer between users costs the sender: basis points of the amount, rounded
+    # down, and never less than the minimum, which is in minor units of the asset sent.
+    transfer_fee_bps: int = Field(default=0, ge=0, le=1000)
+    transfer_fee_min_minor: int = Field(default=0, ge=0)
+
 
 class MigrationSettings(BaseSettings):
     """What a migration run needs, and nothing else: the owner connection and the name of
