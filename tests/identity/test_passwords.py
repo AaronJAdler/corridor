@@ -1,11 +1,13 @@
 """Passwords: hashing, the one-verification rule, and login with its lockout."""
 
 import asyncio
+import hashlib
 import threading
 from datetime import timedelta
 
 import argon2
 import pytest
+from sqlalchemy import text
 
 from corridor import identity
 from corridor.identity import (
@@ -18,7 +20,7 @@ from corridor.identity import (
     WeakPassword,
     validate_password,
 )
-from corridor.platform.clock import ManualClock
+from corridor.platform.clock import ManualClock, utcnow
 from corridor.platform.config import Settings
 from corridor.platform.db import Database
 from corridor.platform.ids import new_id
@@ -259,19 +261,65 @@ async def candidate(db: Database, maria: User) -> LoginCandidate:
     return found
 
 
+# Where the attempts in these tests come from, unless a test says otherwise.
+CLIENT = "203.0.113.7"
+ELSEWHERE = "198.51.100.23"
+EMAIL = "maria@example.com"
+
+
 async def attempt(
-    db: Database, candidate: LoginCandidate | None, password_ok: bool, settings: Settings
+    db: Database,
+    candidate: LoginCandidate | None,
+    password_ok: bool,
+    settings: Settings,
+    *,
+    email: str = EMAIL,
+    client: str = CLIENT,
 ) -> LoginOutcome:
     """The last step of a login in a transaction of its own, as the HTTP handler runs it."""
     return await db.run(
-        lambda session: identity.complete_login(session, candidate, password_ok, settings=settings)
+        lambda session: identity.complete_login(
+            session, candidate, password_ok, email=email, client=client, settings=settings
+        )
     )
 
 
-async def counters(db: Database, user: User) -> tuple[int, object]:
+def digest(email: str) -> str:
+    """What failures to an address are counted under, worked out here from the rule."""
+    return hashlib.sha256(email.strip().lower().encode()).hexdigest()
+
+
+async def counters(db: Database, email: str = EMAIL, client: str = CLIENT) -> tuple[int, object]:
+    """The failures counted against an address from one client, and until when they lock
+    that client out. Nothing counted is ``(0, None)``."""
     async with db.transaction() as session:
-        row = await user_row(session, user.id)
-    return row["failed_logins"], row["locked_until"]
+        row = (
+            await session.execute(
+                text(
+                    "SELECT failed_logins, locked_until FROM login_lockouts"
+                    " WHERE email_hash = :hash AND client = :client"
+                ),
+                {"hash": digest(email), "client": client},
+            )
+        ).one_or_none()
+    return (0, None) if row is None else (row.failed_logins, row.locked_until)
+
+
+async def slowed(db: Database, email: str = EMAIL) -> int:
+    """The recent failures counted against an address from everywhere."""
+    async with db.transaction() as session:
+        counted = (
+            await session.execute(
+                text("SELECT failed_logins FROM login_throttles WHERE email_hash = :hash"),
+                {"hash": digest(email)},
+            )
+        ).scalar_one_or_none()
+    return int(counted or 0)
+
+
+async def delay(db: Database, settings: Settings, email: str = EMAIL) -> float:
+    async with db.transaction() as session:
+        return await identity.login_delay_seconds(session, email, settings=settings)
 
 
 async def test_a_login_candidate_is_found_by_email_in_any_case(db: Database, maria: User) -> None:
@@ -308,10 +356,12 @@ async def test_an_unknown_email_is_refused_whatever_the_password_check_said(
     db: Database, settings: Settings, maria: User
 ) -> None:
     for password_ok in (False, True):
-        assert await attempt(db, None, password_ok, settings) == LoginOutcome(
-            user=None, user_id=None, reason="unknown_email", locked_until=None
-        )
-    assert await counters(db, maria) == (0, None)
+        assert await attempt(
+            db, None, password_ok, settings, email="nobody@example.com"
+        ) == LoginOutcome(user=None, user_id=None, reason="unknown_email", locked_until=None)
+    # Counted against the address that was typed, and against nobody else's.
+    assert await counters(db, "nobody@example.com") == (2, None)
+    assert await counters(db) == (0, None)
 
 
 async def test_a_candidate_whose_account_is_gone_is_an_unknown_email(
@@ -330,7 +380,7 @@ async def test_the_right_password_logs_in(
     assert await attempt(db, candidate, True, settings) == LoginOutcome(
         user=maria, user_id=maria.id, reason=None, locked_until=None
     )
-    assert await counters(db, maria) == (0, None)
+    assert await counters(db) == (0, None)
 
 
 async def test_a_wrong_password_is_counted(
@@ -343,13 +393,17 @@ async def test_a_wrong_password_is_counted(
     assert first == LoginOutcome(
         user=None, user_id=maria.id, reason="bad_password", locked_until=None
     )
-    assert await counters(db, maria) == (1, None)
+    assert await counters(db) == (1, None)
 
     await attempt(db, candidate, False, strict)
 
-    assert await counters(db, maria) == (2, None)
+    assert await counters(db) == (2, None)
     async with db.transaction() as session:
-        assert (await user_row(session, maria.id))["updated_at"] == clock.now()
+        counted_at = await session.execute(text("SELECT updated_at FROM login_lockouts"))
+        assert counted_at.scalar_one() == clock.now()
+        # The user's own row is not what is written to: a stranger's guesses change
+        # nothing about the account.
+        assert (await user_row(session, maria.id))["updated_at"] == maria.created_at
 
 
 async def test_reaching_the_threshold_locks_the_account(
@@ -364,7 +418,7 @@ async def test_reaching_the_threshold_locks_the_account(
     assert third == LoginOutcome(
         user=None, user_id=maria.id, reason="bad_password", locked_until=locked_until
     )
-    assert await counters(db, maria) == (3, locked_until)
+    assert await counters(db) == (3, locked_until)
 
 
 async def test_each_failure_after_the_threshold_doubles_the_lock_up_to_the_maximum(
@@ -380,7 +434,7 @@ async def test_each_failure_after_the_threshold_doubles_the_lock_up_to_the_maxim
 
         locked_until = clock.now() + timedelta(seconds=seconds)
         assert (outcome.reason, outcome.locked_until) == ("bad_password", locked_until), seconds
-        assert await counters(db, maria) == (failures, locked_until)
+        assert await counters(db) == (failures, locked_until)
         clock.advance(seconds=seconds)
 
 
@@ -398,7 +452,7 @@ async def test_the_right_password_during_a_lock_is_refused_and_changes_nothing(
         user=None, user_id=maria.id, reason="locked", locked_until=locked_until
     )
     # Neither reset nor extended.
-    assert await counters(db, maria) == (3, locked_until)
+    assert await counters(db) == (3, locked_until)
 
 
 async def test_a_wrong_password_during_a_lock_is_not_counted_and_does_not_extend_it(
@@ -414,7 +468,7 @@ async def test_a_wrong_password_during_a_lock_is_not_counted_and_does_not_extend
     assert outcome == LoginOutcome(
         user=None, user_id=maria.id, reason="locked", locked_until=locked_until
     )
-    assert await counters(db, maria) == (3, locked_until)
+    assert await counters(db) == (3, locked_until)
 
 
 async def test_a_lock_runs_out_with_time(
@@ -439,11 +493,11 @@ async def test_a_successful_login_resets_the_counter_and_clears_the_lock(
 
     assert (await attempt(db, candidate, True, strict)).user == maria
 
-    assert await counters(db, maria) == (0, None)
+    assert await counters(db) == (0, None)
     # The count starts again from nothing: two more failures do not lock.
     for _ in range(2):
         assert (await attempt(db, candidate, False, strict)).locked_until is None
-    assert await counters(db, maria) == (2, None)
+    assert await counters(db) == (2, None)
 
 
 async def test_30_concurrent_wrong_passwords_are_all_counted(
@@ -454,7 +508,7 @@ async def test_30_concurrent_wrong_passwords_are_all_counted(
     outcomes = await asyncio.gather(*(attempt(db, candidate, False, patient) for _ in range(30)))
 
     assert [outcome.reason for outcome in outcomes] == ["bad_password"] * 30
-    assert await counters(db, maria) == (30, None)
+    assert await counters(db) == (30, None)
 
 
 async def test_concurrent_wrong_passwords_lock_the_account_at_exactly_the_threshold(
@@ -466,7 +520,7 @@ async def test_concurrent_wrong_passwords_lock_the_account_at_exactly_the_thresh
         sorted(str(outcome.reason) for outcome in outcomes)
         == ["bad_password"] * 3 + ["locked"] * 17
     )
-    assert await counters(db, maria) == (3, clock.now() + timedelta(seconds=60))
+    assert await counters(db) == (3, clock.now() + timedelta(seconds=60))
 
 
 async def test_a_closed_account_cannot_log_in(
@@ -482,7 +536,9 @@ async def test_a_closed_account_cannot_log_in(
         assert await attempt(db, candidate, password_ok, settings) == LoginOutcome(
             user=None, user_id=maria.id, reason="closed", locked_until=None
         )
-    assert await counters(db, maria) == (0, None)
+    # Counted as any failure is, so that what a closed account's address does next, lock
+    # and slow down, is what every other address does.
+    assert await counters(db) == (2, None)
 
 
 async def test_a_restricted_account_can_still_log_in(
@@ -492,3 +548,292 @@ async def test_a_restricted_account_can_still_log_in(
         restricted = await identity.restrict_user(session, maria.id, "deposit returned")
 
     assert (await attempt(db, candidate, True, settings)).user == restricted
+
+
+# --- the lock is one client's ----------------------------------------------------------------
+
+
+async def test_failures_from_one_client_do_not_lock_another_out(
+    db: Database, strict: Settings, clock: ManualClock, maria: User, candidate: LoginCandidate
+) -> None:
+    # A stranger who knows the address and nothing else fails until they are locked out.
+    for _ in range(3):
+        await attempt(db, candidate, False, strict, client=ELSEWHERE)
+    assert (await attempt(db, candidate, True, strict, client=ELSEWHERE)).reason == "locked"
+
+    # The owner, from where the owner is, logs in with the right password.
+    outcome = await attempt(db, candidate, True, strict)
+
+    assert outcome.user == maria
+
+
+async def test_the_owner_logging_in_does_not_let_a_locked_out_client_back_in(
+    db: Database, strict: Settings, clock: ManualClock, maria: User, candidate: LoginCandidate
+) -> None:
+    for _ in range(3):
+        await attempt(db, candidate, False, strict, client=ELSEWHERE)
+    locked_until = clock.now() + timedelta(seconds=60)
+
+    assert (await attempt(db, candidate, True, strict)).user == maria
+
+    assert await counters(db, client=ELSEWHERE) == (3, locked_until)
+    assert (await attempt(db, candidate, True, strict, client=ELSEWHERE)).reason == "locked"
+
+
+async def test_each_client_is_counted_on_its_own(
+    db: Database, strict: Settings, maria: User, candidate: LoginCandidate
+) -> None:
+    for _ in range(2):
+        await attempt(db, candidate, False, strict)
+        await attempt(db, candidate, False, strict, client=ELSEWHERE)
+
+    # Four failures in all, and neither client has reached three.
+    assert await counters(db) == (2, None)
+    assert await counters(db, client=ELSEWHERE) == (2, None)
+
+
+async def test_each_address_is_counted_on_its_own(
+    db: Database, strict: Settings, maria: User, candidate: LoginCandidate
+) -> None:
+    for _ in range(3):
+        await attempt(db, None, False, strict, email="joao@example.com")
+
+    assert (await attempt(db, candidate, True, strict)).user == maria
+
+
+async def test_an_address_nobody_registered_locks_exactly_as_a_registered_one_does(
+    db: Database, strict: Settings, clock: ManualClock, maria: User, candidate: LoginCandidate
+) -> None:
+    unknown = "nobody@example.com"
+
+    real = [await attempt(db, candidate, False, strict) for _ in range(4)]
+    made_up = [await attempt(db, None, False, strict, email=unknown) for _ in range(4)]
+
+    assert [(o.reason, o.locked_until) for o in real] == [
+        ("bad_password", None),
+        ("bad_password", None),
+        ("bad_password", clock.now() + timedelta(seconds=60)),
+        ("locked", clock.now() + timedelta(seconds=60)),
+    ]
+    # The same counts and the same lock. Only the reason, which goes to the audit log
+    # and never to the client, says there was nobody there.
+    assert [o.locked_until for o in made_up] == [o.locked_until for o in real]
+    assert [o.reason for o in made_up] == ["unknown_email"] * 3 + ["locked"]
+    assert [o.user_id for o in made_up] == [None] * 4
+    assert await counters(db, unknown) == await counters(db)
+    assert await slowed(db, unknown) == await slowed(db)
+
+
+async def test_an_address_is_counted_however_it_is_typed(
+    db: Database, strict: Settings, maria: User, candidate: LoginCandidate
+) -> None:
+    for typed in ("maria@example.com", "  MARIA@Example.com ", "Maria@example.COM"):
+        await attempt(db, candidate, False, strict, email=typed)
+
+    assert (await counters(db))[0] == 3
+
+
+# --- the delay is everyone's -----------------------------------------------------------------
+
+
+@pytest.fixture
+def throttled(settings: Settings) -> Settings:
+    """Slow an address down after four failures from anywhere: by half a second, doubling
+    to four seconds at most, counted over ten minutes. No client is ever locked out."""
+    return settings.model_copy(
+        update={
+            "login_lockout_threshold": 1000,
+            "login_throttle_threshold": 4,
+            "login_throttle_base_seconds": 0.5,
+            "login_throttle_max_seconds": 4.0,
+            "login_throttle_window_seconds": 600,
+        }
+    )
+
+
+async def fail_from_many_clients(
+    db: Database, candidate: LoginCandidate | None, settings: Settings, times: int, **more: str
+) -> None:
+    for n in range(times):
+        await attempt(db, candidate, False, settings, client=f"198.51.100.{n}", **more)
+
+
+def test_the_throttle_where_nothing_is_configured() -> None:
+    fields = Settings.model_fields
+
+    # Slower to start than the lock, which is one client's: ten failures against five.
+    assert fields["login_throttle_threshold"].default == 10
+    assert fields["login_lockout_threshold"].default == 5
+    assert fields["login_throttle_base_seconds"].default == 0.5
+    assert fields["login_throttle_max_seconds"].default == 8.0
+    assert fields["login_throttle_window_seconds"].default == 900
+
+
+async def test_an_address_nobody_has_failed_on_is_not_slowed(
+    db: Database, throttled: Settings, maria: User
+) -> None:
+    assert await delay(db, throttled) == 0.0
+
+
+async def test_failures_from_many_clients_slow_the_address_down_from_the_threshold_on(
+    db: Database, throttled: Settings, maria: User, candidate: LoginCandidate
+) -> None:
+    delays = []
+    for n in range(9):
+        delays.append(await delay(db, throttled))
+        await attempt(db, candidate, False, throttled, client=f"198.51.100.{n}")
+
+    # Nothing for the first four attempts, then half a second doubling to the maximum.
+    assert delays == [0.0, 0.0, 0.0, 0.0, 0.5, 1.0, 2.0, 4.0, 4.0]
+    # No single client came anywhere near being locked out.
+    assert await counters(db, client="198.51.100.0") == (1, None)
+
+
+async def test_the_right_password_is_delayed_and_not_refused(
+    db: Database, throttled: Settings, maria: User, candidate: LoginCandidate
+) -> None:
+    await fail_from_many_clients(db, candidate, throttled, 6)
+
+    held_back = await delay(db, throttled)
+    outcome = await attempt(db, candidate, True, throttled)
+
+    assert held_back == 2.0
+    assert outcome == LoginOutcome(user=maria, user_id=maria.id, reason=None, locked_until=None)
+
+
+async def test_the_owner_logging_in_ends_the_delay(
+    db: Database, throttled: Settings, maria: User, candidate: LoginCandidate
+) -> None:
+    await fail_from_many_clients(db, candidate, throttled, 6)
+
+    await attempt(db, candidate, True, throttled)
+
+    assert await delay(db, throttled) == 0.0
+    assert await slowed(db) == 0
+
+
+async def test_failures_older_than_the_window_are_forgotten(
+    db: Database, throttled: Settings, clock: ManualClock, maria: User, candidate: LoginCandidate
+) -> None:
+    await fail_from_many_clients(db, candidate, throttled, 6)
+
+    clock.advance(seconds=599)
+    still = await delay(db, throttled)
+    clock.advance(seconds=1)
+    after = await delay(db, throttled)
+    # And the count starts again from nothing with the next failure.
+    await attempt(db, candidate, False, throttled)
+
+    assert (still, after) == (2.0, 0.0)
+    assert await slowed(db) == 1
+
+
+async def test_the_window_runs_from_the_last_failure(
+    db: Database, throttled: Settings, clock: ManualClock, maria: User, candidate: LoginCandidate
+) -> None:
+    await fail_from_many_clients(db, candidate, throttled, 4)
+    clock.advance(seconds=400)
+    await attempt(db, candidate, False, throttled)
+    clock.advance(seconds=400)
+
+    # Eight hundred seconds after the first failure, four hundred after the last.
+    assert await delay(db, throttled) == 1.0
+
+
+async def test_an_address_nobody_registered_is_slowed_exactly_as_a_registered_one_is(
+    db: Database, throttled: Settings, maria: User, candidate: LoginCandidate
+) -> None:
+    unknown = "nobody@example.com"
+    await fail_from_many_clients(db, candidate, throttled, 6)
+    await fail_from_many_clients(db, None, throttled, 6, email=unknown)
+
+    # Otherwise failing a few times and timing the answer would say which addresses exist.
+    assert await delay(db, throttled, unknown) == await delay(db, throttled) == 2.0
+
+
+async def test_a_closed_accounts_address_is_slowed_exactly_as_any_other_is(
+    db: Database, throttled: Settings, maria: User, candidate: LoginCandidate
+) -> None:
+    async with db.transaction() as session:
+        await close_account(session, maria.id)
+
+    for n in range(6):
+        await attempt(db, candidate, True, throttled, client=f"198.51.100.{n}")
+
+    assert await delay(db, throttled) == 2.0
+
+
+async def test_an_attempt_refused_by_a_lock_is_not_counted_towards_the_delay(
+    db: Database, strict: Settings, maria: User, candidate: LoginCandidate
+) -> None:
+    for _ in range(3):
+        await attempt(db, candidate, False, strict)
+
+    for _ in range(5):
+        assert (await attempt(db, candidate, False, strict)).reason == "locked"
+
+    assert await slowed(db) == 3
+
+
+async def test_the_delay_is_bounded_however_long_the_attack(
+    db: Database, throttled: Settings, maria: User, candidate: LoginCandidate
+) -> None:
+    async with db.transaction() as session:
+        await session.execute(
+            text(
+                "INSERT INTO login_throttles (email_hash, failed_logins, last_failed_at)"
+                " VALUES (:hash, 2000000000, :now)"
+            ),
+            {"hash": digest(EMAIL), "now": utcnow()},
+        )
+
+    assert await delay(db, throttled) == 4.0
+
+
+async def test_30_concurrent_failures_from_30_clients_are_all_counted_towards_the_delay(
+    db: Database, throttled: Settings, maria: User, candidate: LoginCandidate
+) -> None:
+    await asyncio.gather(
+        *(attempt(db, candidate, False, throttled, client=f"198.51.100.{n}") for n in range(30))
+    )
+
+    assert await slowed(db) == 30
+
+
+# --- old counts ------------------------------------------------------------------------------
+
+
+async def test_counts_nothing_has_added_to_since_the_cutoff_are_purged_and_only_those(
+    db: Database, strict: Settings, clock: ManualClock, maria: User, candidate: LoginCandidate
+) -> None:
+    await attempt(db, None, False, strict, email="old@example.com")
+    clock.advance(seconds=1)
+    cutoff = clock.now()
+    await attempt(db, None, False, strict, email="on-the-line@example.com")
+    clock.advance(seconds=1)
+    await attempt(db, candidate, False, strict)
+
+    async with db.transaction() as session:
+        purged = await identity.purge_login_failures(session, older_than=cutoff)
+
+    # One row of each table for the old address.
+    assert purged == 2
+    assert await counters(db, "old@example.com") == (0, None)
+    assert await slowed(db, "old@example.com") == 0
+    assert (await counters(db, "on-the-line@example.com"))[0] == 1
+    assert await slowed(db, "on-the-line@example.com") == 1
+    assert (await counters(db))[0] == 1
+
+
+async def test_a_count_that_still_locks_a_client_out_is_not_purged(
+    db: Database, strict: Settings, clock: ManualClock, maria: User, candidate: LoginCandidate
+) -> None:
+    for _ in range(3):
+        await attempt(db, candidate, False, strict)
+    locked_until = clock.now() + timedelta(seconds=60)
+
+    async with db.transaction() as session:
+        # A cutoff after the last failure and before the lock runs out.
+        await identity.purge_login_failures(session, older_than=clock.now() + timedelta(seconds=30))
+
+    assert await counters(db) == (3, locked_until)

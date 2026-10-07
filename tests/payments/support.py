@@ -18,6 +18,9 @@ from tests.identity.support import add_user
 from tests.support.ledger import fund
 from tests.support.providers import ACCOUNT_NUMBER, ROUTING_NUMBER
 
+# How many bank accounts a user may save where nothing is configured.
+MAX_BENEFICIARIES: int = Settings.model_fields["max_beneficiaries_per_user"].default
+
 
 async def add_person(session: AsyncSession, name: str) -> User:
     """A registered user with a wallet in every asset, as registration over HTTP leaves one."""
@@ -188,6 +191,7 @@ async def add_beneficiary(
     account_number: str = ACCOUNT_NUMBER,
     routing_number: str | None = ROUTING_NUMBER,
     key: str | None = None,
+    limit: int = MAX_BENEFICIARIES,
 ) -> Beneficiary:
     """A saved bank account of the user's, registered with the simulated bank."""
     return await payments.create_beneficiary(
@@ -199,6 +203,7 @@ async def add_beneficiary(
         account_number=account_number,
         routing_number=routing_number,
         idempotency_key=key or str(new_id()),
+        limit=limit,
     )
 
 

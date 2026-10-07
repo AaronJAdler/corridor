@@ -8,7 +8,7 @@ show the user which account it is.
 import uuid
 from typing import Final, cast
 
-from sqlalchemy import RowMapping, Table, select
+from sqlalchemy import RowMapping, Table, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +18,7 @@ from corridor.payments.deposits import position_of
 from corridor.payments.errors import (
     AccountNotActive,
     BeneficiaryKeyReused,
+    BeneficiaryLimitReached,
     BeneficiaryRejected,
     InvalidBeneficiaryAccount,
     ProviderUnavailable,
@@ -26,7 +27,7 @@ from corridor.payments.errors import (
 from corridor.payments.models import BeneficiaryRow
 from corridor.payments.types import Beneficiary
 from corridor.platform.clock import utcnow
-from corridor.platform.db import Database
+from corridor.platform.db import Database, advisory_xact_lock, lock_key
 from corridor.platform.ids import new_id
 from corridor.platform.logging import get_logger
 from corridor.platform.money import get_asset
@@ -40,6 +41,10 @@ _beneficiaries = cast(Table, BeneficiaryRow.__table__)
 
 CURSOR_KIND: Final = "beneficiaries"
 
+# The namespace of the per-user lock that makes the count of a user's beneficiaries and
+# the insert of one more a single step.
+_COUNT_LOCK: Final = "beneficiaries"
+
 
 async def create_beneficiary(
     db: Database,
@@ -51,6 +56,7 @@ async def create_beneficiary(
     account_number: str,
     routing_number: str | None,
     idempotency_key: str,
+    limit: int,
 ) -> Beneficiary:
     """Register one of the user's bank accounts with the bank, and keep its token.
 
@@ -60,15 +66,27 @@ async def create_beneficiary(
     repeated request find the account it already registered instead of a second one.
 
     Only an active account registers one, and that is decided, in a transaction that has
-    ended, before the bank is given any account details.
+    ended, before the bank is given any account details. So is whether the user already
+    has ``limit`` of them, which is as many as a user may have: the bank is not asked to
+    register what would not be kept. The count is taken again, under a lock, when the
+    answer is stored, which is what holds the limit when two requests arrive together.
     """
     identity.require_scope(principal, Scope.BENEFICIARIES_WRITE)
     if get_asset(asset).kind != "fiat":
         raise UnsupportedBeneficiaryAsset
     user_id = principal.user_id
-    owner = await db.run(lambda session: identity.get_user(session, user_id))
+
+    async def standing(session: AsyncSession) -> tuple[identity.User, int]:
+        return await identity.get_user(session, user_id), await _count(session, user_id)
+
+    owner, saved = await db.run(standing)
     if owner.status != "active":
         raise AccountNotActive
+    if saved >= limit:
+        # Before the bank is asked, so that a full list cannot be used to make the bank
+        # register accounts without end. A repeat of the request that saved the last one
+        # is refused here like any other: the account it asked for is in the list.
+        raise BeneficiaryLimitReached(limit)
     if bank is None:
         raise ProviderUnavailable
 
@@ -101,6 +119,9 @@ async def create_beneficiary(
         raise ProviderUnavailable from None
 
     async def store(session: AsyncSession) -> Beneficiary:
+        # One at a time for a user, so that two requests which both found room cannot
+        # both take the last place.
+        await advisory_xact_lock(session, [lock_key(_COUNT_LOCK, user_id)])
         inserted = await session.execute(
             pg_insert(_beneficiaries)
             .values(
@@ -128,6 +149,10 @@ async def create_beneficiary(
         if beneficiary.user_id != user_id:
             # The bank gave this user a token that is another user's. Never hand it over.
             raise RuntimeError(f"{bank.name} answered with a beneficiary that is not the caller's")
+        if created and await _count(session, user_id) > limit:
+            # Another request took the last place while the bank was being asked. Raising
+            # undoes the insert; the bank keeps an account that nothing here refers to.
+            raise BeneficiaryLimitReached(limit)
         if created:
             await audit.record(
                 session,
@@ -145,6 +170,13 @@ async def create_beneficiary(
         return beneficiary
 
     return await db.run(store)
+
+
+async def _count(session: AsyncSession, user_id: uuid.UUID) -> int:
+    counted = await session.execute(
+        select(func.count()).select_from(_beneficiaries).where(_beneficiaries.c.user_id == user_id)
+    )
+    return int(counted.scalar_one())
 
 
 async def list_beneficiaries(

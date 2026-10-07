@@ -118,6 +118,10 @@ async def _authenticate_access_token(token: str, container: Container) -> Princi
     # token is taken at its word and lasts until it expires.
     if await identity.is_session_revoked(container.redis, claims.session_id):
         raise identity.InvalidToken
+    # What the token says was true when it was signed. PostgreSQL is asked what is true
+    # now, on every request: a closed account, a changed role or tokens that were ended
+    # refuse it at once, whether or not Redis is there to say so.
+    await container.db.run(lambda session: identity.check_access(session, claims))
     return Principal.for_user(claims.user_id, claims.role, claims.session_id)
 
 

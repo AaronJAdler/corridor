@@ -125,6 +125,7 @@ PRODUCTION: dict[str, object] = {
     "fx_rates_url": "https://rates.example",
     "bank_rail_webhook_secrets": [LONG_ENOUGH],
     "custody_webhook_secrets": [LONG_ENOUGH + "x"],
+    "api_key_hash_key": LONG_ENOUGH + "y",
 }
 
 UNFIT = [
@@ -138,6 +139,7 @@ UNFIT = [
     ({"bank_rail_webhook_secrets": []}, "bank_rail_webhook_secrets"),
     ({"custody_webhook_secrets": []}, "custody_webhook_secrets"),
     ({"log_level": "DEBUG"}, "log_level"),
+    ({"api_key_hash_key": None}, "api_key_hash_key"),
 ]
 
 

@@ -11,6 +11,7 @@ from corridor.identity import InsufficientScope, Scope, User
 from corridor.payments import (
     AccountNotActive,
     BeneficiaryKeyReused,
+    BeneficiaryLimitReached,
     BeneficiaryRejected,
     InvalidBeneficiaryAccount,
     ProviderUnavailable,
@@ -19,7 +20,14 @@ from corridor.platform.db import Database
 from corridor.platform.money import UnknownAsset
 from corridor.providers import Beneficiary as ProviderBeneficiary
 from corridor.providers import SimBank
-from tests.payments.support import acting_as, add_beneficiary, agent_of, count, rows
+from tests.payments.support import (
+    MAX_BENEFICIARIES,
+    acting_as,
+    add_beneficiary,
+    agent_of,
+    count,
+    rows,
+)
 from tests.support.providers import ACCOUNT_NUMBER, CLABE, ROUTING_NUMBER, Sim
 
 BENEFICIARIES = "/bank/v1/beneficiaries"
@@ -178,6 +186,7 @@ async def test_without_a_bank_configured_beneficiaries_are_unavailable(
             account_number=ACCOUNT_NUMBER,
             routing_number=ROUTING_NUMBER,
             idempotency_key="key-1",
+            limit=MAX_BENEFICIARIES,
         )
 
 
@@ -213,6 +222,7 @@ async def test_beneficiaries_need_their_scopes(
             account_number=ACCOUNT_NUMBER,
             routing_number=ROUTING_NUMBER,
             idempotency_key="key-1",
+            limit=MAX_BENEFICIARIES,
         )
     async with db.transaction() as session:
         with pytest.raises(InsufficientScope):
@@ -274,3 +284,77 @@ async def test_a_user_whose_restriction_was_lifted_registers_a_beneficiary_again
         await identity.lift_restriction(session, maria.id)
 
     assert (await add_beneficiary(db, bank, maria)).user_id == maria.id
+
+
+# --- how many a user may save ------------------------------------------------------------------
+
+
+def test_a_user_may_save_50_accounts_unless_configured() -> None:
+    assert MAX_BENEFICIARIES == 50
+
+
+def account_numbers(how_many: int) -> list[str]:
+    return [f"{1_000_000 + n:09d}" for n in range(how_many)]
+
+
+async def test_a_user_with_as_many_accounts_as_allowed_is_refused_another_and_the_bank_is_not_asked(
+    db: Database, sim: Sim, bank: SimBank, maria: User
+) -> None:
+    for number in account_numbers(3):
+        await add_beneficiary(db, bank, maria, account_number=number, limit=3)
+    asked_before = len(sim.recorder.requests)
+
+    with pytest.raises(BeneficiaryLimitReached) as refusal:
+        await add_beneficiary(db, bank, maria, account_number="555000111", limit=3)
+
+    assert (refusal.value.status, refusal.value.code) == (409, "beneficiary_limit_reached")
+    assert refusal.value.extra == {"limit": 3}
+    assert "3" in str(refusal.value.detail)
+    assert await count(db, "beneficiaries") == 3
+    # Refused before the account's details went anywhere.
+    assert len(sim.recorder.requests) == asked_before
+
+
+async def test_one_short_of_the_limit_another_account_is_saved(
+    db: Database, bank: SimBank, maria: User
+) -> None:
+    for number in account_numbers(2):
+        await add_beneficiary(db, bank, maria, account_number=number, limit=3)
+
+    await add_beneficiary(db, bank, maria, account_number="555000111", limit=3)
+
+    assert await count(db, "beneficiaries") == 3
+
+
+async def test_the_limit_is_each_users_own(
+    db: Database, bank: SimBank, maria: User, joao: User
+) -> None:
+    for number in account_numbers(2):
+        await add_beneficiary(db, bank, maria, account_number=number, limit=2)
+
+    await add_beneficiary(db, bank, joao, limit=2)
+
+    assert await count(db, "beneficiaries") == 3
+
+
+async def test_requests_that_arrive_together_cannot_take_more_places_than_there_are(
+    db: Database, bank: SimBank, maria: User
+) -> None:
+    # All of them find room before any has stored anything. The count taken again, under
+    # the user's lock, when each answer is stored is what holds the limit.
+    numbers = account_numbers(8)
+
+    results = await asyncio.gather(
+        *(add_beneficiary(db, bank, maria, account_number=n, limit=3) for n in numbers),
+        return_exceptions=True,
+    )
+
+    saved = [result for result in results if not isinstance(result, BaseException)]
+    refused = [result for result in results if isinstance(result, BaseException)]
+    assert len(saved) == 3
+    assert all(isinstance(result, BeneficiaryLimitReached) for result in refused)
+    assert await count(db, "beneficiaries") == 3
+    # Only those that were stored were audited.
+    assert (
+        len(await rows(db, "SELECT 1 FROM audit_events WHERE action = 'beneficiary.created'")) == 3
+    )

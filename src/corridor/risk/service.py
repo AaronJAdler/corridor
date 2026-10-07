@@ -6,11 +6,13 @@ is what makes the daily limit hold: balance rows are per asset and the limit is 
 without it two movements in two assets would each see the day as the other left it.
 """
 
+import uuid
 from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from corridor import identity
+from corridor.platform.db import advisory_xact_lock, lock_key
 from corridor.risk import limits
 from corridor.risk.errors import CounterpartyUnavailable, UserRestricted
 from corridor.risk.types import Decision, MoneyMovement
@@ -46,3 +48,18 @@ async def authorize(session: AsyncSession, movement: MoneyMovement) -> Decision:
 # One name for the per-user lock that serialises a user's outgoing money movements, so
 # transfers, withdrawals, conversions and returns all queue behind each other.
 MONEY_OUT_LOCK: Final = "money_out"
+
+
+async def restrict_user(session: AsyncSession, user_id: uuid.UUID, reason: str) -> identity.User:
+    """Restrict a user, under that user's money-out lock.
+
+    A movement of money out reads the account's standing under this lock and keeps the
+    lock until it commits. Taking it here means the restriction waits for any movement
+    that is under way, and that every movement after it sees the restriction: once this
+    commits, nothing that read "active" is still on its way out.
+
+    The lock is taken before the user's row is touched, which is where the lock order
+    puts it. A caller that already holds it is not made to wait for itself.
+    """
+    await advisory_xact_lock(session, [lock_key(MONEY_OUT_LOCK, user_id)])
+    return await identity.restrict_user(session, user_id, reason)

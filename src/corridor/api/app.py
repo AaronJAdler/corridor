@@ -9,7 +9,7 @@ from corridor import __version__, identity, webhooks
 from corridor.api import health
 from corridor.api.container import Container
 from corridor.api.errors import install_error_handlers
-from corridor.api.middleware import RequestContextMiddleware
+from corridor.api.middleware import BodyLimitMiddleware, RequestContextMiddleware
 from corridor.api.ratelimit import RateLimitMiddleware
 from corridor.api.routers import ROUTERS
 from corridor.platform.config import Settings, load_settings
@@ -76,7 +76,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url="/openapi.json" if interactive_docs else None,
     )
     # The last middleware added is the outermost. The request context goes on last so that
-    # a request refused by the rate limiter still has an id and an access-log line.
+    # a request refused by the rate limiter still has an id and an access-log line. The
+    # body limit is innermost of the three: a client that is over its rate is refused
+    # without its body being looked at.
+    app.add_middleware(BodyLimitMiddleware)
     app.add_middleware(RateLimitMiddleware)
     app.add_middleware(RequestContextMiddleware)
     install_error_handlers(app)

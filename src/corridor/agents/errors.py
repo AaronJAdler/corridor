@@ -37,6 +37,41 @@ class AgentRevoked(Conflict):
         super().__init__("This agent has been revoked, and that cannot be undone.")
 
 
+class AgentLimitReached(Conflict):
+    """The user has as many agents as a user may have. Revoking one makes room."""
+
+    code = "agent_limit_reached"
+    title = "Agent limit reached"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"An account can have at most {limit} agents that are not revoked.", limit=limit
+        )
+
+
+class AgentKeyLimitReached(Conflict):
+    """The agent has as many working keys as an agent may have. Revoking one makes room."""
+
+    code = "agent_key_limit_reached"
+    title = "Agent key limit reached"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"An agent can have at most {limit} working keys.", limit=limit)
+
+
+class ApprovalLimitReached(Conflict):
+    """The agent has as many requests waiting for its owner as an agent may have. Nothing
+    was recorded; deciding one, or letting it expire, makes room."""
+
+    code = "approval_limit_reached"
+    title = "Approval request limit reached"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(
+            f"An agent can have at most {limit} requests waiting for approval.", limit=limit
+        )
+
+
 class InvalidScopes(InvalidRequest):
     code = "invalid_scopes"
     title = "Invalid scopes"

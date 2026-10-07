@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Any, Final, cast
 
-from sqlalchemy import RowMapping, Table, insert, select, update
+from sqlalchemy import RowMapping, Table, func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from corridor import audit, identity, payments, risk
@@ -26,6 +26,7 @@ from corridor.agents.errors import (
     AgentNotActive,
     ApprovalAlreadyDecided,
     ApprovalExpired,
+    ApprovalLimitReached,
     ApprovalNotFound,
 )
 from corridor.agents.models import AgentApprovalRequestRow
@@ -57,6 +58,10 @@ _requests = cast(Table, AgentApprovalRequestRow.__table__)
 
 CURSOR_KIND: Final = "approvals"
 
+# The namespace of the per-agent lock that makes the count of an agent's waiting requests
+# and the insert of one more a single step.
+_COUNT_LOCK: Final = "approval_requests"
+
 # How long an owner has to decide. After it the request can no longer be approved.
 APPROVAL_TTL: Final = timedelta(hours=24)
 
@@ -82,16 +87,36 @@ _SCOPE_OF: Final = {
 
 
 async def request_approval(
-    session: AsyncSession, principal: Principal, intent: TransferIntent | WithdrawalIntent
+    session: AsyncSession,
+    principal: Principal,
+    intent: TransferIntent | WithdrawalIntent,
+    *,
+    settings: Settings,
 ) -> ApprovalRequest:
     """Record that an agent asked for a movement its owner has to approve. Nothing moves.
 
     The caller has asked ``check_policy`` and been told the movement requires approval.
+    An agent has at most ``max_pending_approvals_per_agent`` requests waiting at once, so
+    that one cannot bury its owner in questions.
     """
     agent_id = principal.agent_id
     if agent_id is None:
         raise ValueError("only an agent's movement waits for approval")
     identity.require_scope(principal, _SCOPE_OF[intent.kind])
+    # One at a time for an agent, so that two requests cannot both take the last place.
+    await advisory_xact_lock(session, [lock_key(_COUNT_LOCK, agent_id)])
+    waiting = await session.execute(
+        select(func.count())
+        .select_from(_requests)
+        .where(
+            _requests.c.agent_id == agent_id,
+            _requests.c.status == "pending",
+            # One past its time can no longer be approved, and is not waiting for anybody.
+            _requests.c.expires_at > utcnow(),
+        )
+    )
+    if waiting.scalar_one() >= settings.max_pending_approvals_per_agent:
+        raise ApprovalLimitReached(settings.max_pending_approvals_per_agent)
     if isinstance(intent, TransferIntent):
         # Whoever the agent named is found now and kept by id. Nobody there is told as it
         # would be for a transfer, and no owner is asked to approve paying nobody.

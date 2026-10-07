@@ -64,7 +64,17 @@ typecheck = { cmd = "mypy", help = "Strict type check of src" }
 contracts = { cmd = "lint-imports", help = "Check module boundaries" }
 test = { cmd = "pytest", help = "Run the test suite" }
 smoke = { cmd = "python scripts/smoke.py", help = "Boot a real server process and probe it" }
-check = { sequence = ["lint", "typecheck", "contracts", "test"], help = "Every gate, in order" }
+# The suite, recording which lines and branches it ran, and then the two thresholds: one
+# for the whole of corridor and a higher one for the modules that move money. Each is a
+# little under what was measured when it was set (97.5% and 97.7%), so that it fails on a
+# change that arrives without its tests and not on the last decimal place.
+test-cov = { cmd = "pytest --cov --cov-report=", help = "Run the test suite and record coverage" }
+coverage = { sequence = [
+    { cmd = "coverage report --fail-under=94" },
+    { cmd = "coverage report --fail-under=96 --include='*/corridor/ledger/*,*/corridor/payments/*,*/corridor/fx/*,*/corridor/risk/*'" },
+], help = "Fail if coverage is under the thresholds: overall, then the money modules" }
+audit = { cmd = "pip-audit --progress-spinner off --skip-editable", help = "Check the installed dependencies for known vulnerabilities" }
+check = { sequence = ["lint", "typecheck", "contracts", "test-cov", "coverage"], help = "Every gate, in order" }
 
 # --- Lint ------------------------------------------------------------------
 

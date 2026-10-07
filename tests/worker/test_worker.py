@@ -483,13 +483,16 @@ async def test_the_worker_process_handles_pings_and_exits_cleanly_when_signalled
     assert any('"worker.started"' in line for line in events)
     assert any('"worker.stopped"' in line for line in events)
     assert "Traceback" not in output + errors
-    # The hourly purges ran at start-up, through the real jobs.
+    # The hourly jobs ran at start-up, through the real jobs.
     async with db.transaction() as session:
         jobs = await session.execute(text("SELECT name, last_error FROM job_runs ORDER BY name"))
         assert [tuple(row) for row in jobs] == [
+            ("auth.purge_login_failures", None),
             ("fx.purge_unused_quotes", None),
             ("idempotency.purge_expired", None),
+            ("ledger.verify", None),
             ("outbox.purge_finished", None),
+            ("webhooks.redact_payloads", None),
         ]
 
 

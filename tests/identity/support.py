@@ -38,7 +38,9 @@ async def add_user(
 
 
 async def close_account(session: AsyncSession, user_id: uuid.UUID) -> None:
-    """Close an account directly: no service function does it yet."""
+    """Mark an account closed and nothing else, as a statement run by hand would: for the
+    tests of what a closed account's status alone must stop. ``identity.close_user`` also
+    ends the user's sessions and tokens, and has tests of its own."""
     await session.execute(
         text("UPDATE users SET status = 'closed' WHERE id = :id"), {"id": user_id}
     )

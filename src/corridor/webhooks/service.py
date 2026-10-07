@@ -23,6 +23,7 @@ from corridor.platform.config import Settings
 from corridor.platform.db import Database
 from corridor.platform.ids import new_id
 from corridor.platform.logging import get_logger
+from corridor.platform.metrics import WEBHOOK_EVENTS_PROCESSED
 from corridor.webhooks import signature
 from corridor.webhooks.errors import (
     EventNotFound,
@@ -55,6 +56,16 @@ _MAX_EVENT_ID_LENGTH: Final = 255
 _MAX_TYPE_LENGTH: Final = 100
 
 _MALFORMED: Final = "The body is not an event as the provider contract describes one."
+
+# What a provider tells us about a person other than our user: who sent a bank deposit and
+# what they wrote on it, and the address an on-chain deposit came from. They are needed to
+# screen and to book the deposit, which has happened by the time the event is processed.
+PERSONAL_FIELDS: Final = ("sender_name", "reference", "from_address")
+# How many events one call of ``redact_payloads`` deals with at most.
+REDACTION_BATCH: Final = 500
+# The type a metric gives an event no handler knows. A provider chooses the types it
+# sends, and each one would otherwise be a time series of its own.
+_UNHANDLED_TYPE: Final = "unhandled"
 
 # A handler is an entry point: it opens its own transactions, as an outbox handler does.
 WebhookHandler = Callable[[Database, WebhookEvent], Awaitable[None]]
@@ -297,6 +308,9 @@ async def process(db: Database, webhook_event_id: uuid.UUID, registry: WebhookRe
         async with db.transaction() as session:
             await _finish(session, event.id, EventOutcome.IGNORED, utcnow())
         log.info("webhook.ignored", provider=event.provider.value, event_type=event.type)
+        WEBHOOK_EVENTS_PROCESSED.labels(
+            provider=event.provider.value, type=_UNHANDLED_TYPE, outcome=EventOutcome.IGNORED.value
+        ).inc()
         return
 
     await handler(db, event)
@@ -304,3 +318,54 @@ async def process(db: Database, webhook_event_id: uuid.UUID, registry: WebhookRe
     async with db.transaction() as session:
         await _finish(session, event.id, EventOutcome.PROCESSED, utcnow())
     log.info("webhook.processed", provider=event.provider.value, event_type=event.type)
+    WEBHOOK_EVENTS_PROCESSED.labels(
+        provider=event.provider.value, type=event.type, outcome=EventOutcome.PROCESSED.value
+    ).inc()
+
+
+# --- retention -------------------------------------------------------------------------------
+
+
+async def redact_payloads(
+    session: AsyncSession, *, processed_before: datetime, limit: int = REDACTION_BATCH
+) -> int:
+    """Remove the personal fields from the payloads of events processed before
+    ``processed_before``, and say how many events were dealt with.
+
+    The event stays, with everything that says what happened: its id, its type, the
+    amounts and the references to our own rows. An event that was never processed is
+    left whole, because processing it is what reads these fields. At most ``limit``
+    events are dealt with in one call, oldest first, so that one transaction stays short;
+    the caller calls again while a call comes back full.
+    """
+    rows = await session.execute(
+        select(_events.c.id, _events.c.payload)
+        .where(_events.c.processed_at < processed_before, _events.c.redacted_at.is_(None))
+        .order_by(_events.c.processed_at)
+        .limit(limit)
+        # Two workers that run this together take different events instead of waiting.
+        .with_for_update(skip_locked=True)
+    )
+    now = utcnow()
+    redacted = 0
+    for row in rows:
+        await session.execute(
+            update(_events)
+            .where(_events.c.id == row.id)
+            .values(payload=_without_personal_fields(row.payload), redacted_at=now)
+        )
+        redacted += 1
+    return redacted
+
+
+def _without_personal_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    """The payload with each personal field of its data set to null.
+
+    The key is kept, so that the event still has the shape its type has and what is
+    missing can be seen to have been removed.
+    """
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return payload
+    cleaned = {key: None if key in PERSONAL_FIELDS else value for key, value in data.items()}
+    return {**payload, "data": cleaned}

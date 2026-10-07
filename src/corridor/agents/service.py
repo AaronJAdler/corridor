@@ -11,15 +11,17 @@ from datetime import UTC, datetime, timedelta
 from hmac import compare_digest
 from typing import Any, Final, cast
 
-from sqlalchemy import RowMapping, Table, or_, select, update
+from sqlalchemy import RowMapping, Table, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from corridor import audit, identity
 from corridor.agents import keys
 from corridor.agents.errors import (
+    AgentKeyLimitReached,
     AgentKeyNotFound,
     AgentKeysUnavailable,
+    AgentLimitReached,
     AgentNotFound,
     AgentRevoked,
     InvalidExpiry,
@@ -38,6 +40,7 @@ from corridor.agents.types import (
 from corridor.identity import Principal
 from corridor.platform.clock import utcnow
 from corridor.platform.config import Settings
+from corridor.platform.db import advisory_xact_lock, lock_key
 from corridor.platform.ids import new_id
 from corridor.platform.pagination import (
     DEFAULT_LIMIT,
@@ -52,6 +55,10 @@ _agents = cast(Table, AgentRow.__table__)
 _keys = cast(Table, AgentKeyRow.__table__)
 
 CURSOR_KIND: Final = "agents"
+
+# The namespace of the per-owner lock that makes the count of a user's agents and the
+# insert of one more a single step.
+_COUNT_LOCK: Final = "agents"
 
 # What a key that names no row is compared with. No digest is all zeros, so nothing ever
 # matches it; it is there so that an unknown prefix costs the comparison a known one costs.
@@ -74,9 +81,24 @@ _REFUSED_BY_STATUS: Final[dict[str, KeyRefusal]] = {
 # --- agents ----------------------------------------------------------------------------------
 
 
-async def create_agent(session: AsyncSession, principal: Principal, *, name: str) -> Agent:
-    """Create an agent owned by the principal's user. It has no key yet, so it can do nothing."""
+async def create_agent(
+    session: AsyncSession, principal: Principal, *, name: str, settings: Settings
+) -> Agent:
+    """Create an agent owned by the principal's user. It has no key yet, so it can do nothing.
+
+    A user has at most ``max_agents_per_user`` agents that are not revoked. A revoked one
+    is kept for the record and can do nothing, so it takes no place.
+    """
     identity.require_user_session(principal)
+    # One at a time for an owner, so that two requests cannot both take the last place.
+    await advisory_xact_lock(session, [lock_key(_COUNT_LOCK, principal.user_id)])
+    counted = await session.execute(
+        select(func.count())
+        .select_from(_agents)
+        .where(_agents.c.owner_user_id == principal.user_id, _agents.c.status != "revoked")
+    )
+    if counted.scalar_one() >= settings.max_agents_per_user:
+        raise AgentLimitReached(settings.max_agents_per_user)
     agent_id = new_id()
     row = {
         "id": agent_id,
@@ -193,9 +215,22 @@ async def issue_key(
             raise InvalidExpiry("expires_at must be in the future.", field="expires_at")
         # Stored and shown in UTC, like every other time, whatever offset it was given in.
         expires_at = expires_at.astimezone(UTC)
-    agent = await _own_agent(session, principal, agent_id)
+    # Locked, so that two requests for one agent count its keys one after the other.
+    agent = await _own_agent(session, principal, agent_id, lock=True)
     if agent["status"] == "revoked":
         raise AgentRevoked
+    # The keys that work: one that is revoked or has expired opens nothing and takes no place.
+    working = await session.execute(
+        select(func.count())
+        .select_from(_keys)
+        .where(
+            _keys.c.agent_id == agent_id,
+            _keys.c.revoked_at.is_(None),
+            or_(_keys.c.expires_at.is_(None), _keys.c.expires_at > now),
+        )
+    )
+    if working.scalar_one() >= settings.max_keys_per_agent:
+        raise AgentKeyLimitReached(settings.max_keys_per_agent)
 
     for _ in range(_PREFIX_ATTEMPTS):
         generated = keys.generate(settings)

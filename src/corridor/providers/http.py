@@ -22,6 +22,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, SecretStr, Val
 
 from corridor.platform.errors import InvalidRequest
 from corridor.platform.logging import get_logger
+from corridor.platform.metrics import PROVIDER_CALL_SECONDS, PROVIDER_CALLS
 from corridor.platform.money import format_amount, parse_amount
 from corridor.providers.errors import (
     ProviderMisconfigured,
@@ -281,15 +282,20 @@ class ProviderClient:
         outcome: str,
         **extra: str,
     ) -> None:
+        elapsed = time.monotonic() - started
         emit(
             "provider.call",
             provider=self._provider,
             operation=operation,
             status=status,
-            duration_ms=round((time.monotonic() - started) * 1000),
+            duration_ms=round(elapsed * 1000),
             outcome=outcome,
             **extra,
         )
+        # The operation is a name from the adapter's code, never anything a provider or a
+        # client sent, so the labels are a fixed set.
+        PROVIDER_CALLS.labels(provider=self._provider, operation=operation, outcome=outcome).inc()
+        PROVIDER_CALL_SECONDS.labels(provider=self._provider, operation=operation).observe(elapsed)
 
 
 async def _read_capped(response: httpx.Response) -> bytes:

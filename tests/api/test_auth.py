@@ -4,6 +4,7 @@ request has to carry to be let in."""
 import dataclasses
 import json
 import shlex
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -162,16 +163,66 @@ async def test_registering_is_audited(client: httpx.AsyncClient, db: Database) -
     assert event.request_id == response.headers["x-request-id"]
 
 
-async def test_a_taken_email_is_refused_with_409(client: httpx.AsyncClient) -> None:
-    await client.post("/v1/auth/register", json=MARIA)
+async def test_registering_a_taken_email_is_answered_as_a_registration_is_and_creates_nothing(
+    client: httpx.AsyncClient, db: Database
+) -> None:
+    first = await client.post("/v1/auth/register", json=MARIA)
 
-    response = await client.post(
-        "/v1/auth/register", json={**MARIA, "email": "MARIA@example.com", "handle": "maria2"}
+    second = await client.post(
+        "/v1/auth/register",
+        json={**MARIA, "email": " MARIA@example.com", "handle": "Maria2", "display_name": "M"},
     )
 
-    assert response.status_code == 409
-    assert response.headers["content-type"] == PROBLEM_CONTENT_TYPE
-    assert response.json()["code"] == "email_taken"
+    # Told "already registered", anyone could ask which addresses have an account.
+    assert second.status_code == 201
+    assert second.headers["content-type"] == first.headers["content-type"]
+    body = second.json()
+    assert set(body) == set(first.json())
+    # What registering those details would have returned, normalised the same way.
+    assert {key: body[key] for key in body if key not in ("id", "created_at")} == {
+        "email": "maria@example.com",
+        "handle": "maria2",
+        "display_name": "M",
+        "role": "user",
+        "kyc_tier": 0,
+        "status": "active",
+    }
+    # It is nobody: the id names no user, and the real one is as it was.
+    assert body["id"] != first.json()["id"]
+    assert uuid.UUID(body["id"]).version == 7
+    async with db.transaction() as session:
+        users = (await session.execute(text("SELECT id::text, handle FROM users"))).all()
+    assert [tuple(row) for row in users] == [(first.json()["id"], "maria")]
+
+
+async def test_the_details_of_a_registration_that_was_not_made_open_nothing(
+    client: httpx.AsyncClient, db: Database
+) -> None:
+    await client.post("/v1/auth/register", json=MARIA)
+    other_password = PASSWORD + " of somebody else"
+
+    await client.post(
+        "/v1/auth/register", json={**MARIA, "handle": "maria2", "password": other_password}
+    )
+
+    # The account keeps its own password, and has no wallet or handle it did not have.
+    tried = await client.post(
+        "/v1/auth/login", json={"email": MARIA["email"], "password": other_password}
+    )
+    owner = await client.post(
+        "/v1/auth/login", json={"email": MARIA["email"], "password": PASSWORD}
+    )
+    assert (tried.status_code, owner.status_code) == (401, 200)
+    async with db.transaction() as session:
+        handles = (await session.execute(text("SELECT handle FROM users"))).scalars().all()
+        wallets = (await session.execute(text("SELECT count(*) FROM wallet_accounts"))).scalar()
+        per_user = (
+            (await session.execute(text("SELECT count(*) FROM wallet_accounts GROUP BY user_id")))
+            .scalars()
+            .all()
+        )
+    assert handles == ["maria"]
+    assert per_user == [wallets]
 
 
 async def test_a_taken_handle_is_refused_with_409(client: httpx.AsyncClient) -> None:
@@ -184,13 +235,62 @@ async def test_a_taken_handle_is_refused_with_409(client: httpx.AsyncClient) -> 
     assert (response.status_code, response.json()["code"]) == (409, "handle_taken")
 
 
-async def test_a_refused_registration_is_not_audited(
+async def test_a_taken_handle_is_refused_alike_whether_or_not_the_email_is_registered(
+    client: httpx.AsyncClient,
+) -> None:
+    # Otherwise a handle known to be taken would be a way to ask about any address:
+    # refused for a new one, and answered 201 for one that is registered.
+    await client.post("/v1/auth/register", json=MARIA)
+    await client.post(
+        "/v1/auth/register", json={**MARIA, "email": "joao@example.com", "handle": "joao"}
+    )
+
+    with_new_email = await client.post(
+        "/v1/auth/register", json={**MARIA, "email": "new@example.com", "handle": "joao"}
+    )
+    with_registered_email = await client.post("/v1/auth/register", json={**MARIA, "handle": "joao"})
+    with_its_own = await client.post("/v1/auth/register", json=MARIA)
+
+    assert with_new_email.status_code == 409
+    assert without_request_id(with_registered_email) == without_request_id(with_new_email)
+    assert without_request_id(with_its_own) == without_request_id(with_new_email)
+
+
+async def test_a_registration_that_was_not_made_is_audited_as_refused_and_names_nobody(
     client: httpx.AsyncClient, db: Database
 ) -> None:
     await client.post("/v1/auth/register", json=MARIA)
-    await client.post("/v1/auth/register", json=MARIA)
+    refused = await client.post("/v1/auth/register", json={**MARIA, "handle": "maria2"})
 
     assert len(await events(db, "auth.registered")) == 1
+    (event,) = await events(db, "auth.registration_refused")
+    assert (event.outcome, event.details) == ("denied", {"reason": "email_taken"})
+    # Whose address it is stays out of the record: it was not they who asked.
+    assert (event.actor_id, event.principal_id, event.resource_id) == (None, None, None)
+    assert event.request_id == refused.headers["x-request-id"]
+
+
+async def test_a_registration_refused_for_its_handle_is_not_audited(
+    client: httpx.AsyncClient, db: Database
+) -> None:
+    await client.post("/v1/auth/register", json=MARIA)
+    await client.post("/v1/auth/register", json={**MARIA, "email": "other@example.com"})
+
+    assert len(await events(db, "auth.registered")) == 1
+    assert await events(db, "auth.registration_refused") == []
+
+
+async def test_a_registration_that_was_not_made_logs_no_address(
+    client: httpx.AsyncClient, capsys: pytest.CaptureFixture[str]
+) -> None:
+    await client.post("/v1/auth/register", json=MARIA)
+    capsys.readouterr()
+
+    await client.post("/v1/auth/register", json={**MARIA, "handle": "maria2"})
+
+    written = capsys.readouterr().out
+    assert "auth.registration_refused" in written
+    assert MARIA["email"] not in written
 
 
 async def test_a_weak_password_is_refused_and_never_echoed(client: httpx.AsyncClient) -> None:
@@ -969,3 +1069,274 @@ def test_keys_generate_writes_a_key_and_prints_the_settings_that_use_it(
         )
     )
     assert keys.signing_kid in verifier.public_keys
+
+
+# --- a lock is one client's, and a delay is everyone's -----------------------------------------
+
+
+def client_at(app: FastAPI, address: str) -> httpx.AsyncClient:
+    """An HTTP client whose requests reach the app from ``address``."""
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False, client=(address, 50_000))
+    return httpx.AsyncClient(transport=transport, base_url="http://corridor.test")
+
+
+async def log_in(http: httpx.AsyncClient, email: str, password: str = PASSWORD) -> httpx.Response:
+    return await http.post("/v1/auth/login", json={"email": email, "password": password})
+
+
+@pytest.fixture
+def held_back(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """How long each answer was to be held back, in order. Nothing is waited for."""
+    asked: list[float] = []
+
+    async def record(seconds: float) -> None:
+        asked.append(seconds)
+
+    monkeypatch.setattr(auth_routes, "hold_back", record)
+    return asked
+
+
+async def test_a_stranger_who_fails_on_an_account_does_not_lock_its_owner_out(
+    app: FastAPI, client: httpx.AsyncClient, settings: Settings, db: Database
+) -> None:
+    maria = await register_user(client)
+
+    async with client_at(app, "198.51.100.23") as stranger, client_at(app, "203.0.113.7") as home:
+        for _ in range(settings.login_lockout_threshold):
+            await log_in(stranger, maria.email, WRONG_PASSWORD)
+        # The stranger is locked out, even with the right password.
+        locked = await log_in(stranger, maria.email)
+
+        owner = await log_in(home, maria.email)
+
+    assert (locked.status_code, owner.status_code) == (401, 200)
+    reasons = [event.details["reason"] for event in await events(db, "auth.login_failed")]
+    assert reasons == ["locked"] + ["bad_password"] * settings.login_lockout_threshold
+
+
+async def test_clients_in_one_ipv6_64_are_one_client_to_the_lock(
+    app: FastAPI, client: httpx.AsyncClient, settings: Settings
+) -> None:
+    maria = await register_user(client)
+
+    async with (
+        client_at(app, "2001:db8:1:2::1") as one,
+        client_at(app, "2001:db8:1:2:aaaa:bbbb:cccc:dddd") as same_network,
+        client_at(app, "2001:db8:1:3::1") as next_network,
+    ):
+        for _ in range(settings.login_lockout_threshold):
+            await log_in(one, maria.email, WRONG_PASSWORD)
+
+        moved_within = await log_in(same_network, maria.email)
+        elsewhere = await log_in(next_network, maria.email)
+
+    # Taking another address out of the same /64 is not a way around the lock.
+    assert (moved_within.status_code, elsewhere.status_code) == (401, 200)
+
+
+async def test_an_account_many_clients_fail_on_answers_slowly_and_still_lets_its_owner_in(
+    app: FastAPI, client: httpx.AsyncClient, settings: Settings, held_back: list[float]
+) -> None:
+    maria = await register_user(client)
+    threshold = settings.login_throttle_threshold
+
+    # More clients than the threshold, each failing once: none is near its own lock.
+    for n in range(threshold + 2):
+        async with client_at(app, f"198.51.100.{n}") as guesser:
+            assert (await log_in(guesser, maria.email, WRONG_PASSWORD)).status_code == 401
+    async with client_at(app, "203.0.113.7") as home:
+        owner = await log_in(home, maria.email)
+        afterwards = await log_in(home, maria.email)
+
+    base = settings.login_throttle_base_seconds
+    # Nothing until the threshold, then the delay, doubling. The owner waited too, was
+    # let in, and by logging in ended the delay.
+    assert held_back == [base, base * 2, base * 4]
+    assert (owner.status_code, afterwards.status_code) == (200, 200)
+
+
+async def test_the_delay_is_the_same_for_an_address_that_has_no_account(
+    app: FastAPI, client: httpx.AsyncClient, settings: Settings, held_back: list[float]
+) -> None:
+    maria = await register_user(client)
+
+    async def delays(email: str) -> list[float]:
+        held_back.clear()
+        for n in range(settings.login_throttle_threshold + 3):
+            async with client_at(app, f"198.51.100.{n}") as guesser:
+                await log_in(guesser, email, WRONG_PASSWORD)
+        return list(held_back)
+
+    registered = await delays(maria.email)
+    nobody = await delays("nobody@example.com")
+
+    assert len(registered) == 3
+    assert nobody == registered
+
+
+async def test_the_answer_is_held_back_with_no_transaction_open(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    settings: Settings,
+    db: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    maria = await register_user(client)
+    for n in range(settings.login_throttle_threshold):
+        async with client_at(app, f"198.51.100.{n}") as guesser:
+            await log_in(guesser, maria.email, WRONG_PASSWORD)
+    open_transactions: list[int] = []
+
+    async def look(_seconds: float) -> None:
+        async with db.transaction() as session:
+            waiting = await session.execute(
+                text(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database()"
+                    " AND state LIKE 'idle in transaction%' AND application_name = 'corridor-api'"
+                )
+            )
+            open_transactions.append(waiting.scalar_one())
+
+    monkeypatch.setattr(auth_routes, "hold_back", look)
+
+    await log_in(client, maria.email)
+
+    # A slow answer must not be a connection held for as long.
+    assert open_transactions == [0]
+
+
+# --- a token is asked about on every request ---------------------------------------------------
+
+
+async def test_closing_an_account_stops_its_access_token_at_once(
+    client: httpx.AsyncClient, db: Database
+) -> None:
+    maria = await register_user(client)
+    assert (await me(client, maria.access_token)).status_code == 200
+
+    async with db.transaction() as session:
+        await identity.close_user(session, uuid.UUID(maria.id))
+
+    response = await me(client, maria.access_token)
+    assert (response.status_code, response.json()["code"]) == (401, "invalid_token")
+    # Nor can the session be renewed, or the account logged in to.
+    assert (await refresh(client, maria.refresh_token)).status_code == 401
+    assert (await log_in(client, maria.email)).status_code == 401
+
+
+async def test_an_account_closed_by_hand_is_refused_too(
+    client: httpx.AsyncClient, db: Database
+) -> None:
+    # Whatever set the status: it is the status that is asked, on every request.
+    maria = await register_user(client)
+
+    async with db.transaction() as session:
+        await session.execute(
+            text("UPDATE users SET status = 'closed' WHERE id = :id"), {"id": uuid.UUID(maria.id)}
+        )
+
+    assert (await me(client, maria.access_token)).status_code == 401
+
+
+async def test_a_demoted_admin_loses_the_admin_routes_at_once(
+    app: FastAPI, client: httpx.AsyncClient, db: Database, clock: ManualClock
+) -> None:
+    app.add_api_route("/probe/admin", admin_only)
+    root = await register_user(client)
+    async with db.transaction() as session:
+        await identity.set_role(session, uuid.UUID(root.id), "admin")
+    clock.advance(seconds=1)
+    admin = dataclasses.replace(root, tokens=await login(client, root.email))
+    assert (await client.get("/probe/admin", headers=admin.headers)).status_code == 200
+
+    async with db.transaction() as session:
+        await identity.set_role(session, uuid.UUID(root.id), "user")
+
+    # The token still says "admin", and is still within its fifteen minutes.
+    demoted = await client.get("/probe/admin", headers=admin.headers)
+    assert (demoted.status_code, demoted.json()["code"]) == (401, "invalid_token")
+    # A new token says what is true now.
+    clock.advance(seconds=1)
+    renewed = await refresh(client, admin.refresh_token)
+    assert renewed.status_code == 200
+    as_user = await client.get("/probe/admin", headers=bearer(renewed.json()["access_token"]))
+    assert (as_user.status_code, as_user.json()["code"]) == (403, "permission_denied")
+
+
+async def test_a_role_changed_by_hand_is_noticed_too(
+    app: FastAPI, client: httpx.AsyncClient, db: Database
+) -> None:
+    # Nothing ended the tokens here. The role in the token no longer being the user's is enough.
+    app.add_api_route("/probe/admin", admin_only)
+    maria = await register_user(client)
+
+    async with db.transaction() as session:
+        await session.execute(
+            text("UPDATE users SET role = 'admin' WHERE id = :id"), {"id": uuid.UUID(maria.id)}
+        )
+
+    response = await client.get("/probe/admin", headers=maria.headers)
+    assert (response.status_code, response.json()["code"]) == (401, "invalid_token")
+
+
+async def test_ending_a_users_tokens_refuses_those_issued_before_and_none_issued_after(
+    client: httpx.AsyncClient, db: Database, clock: ManualClock
+) -> None:
+    maria = await register_user(client)
+    clock.advance(seconds=10)
+    ended_at = clock.now()
+    async with db.transaction() as session:
+        await session.execute(
+            text("UPDATE users SET tokens_valid_after = :at WHERE id = :id"),
+            {"at": ended_at, "id": uuid.UUID(maria.id)},
+        )
+
+    old = await me(client, maria.access_token)
+    # Issued at the very second the old ones were ended: not before it.
+    same_second = await me(client, (await login(client, maria.email))["access_token"])
+
+    assert (old.status_code, old.json()["code"]) == (401, "invalid_token")
+    assert same_second.status_code == 200
+
+
+async def test_a_token_whose_user_does_not_exist_is_refused(
+    client: httpx.AsyncClient, settings: Settings
+) -> None:
+    # Genuine in every way a signature can show, and for nobody.
+    token, _ = identity.mint_access_token(
+        user_id=new_id(),
+        session_id=new_id(),
+        role="user",
+        keys=identity.load_keyset(settings),
+        settings=settings,
+    )
+
+    response = await me(client, token)
+
+    assert (response.status_code, response.json()["code"]) == (401, "invalid_token")
+
+
+async def test_a_restricted_user_keeps_their_session(
+    client: httpx.AsyncClient, db: Database
+) -> None:
+    # Restricted stops money going out. It does not stop the user seeing why.
+    maria = await register_user(client)
+    async with db.transaction() as session:
+        await identity.restrict_user(session, uuid.UUID(maria.id), "under review")
+
+    response = await me(client, maria.access_token)
+
+    assert (response.status_code, response.json()["status"]) == (200, "restricted")
+
+
+async def test_the_question_is_asked_of_postgresql_and_does_not_need_redis(
+    app: FastAPI, client: httpx.AsyncClient, settings: Settings, db: Database
+) -> None:
+    maria = await register_user(client)
+    async with db.transaction() as session:
+        await identity.close_user(session, uuid.UUID(maria.id))
+
+    async with redis_unreachable(app, settings):
+        response = await me(client, maria.access_token)
+
+    assert response.status_code == 401

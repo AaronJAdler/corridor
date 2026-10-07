@@ -5,8 +5,10 @@ second. A request takes its cost from the bucket, or is refused and told how lon
 One Lua script reads the bucket, refills it, decides and writes it back, so callers that
 arrive together cannot spend the same token.
 
-Nothing here is needed for correctness, so the limiter fails open: when Redis cannot be
-reached the request is allowed and the failure is counted.
+Nothing here is needed for correctness, so the limiter fails open unless it is told
+otherwise: when Redis cannot be reached the request is allowed and the failure is counted.
+A caller that would rather refuse than go uncounted asks for that, and is told that the
+refusal is for want of Redis and not for want of tokens.
 """
 
 import hashlib
@@ -72,6 +74,10 @@ return {1, math.floor(level / unit), 0}
 
 _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 
+# What a caller refused for want of Redis is told to wait. Nothing is known about when
+# Redis will be back; this is long enough not to be a retry storm.
+RETRY_WHEN_UNAVAILABLE_SECONDS: Final = 5
+
 
 @dataclass(frozen=True, slots=True)
 class Limit:
@@ -97,6 +103,8 @@ class Decision:
     remaining: int
     # 0 when allowed; otherwise at least 1.
     retry_after_seconds: int
+    # True when Redis could not be asked and the caller chose to be refused in that case.
+    unavailable: bool = False
 
 
 class RateLimiter:
@@ -110,25 +118,37 @@ class RateLimiter:
         self._store = store
         self._script: AsyncScript = store.client.register_script(_BUCKET_SCRIPT)
 
-    async def check(self, group: str, subject: str, limit: Limit, *, cost: int = 1) -> Decision:
+    async def check(
+        self, group: str, subject: str, limit: Limit, *, cost: int = 1, fail_open: bool = True
+    ) -> Decision:
         """Take ``cost`` tokens from the subject's bucket in ``group``, or refuse.
 
         A group is one limit ("global", "auth"); each has its own bucket for every subject.
         A cost that no bucket under this limit could ever meet is a mistake in the caller,
         so it raises ``ValueError`` instead of being refused and counted.
+
+        If Redis cannot be reached the request is allowed, unless ``fail_open`` is false:
+        then it is refused, and the decision says that this is why.
         """
         _check_request(limit, cost)
         key = self._store.key("rl", group, _digest(subject))
         decision = await self._store.attempt(
-            self._take(key, limit, cost),
-            default=Decision(allowed=True, remaining=limit.capacity, retry_after_seconds=0),
-            use="rate_limit",
+            self._take(key, limit, cost), default=None, use="rate_limit"
         )
+        if decision is None:
+            if fail_open:
+                return Decision(allowed=True, remaining=limit.capacity, retry_after_seconds=0)
+            return Decision(
+                allowed=False,
+                remaining=0,
+                retry_after_seconds=RETRY_WHEN_UNAVAILABLE_SECONDS,
+                unavailable=True,
+            )
         if not decision.allowed:
             RATE_LIMIT_REJECTIONS.labels(group=group).inc()
         return decision
 
-    async def _take(self, key: str, limit: Limit, cost: int) -> Decision:
+    async def _take(self, key: str, limit: Limit, cost: int) -> Decision | None:
         reply: list[int] = await self._script(
             keys=[key],
             args=[limit.capacity, limit.refill_per_second, _now_ms(), cost, _idle_ttl_ms(limit)],

@@ -16,6 +16,7 @@ from corridor import webhooks
 from corridor.api.deps import Db, SettingsDep
 from corridor.api.ratelimit import rate_limit
 from corridor.platform.logging import get_logger
+from corridor.platform.metrics import WEBHOOK_DELIVERIES
 
 log = get_logger(__name__)
 
@@ -55,14 +56,24 @@ async def receive_webhook(
 ) -> ReceivedResponse:
     sender = webhooks.provider_named(provider)
     body = await _read_capped(request)
-    webhooks.verify_delivery(settings, sender, request.headers.getlist(_SIGNATURE_HEADER), body)
+    try:
+        webhooks.verify_delivery(settings, sender, request.headers.getlist(_SIGNATURE_HEADER), body)
+    except webhooks.InvalidSignature:
+        _count(sender, "bad_signature")
+        raise
     # Only now is the body read as anything but bytes.
-    envelope = webhooks.parse_envelope(body)
+    try:
+        envelope = webhooks.parse_envelope(body)
+    except webhooks.MalformedEvent:
+        _count(sender, "malformed")
+        raise
 
     async def work(session: AsyncSession) -> webhooks.Recorded:
         return await webhooks.record(session, sender, envelope)
 
     recorded = await db.run(work)
+    # After the commit: a delivery is counted as accepted once its event is stored.
+    _count(sender, "accepted" if recorded.created else "duplicate")
     # After the commit. Neither the body nor the signature is logged, here or anywhere.
     log.info(
         "webhook.received",
@@ -72,3 +83,8 @@ async def receive_webhook(
         duplicate=not recorded.created,
     )
     return ReceivedResponse()
+
+
+def _count(sender: webhooks.Provider, outcome: str) -> None:
+    # The provider is one of the names on the allow list, never the text of the path.
+    WEBHOOK_DELIVERIES.labels(provider=sender.value, outcome=outcome).inc()

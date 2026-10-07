@@ -27,6 +27,7 @@ NOW = datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
 APPEND_ONLY = "CR001"
 TOO_FEW_POSTINGS = "CR002"
 UNBALANCED = "CR003"
+SEALED = "CR004"
 FOREIGN_KEY_VIOLATION = "23503"
 INSUFFICIENT_PRIVILEGE = "42501"
 
@@ -227,8 +228,90 @@ async def test_a_posting_cannot_be_added_to_an_entry_that_already_balanced(db: D
         async with db.transaction() as session:
             await add_posting(session, entry, debit, "D", 1)
 
-    assert sqlstate_of(failure.value) == UNBALANCED
+    assert sqlstate_of(failure.value) == SEALED
     assert await count(db, "postings") == 2
+
+
+# --- an entry is sealed when its transaction ends ----------------------------------------------
+
+
+@pytest.mark.parametrize("role", ["application", "owner"])
+async def test_a_balanced_pair_of_postings_cannot_be_added_to_a_committed_entry(
+    db: Database, owner_db: Database, role: str
+) -> None:
+    # The pair nets to nothing, so the balance check has no objection: without the seal it
+    # commits, and the entry says something it did not say when it was posted.
+    entry, debit, credit = await balanced_entry(db)
+    connected = db if role == "application" else owner_db
+
+    with pytest.raises(DBAPIError) as failure:
+        async with connected.transaction() as session:
+            await add_posting(session, entry, debit, "D", 100)
+            await add_posting(session, entry, credit, "C", 100)
+
+    assert sqlstate_of(failure.value) == SEALED
+    assert "sealed" in str(failure.value)
+    assert await count(db, "postings") == 2
+
+
+async def test_postings_are_accepted_from_a_savepoint_of_the_transaction_that_wrote_the_entry(
+    db: Database,
+) -> None:
+    # A savepoint writes under an id of its own. The entry is still this transaction's.
+    async with db.transaction() as session:
+        debit = await add_account(session, "bank_settlement", provider="simbank")
+        credit = await add_account(session, "suspense")
+        async with session.begin_nested():
+            entry = await add_entry(session)
+            await add_posting(session, entry, debit, "D", 500)
+        async with session.begin_nested():
+            await add_posting(session, entry, credit, "C", 500)
+
+    assert await count(db, "postings") == 2
+
+
+async def test_a_posting_for_an_entry_another_transaction_has_not_committed_is_refused(
+    db: Database,
+) -> None:
+    # Left to the foreign key, this insert would wait for the other transaction and pass
+    # when it committed: a posting written by a transaction other than its entry's.
+    async with db.transaction() as writing:
+        debit = await add_account(writing, "bank_settlement", provider="simbank")
+        entry = await add_entry(writing)
+        await writing.flush()
+
+        with pytest.raises(DBAPIError) as failure:
+            async with db.transaction() as other:
+                account = await add_account(other, "suspense")
+                await add_posting(other, entry, account, "C", 500)
+        assert sqlstate_of(failure.value) == SEALED
+        assert "not written by this transaction" in str(failure.value)
+
+        credit = await add_account(writing, "suspense")
+        await add_posting(writing, entry, debit, "D", 500)
+        await add_posting(writing, entry, credit, "C", 500)
+
+    assert await count(db, "postings") == 2
+
+
+async def test_a_posting_for_an_entry_that_does_not_exist_is_refused(db: Database) -> None:
+    with pytest.raises(DBAPIError) as failure:
+        async with db.transaction() as session:
+            account = await add_account(session)
+            await add_posting(session, new_id(), account, "D", 500)
+
+    assert sqlstate_of(failure.value) == SEALED
+
+
+async def test_the_seal_resolves_names_with_the_temporary_schema_last(db: Database) -> None:
+    async with db.transaction() as session:
+        config = (
+            await session.execute(
+                text("SELECT proconfig FROM pg_proc WHERE proname = 'ledger_seal_entry'")
+            )
+        ).scalar_one()
+
+    assert config == [SEARCH_PATH]
 
 
 # --- temporary tables cannot stand in for the ledger -------------------------------------------

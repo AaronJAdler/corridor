@@ -410,6 +410,84 @@ async def test_a_transfer_to_nobody_is_a_404(
     assert_problem(response, 404, "recipient_not_found")
 
 
+def without_request_id(response: httpx.Response) -> dict[str, Any]:
+    body: dict[str, Any] = response.json()
+    assert body.pop("request_id") == response.headers["x-request-id"]
+    return body
+
+
+async def test_every_recipient_who_cannot_be_paid_gets_the_one_answer(
+    client: httpx.AsyncClient, db: Database, maria: RegisteredUser, joao: RegisteredUser
+) -> None:
+    # An address is not public, as a handle is. If an address nobody registered were
+    # answered differently from one whose account cannot be paid, the difference would
+    # say which addresses have, or had, an account.
+    closed = await register_user(client, handle="closed", email="closed@example.com")
+    async with db.transaction() as session:
+        await identity.close_user(session, uuid.UUID(closed.id))
+    recipients = {
+        "an address nobody registered": "nobody@example.com",
+        "the address of a closed account": "closed@example.com",
+        "the handle of a closed account": "@closed",
+        "the id of a closed account": closed.id,
+        "a handle nobody has": "@nobody",
+        "an id nobody has": str(new_id()),
+        "nothing that could name anyone": "not a recipient",
+    }
+
+    answers = {
+        what: await post(
+            client, maria, {"recipient": to, "asset": "USD", "amount": "1.00"}, key=f"key-{n}"
+        )
+        for n, (what, to) in enumerate(recipients.items())
+    }
+
+    first = answers["an address nobody registered"]
+    assert_problem(first, 404, "recipient_not_found")
+    for what, answer in answers.items():
+        assert answer.status_code == 404, what
+        assert answer.headers["content-type"] == PROBLEM_CONTENT_TYPE, what
+        assert without_request_id(answer) == without_request_id(first), what
+    assert await available(client, maria) == "100.00"
+    assert await count(db, "transfers") == 0
+    # The control: a recipient who can be paid, by address, is.
+    paid = await post(
+        client,
+        maria,
+        {"recipient": joao.email, "asset": "USD", "amount": "1.00"},
+        key="key-paid",
+    )
+    assert paid.status_code == 201, paid.text
+
+
+async def test_an_account_closed_while_it_is_being_paid_gets_the_same_answer(
+    client: httpx.AsyncClient,
+    db: Database,
+    maria: RegisteredUser,
+    joao: RegisteredUser,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Found as open, and closed by the time the movement is authorised: the refusal then
+    # comes from another module, and must not be told apart from the one above.
+    unknown = await post(
+        client, maria, {"recipient": "nobody@example.com", "asset": "USD", "amount": "1.00"}
+    )
+    found = identity.find_user
+
+    async def find_then_close(session: Any, identifier: str) -> identity.User | None:
+        user = await found(session, identifier)
+        if user is not None:
+            await identity.close_user(session, user.id)
+        return user
+
+    monkeypatch.setattr(identity, "find_user", find_then_close)
+
+    closing = await post(client, maria, body_for(joao), key="key-2")
+
+    assert closing.status_code == 404
+    assert without_request_id(closing) == without_request_id(unknown)
+
+
 async def test_a_restricted_user_gets_a_403_and_keeps_their_money(
     client: httpx.AsyncClient, db: Database, maria: RegisteredUser, joao: RegisteredUser
 ) -> None:

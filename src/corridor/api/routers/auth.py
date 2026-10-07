@@ -5,15 +5,16 @@ leave a record (a failed login, a reused refresh token) is raised only after the
 that recorded it has committed.
 """
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Final
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from corridor import audit, identity
 from corridor.api.deps import CurrentPrincipal, Db, Hasher, Keys, Redis, SettingsDep
-from corridor.api.ratelimit import rate_limit
+from corridor.api.ratelimit import client_of, rate_limit
 from corridor.api.schemas import (
     LoginRequest,
     RefreshRequest,
@@ -61,6 +62,11 @@ class InvalidRefreshToken(Unauthenticated):
         super().__init__("The refresh token is not valid.")
 
 
+# How an answer is held back. A name of its own so that a test can see what was asked for
+# without waiting for it.
+hold_back: Callable[[float], Awaitable[None]] = asyncio.sleep
+
+
 def _no_store(response: Response) -> None:
     # Tokens are for the client that asked and for nobody on the way (RFC 6749, 5.1).
     response.headers["Cache-Control"] = "no-store"
@@ -68,19 +74,40 @@ def _no_store(response: Response) -> None:
 
 @router.post("/register", status_code=201, summary="Create a user")
 async def register(body: RegisterRequest, db: Db, hasher: Hasher) -> UserResponse:
+    """Create a user, and answer with it.
+
+    An address that is already registered gets the same answer, and nothing is created:
+    told "already registered", anyone could ask which addresses have an account. What is
+    answered then is a user that does not exist, and logging in as it fails as a wrong
+    password does. A handle that is taken is refused as such, for either kind of address,
+    because handles are public.
+    """
     password = body.password.get_secret_value()
     identity.validate_password(password)
-    # Before the transaction opens: Argon2 is slow on purpose.
+    # Before the transaction opens: Argon2 is slow on purpose. It runs for an address
+    # that is taken too, so that the two answers take as long.
     password_hash = await hasher.hash(password)
 
-    async def work(session: AsyncSession) -> identity.User:
-        user = await identity.register(
-            session,
-            email=body.email,
-            handle=body.handle,
-            display_name=body.display_name,
-            password_hash=password_hash,
-        )
+    async def work(session: AsyncSession) -> identity.User | None:
+        try:
+            user = await identity.register(
+                session,
+                email=body.email,
+                handle=body.handle,
+                display_name=body.display_name,
+                password_hash=password_hash,
+            )
+        except identity.EmailTaken:
+            # Nothing was written, so the transaction is whole. Whose address it is stays
+            # out of the record: it was not they who asked.
+            await audit.record(
+                session,
+                actor=_actor(None),
+                action="auth.registration_refused",
+                outcome="denied",
+                details={"reason": "email_taken"},
+            )
+            return None
         for hook in on_user_registered:
             await hook(session, user)
         await audit.record(
@@ -94,12 +121,20 @@ async def register(body: RegisterRequest, db: Db, hasher: Hasher) -> UserRespons
         return user
 
     user = await db.run(work)
+    if user is None:
+        log.info("auth.registration_refused", reason="email_taken")
+        return UserResponse.of(
+            identity.unregistered_user(
+                email=body.email, handle=body.handle, display_name=body.display_name
+            )
+        )
     log.info("auth.registered", user_id=str(user.id))
     return UserResponse.of(user)
 
 
 @router.post("/login", summary="Exchange an email address and a password for tokens")
 async def login(
+    request: Request,
     body: LoginRequest,
     response: Response,
     db: Db,
@@ -108,16 +143,29 @@ async def login(
     settings: SettingsDep,
 ) -> TokenResponse:
     # Three steps, so that no transaction is open while Argon2 runs.
-    candidate = await db.run(lambda session: identity.find_login_candidate(session, body.email))
+    async def begin(session: AsyncSession) -> tuple[identity.LoginCandidate | None, float]:
+        return (
+            await identity.find_login_candidate(session, body.email),
+            await identity.login_delay_seconds(session, body.email, settings=settings),
+        )
+
+    candidate, delay = await db.run(begin)
     password_ok = await hasher.verify(
         candidate.password_hash if candidate is not None else None,
         body.password.get_secret_value(),
     )
+    if delay > 0:
+        # An address that many clients have been failing on answers slowly, to everyone
+        # and whatever the password: guessing is slowed and its owner is still let in.
+        await hold_back(delay)
+    client = client_of(request)
 
     async def work(
         session: AsyncSession,
     ) -> tuple[identity.LoginOutcome, identity.TokenPair | None]:
-        outcome = await identity.complete_login(session, candidate, password_ok, settings=settings)
+        outcome = await identity.complete_login(
+            session, candidate, password_ok, email=body.email, client=client, settings=settings
+        )
         if outcome.user is None:
             await audit.record(
                 session,

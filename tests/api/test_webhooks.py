@@ -459,6 +459,27 @@ async def test_a_body_over_the_cap_is_refused_whoever_signed_it(
     assert await stored_events(db) == []
 
 
+async def test_a_webhook_keeps_its_own_cap_where_the_general_limit_is_raised(
+    settings: Settings, db: Database
+) -> None:
+    # The two limits happen to be the same size. A deployment that takes larger bodies
+    # elsewhere must not find that it now takes larger ones from whoever claims to be a
+    # provider, before any signature has been checked.
+    roomy = settings.model_copy(update={"max_request_body_bytes": 1024 * 1024})
+    body = _padded(MAX_BODY_BYTES + 1)
+
+    async with serving(roomy) as http:
+        over = await http.post(BANK, content=body, headers={"X-Signature": sign(BANK_SECRET, body)})
+        at_the_cap = _padded(MAX_BODY_BYTES)
+        within = await http.post(
+            BANK, content=at_the_cap, headers={"X-Signature": sign(BANK_SECRET, at_the_cap)}
+        )
+
+    assert (over.status_code, over.json()["code"]) == (413, "payload_too_large")
+    assert within.status_code == 200
+    assert len(await stored_events(db)) == 1
+
+
 async def test_an_oversize_body_sent_in_pieces_without_a_length_is_refused(
     client: httpx.AsyncClient, db: Database
 ) -> None:

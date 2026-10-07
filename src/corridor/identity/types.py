@@ -7,6 +7,7 @@ from typing import Literal
 
 Role = Literal["user", "admin"]
 UserStatus = Literal["active", "restricted", "closed"]
+LoginRefusal = Literal["unknown_email", "bad_password", "locked", "closed"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +38,7 @@ class LoginOutcome:
 
     user: User | None
     user_id: uuid.UUID | None
-    reason: Literal["unknown_email", "bad_password", "locked", "closed"] | None
+    reason: LoginRefusal | None
     locked_until: datetime | None
 
 

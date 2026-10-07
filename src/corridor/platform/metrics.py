@@ -4,7 +4,70 @@ Metrics are defined here, in one place, so the full set is visible and no name i
 twice. They live in the default registry and are exposed at ``/metrics``.
 """
 
-from prometheus_client import Counter, Gauge
+from prometheus_client import Counter, Gauge, Histogram
+
+# Labelled with the route's template and never the path a client sent: a path holds ids,
+# and every id would be a time series of its own.
+HTTP_REQUESTS = Counter(
+    "corridor_http_requests_total",
+    "Requests answered, by method, route template and status. Errors are the 4xx and 5xx.",
+    ["method", "route", "status"],
+)
+
+HTTP_REQUEST_SECONDS = Histogram(
+    "corridor_http_request_duration_seconds",
+    "How long a request took to answer, by method and route template.",
+    ["method", "route"],
+)
+
+LEDGER_ENTRIES = Counter(
+    "corridor_ledger_entries_total",
+    "Journal entries written, by kind. Counted when written: one whose transaction is then"
+    " rolled back is counted all the same.",
+    ["kind"],
+)
+
+LEDGER_VERIFIER_FINDINGS = Gauge(
+    "corridor_ledger_verifier_findings",
+    "What the last run of the ledger verifier found wrong. Anything but zero needs a person.",
+)
+
+LEDGER_VERIFIER_LAST_RUN = Gauge(
+    "corridor_ledger_verifier_last_run_timestamp_seconds",
+    "When the ledger verifier last finished a run, as a Unix time.",
+)
+
+WEBHOOK_DELIVERIES = Counter(
+    "corridor_webhook_deliveries_total",
+    "Webhook deliveries received, by provider and outcome (accepted, duplicate,"
+    " bad_signature, malformed).",
+    ["provider", "outcome"],
+)
+
+WEBHOOK_EVENTS_PROCESSED = Counter(
+    "corridor_webhook_events_processed_total",
+    "Stored webhook events the worker finished with, by provider, type and outcome"
+    " (processed, ignored).",
+    ["provider", "type", "outcome"],
+)
+
+PROVIDER_CALLS = Counter(
+    "corridor_provider_calls_total",
+    "Calls to a provider, by provider, operation and outcome (ok, rejected, unknown,"
+    " misconfigured). Errors are every outcome but ok.",
+    ["provider", "operation", "outcome"],
+)
+
+PROVIDER_CALL_SECONDS = Histogram(
+    "corridor_provider_call_duration_seconds",
+    "How long a call to a provider took, by provider and operation.",
+    ["provider", "operation"],
+)
+
+RECON_OPEN_BREAKS = Gauge(
+    "corridor_recon_open_breaks",
+    "Reconciliation breaks nobody has resolved, as of the last reconciliation run.",
+)
 
 DB_TRANSACTION_RETRIES = Counter(
     "corridor_db_transaction_retries_total",

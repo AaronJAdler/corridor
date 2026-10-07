@@ -2,12 +2,15 @@
 
 import asyncio
 
+from prometheus_client import REGISTRY
+
+from corridor import recon
 from corridor.platform.config import Settings
 from corridor.providers import SimBank, SimCustody
 from corridor.worker import Scheduler, build_jobs
 from corridor.worker import jobs as worker_jobs
 from tests.payments.support import rows
-from tests.recon.support import breaks, let_pass
+from tests.recon.support import breaks, funded, let_pass
 from tests.support.stack import Stack
 
 JOB = "recon.run"
@@ -82,3 +85,35 @@ async def test_the_scheduled_run_is_due_again_after_five_minutes_and_not_before(
     assert [JOB in names for names in early] == [False, False]
     assert sorted(JOB in names for names in due) == [False, True]
     assert len(await rows(stack.db, "SELECT 1 FROM recon_runs")) == 2
+
+
+# --- the gauge ---------------------------------------------------------------------------------
+
+
+async def forget(stack: Stack) -> None:
+    """The providers lose their books: everything Corridor recorded is now unknown to them."""
+    await stack.sim.control("POST", "/reset")
+
+
+def open_breaks_gauge() -> float | None:
+    return REGISTRY.get_sample_value("corridor_recon_open_breaks")
+
+
+async def test_the_scheduled_run_reports_how_many_breaks_are_open(
+    stack: Stack, bank: SimBank, custody: SimCustody
+) -> None:
+    # A clean run first, so that what the gauge says next is this test's and nobody else's.
+    assert JOB in await scheduler(stack, bank, custody).tick()
+    assert open_breaks_gauge() == 0
+    # A deposit the bank no longer knows of: a break only a person can settle.
+    await funded(stack)
+    await forget(stack)
+    await let_pass(stack, 300)
+
+    assert JOB in await scheduler(stack, bank, custody).tick()
+
+    still_open = [row for row in await breaks(stack) if row["status"] == "open"]
+    assert len(still_open) >= 1
+    assert open_breaks_gauge() == len(still_open)
+    async with stack.db.transaction() as session:
+        assert await recon.count_open_breaks(session) == len(still_open)

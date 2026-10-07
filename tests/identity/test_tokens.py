@@ -14,6 +14,7 @@ import uuid
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import jwt
 import pytest
@@ -22,7 +23,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, ed25519
 from jwt.algorithms import ECAlgorithm
 from prometheus_client import REGISTRY
 from pydantic import SecretStr
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.exc import DBAPIError
 
 from corridor import identity
@@ -1272,3 +1273,116 @@ async def test_a_revocation_mark_needs_a_lifetime(redis: RedisStore, ttl_seconds
         await mark_session_revoked(redis, SESSION_ID, ttl_seconds=ttl_seconds)
 
     assert await is_session_revoked(redis, SESSION_ID) is False
+
+
+# --- what a token says against what is true now ----------------------------------------------
+
+
+def claims_of(user: User, clock: ManualClock, *, role: str | None = None) -> AccessClaims:
+    """What a token issued to the user at this moment would say."""
+    issued_at = clock.now().replace(microsecond=0)
+    return AccessClaims(
+        user_id=user.id,
+        session_id=new_id(),
+        role=role or user.role,  # type: ignore[arg-type]
+        scope="*",
+        issued_at=issued_at,
+        expires_at=issued_at + timedelta(minutes=15),
+        token_id=str(new_id()),
+    )
+
+
+async def accepted(db: Database, claims: AccessClaims) -> bool:
+    async with db.transaction() as session:
+        try:
+            await identity.check_access(session, claims)
+        except InvalidToken:
+            return False
+    return True
+
+
+async def test_the_token_of_a_user_in_good_standing_is_accepted(
+    db: Database, clock: ManualClock, maria: User
+) -> None:
+    assert await accepted(db, claims_of(maria, clock)) is True
+
+
+async def test_the_token_of_a_restricted_user_is_accepted(
+    db: Database, clock: ManualClock, maria: User
+) -> None:
+    claims = claims_of(maria, clock)
+    async with db.transaction() as session:
+        await identity.restrict_user(session, maria.id, "under review")
+
+    assert await accepted(db, claims) is True
+
+
+async def test_the_token_of_a_closed_account_is_refused(
+    db: Database, clock: ManualClock, maria: User
+) -> None:
+    claims = claims_of(maria, clock)
+    async with db.transaction() as session:
+        await close_account(session, maria.id)
+
+    assert await accepted(db, claims) is False
+
+
+async def test_a_token_for_nobody_is_refused(db: Database, clock: ManualClock, maria: User) -> None:
+    ghost = dataclasses.replace(maria, id=new_id())
+
+    assert await accepted(db, claims_of(ghost, clock)) is False
+
+
+@pytest.mark.parametrize(("held", "claimed"), [("user", "admin"), ("admin", "user")])
+async def test_a_token_that_carries_a_role_its_user_does_not_hold_is_refused(
+    db: Database, clock: ManualClock, held: str, claimed: str
+) -> None:
+    async with db.transaction() as session:
+        user = await add_user(session, "someone", role=held)  # type: ignore[arg-type]
+
+    assert await accepted(db, claims_of(user, clock, role=claimed)) is False
+    assert await accepted(db, claims_of(user, clock)) is True
+
+
+async def test_changing_a_role_ends_every_token_issued_up_to_that_second(
+    db: Database, clock: ManualClock, maria: User
+) -> None:
+    # A token's issue time is in whole seconds, rounded down. One issued a moment before
+    # the change says a time at or before the change's own second, and has to go.
+    clock.advance(seconds=0.2)
+    issued_just_before = claims_of(maria, clock, role="admin")
+    clock.advance(seconds=0.3)
+    async with db.transaction() as session:
+        await identity.set_role(session, maria.id, "admin")
+    promoted = dataclasses.replace(maria, role="admin")
+
+    rest_of_the_second = claims_of(promoted, clock)
+    clock.advance(seconds=0.5)
+    next_second = claims_of(promoted, clock)
+
+    assert await accepted(db, issued_just_before) is False
+    # The price of that: a token issued in what is left of the second is refused as well.
+    assert await accepted(db, rest_of_the_second) is False
+    assert await accepted(db, next_second) is True
+
+
+async def test_checking_a_token_is_one_read_by_primary_key(
+    db: Database, clock: ManualClock, maria: User
+) -> None:
+    claims = claims_of(maria, clock)
+    statements: list[str] = []
+
+    def record(_conn: Any, _cursor: Any, statement: str, *_rest: Any) -> None:
+        statements.append(statement)
+
+    event.listen(db.engine.sync_engine, "before_cursor_execute", record)
+    try:
+        async with db.transaction() as session:
+            await identity.check_access(session, claims)
+    finally:
+        event.remove(db.engine.sync_engine, "before_cursor_execute", record)
+
+    reads = [statement for statement in statements if "users" in statement]
+    assert len(reads) == 1
+    assert "WHERE users.id =" in reads[0]
+    assert [s for s in statements if s.lstrip().upper().startswith(("UPDATE", "INSERT"))] == []

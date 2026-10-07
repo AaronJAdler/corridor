@@ -4,8 +4,9 @@ import asyncio
 
 from fastapi import APIRouter, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from starlette.exceptions import HTTPException
 
-from corridor.api.deps import Db, Redis
+from corridor.api.deps import Db, Redis, SettingsDep
 from corridor.platform.logging import get_logger
 
 router = APIRouter(tags=["service"])
@@ -53,5 +54,13 @@ async def _postgres_ok(db: Db) -> bool:
 
 
 @router.get("/metrics", summary="Prometheus metrics", include_in_schema=False)
-async def metrics() -> Response:
+async def metrics(settings: SettingsDep) -> Response:
+    """The API's own metrics, where a deployment has chosen to serve them here.
+
+    The endpoint has no authentication and this is the port clients reach, so unless
+    ``metrics_public`` is set it answers as a path that does not exist.
+    """
+    if not settings.metrics_public:
+        # The same exception an unknown path raises, so the two answers are one.
+        raise HTTPException(status_code=404)
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

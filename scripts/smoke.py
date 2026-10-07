@@ -72,8 +72,13 @@ def probe(base_url: str) -> None:
 
         metrics = client.get("/metrics")
         check(
-            metrics.status_code == 200 and "corridor_db_transaction_retries_total" in metrics.text,
-            "GET /metrics serves Prometheus metrics",
+            metrics.status_code == 404 and "corridor_" not in metrics.text,
+            "GET /metrics is not served on the API's port unless it is asked for",
+        )
+        check(
+            health.headers.get("x-content-type-options") == "nosniff"
+            and health.headers.get("cache-control") == "no-store",
+            "a response carries the security headers",
         )
 
         missing = client.get("/v1/does-not-exist")

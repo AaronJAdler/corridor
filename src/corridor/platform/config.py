@@ -92,16 +92,45 @@ class Settings(BaseSettings):
     access_token_ttl_seconds: int = Field(default=900, ge=30)
     refresh_token_ttl_seconds: int = Field(default=30 * 24 * 3600, ge=60)
 
-    # After this many consecutive failed logins an account is locked, for a period that
-    # doubles with each further failure up to the maximum.
+    # After this many consecutive failed logins to an account from one client, that
+    # client is locked out of that account, for a period that doubles with each further
+    # failure up to the maximum. A client is an IPv4 address or an IPv6 /64. Nobody else
+    # is locked out, so a stranger cannot keep an account's owner from logging in.
     login_lockout_threshold: int = Field(default=5, ge=1)
     login_lockout_base_seconds: int = Field(default=60, ge=1)
     login_lockout_max_seconds: int = Field(default=3600, ge=1)
+    # Failed logins to an account from every client together, within the window, slow
+    # every answer about that account down: by the base delay at the threshold, doubling
+    # with each further failure up to the maximum. The right password is delayed too, and
+    # never refused.
+    login_throttle_threshold: int = Field(default=10, ge=1)
+    login_throttle_base_seconds: float = Field(default=0.5, gt=0)
+    login_throttle_max_seconds: float = Field(default=8.0, gt=0, le=30)
+    login_throttle_window_seconds: int = Field(default=900, ge=1)
 
-    # Rate limits, per client address. They fail open when Redis is unavailable.
+    # A request body longer than this is refused before any of it is parsed.
+    max_request_body_bytes: int = Field(default=64 * 1024, ge=1024)
+
+    # Rate limits. Those per client address fail open when Redis is unavailable.
     rate_limit_enabled: bool = True
     rate_limit_per_minute: int = Field(default=600, ge=1)
     rate_limit_auth_per_minute: int = Field(default=10, ge=1)
+    # The routes that move money or prepare to, per user or per agent rather than per
+    # address. A request that changes something is refused while Redis is unavailable,
+    # because uncounted it could be repeated without limit; one that only reads is served.
+    rate_limit_money_write_per_minute: int = Field(default=120, ge=1)
+    rate_limit_money_read_per_minute: int = Field(default=600, ge=1)
+
+    # How many of each a user may have. Each bounds a table that a client can otherwise
+    # grow without end, and the work done on every request that reads it.
+    max_beneficiaries_per_user: int = Field(default=50, ge=1)
+    max_agents_per_user: int = Field(default=20, ge=1)
+    max_keys_per_agent: int = Field(default=10, ge=1)
+    max_pending_approvals_per_agent: int = Field(default=20, ge=1)
+
+    # The API serves /metrics only when this is set: the endpoint has no authentication,
+    # and the API's port is the public one. The worker serves its own on a port of its own.
+    metrics_public: bool = False
 
     # The outbox dispatcher and the worker that runs it.
     outbox_batch_size: int = Field(default=20, ge=1, le=500)
@@ -156,6 +185,9 @@ class Settings(BaseSettings):
 
     # Webhooks: how far a signature's timestamp may be from our clock.
     webhook_tolerance_seconds: int = Field(default=300, ge=1)
+    # How long after an event is processed its payload keeps the personal fields a
+    # provider sent with it: a sender's name, a payment reference, a sending address.
+    webhook_payload_retention_days: int = Field(default=30, ge=1)
 
     # FX. The customer rate is the mid rate less the spread. A mid rate older than
     # fx_rate_max_age_seconds is refused; a quote lives fx_quote_ttl_seconds.
@@ -220,6 +252,10 @@ class Settings(BaseSettings):
                 problems.append(f"{secrets_name} must be set when {url_name} is")
         if self.log_level == "DEBUG":
             problems.append("log_level must not be DEBUG")
+        # Without it no agent key is accepted, and the first sign would be an owner whose
+        # agent stopped working.
+        if self.api_key_hash_key is None:
+            problems.append("api_key_hash_key must be set")
         if problems:
             raise ValueError("not a production configuration: " + "; ".join(problems))
         return self

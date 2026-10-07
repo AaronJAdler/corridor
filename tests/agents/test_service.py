@@ -44,9 +44,11 @@ async def maria(db: Database) -> identity.User:
 
 
 @pytest.fixture
-async def agent(db: Database, maria: identity.User) -> agents.Agent:
+async def agent(db: Database, settings: Settings, maria: identity.User) -> agents.Agent:
     async with db.transaction() as session:
-        return await agents.create_agent(session, acting_as(maria), name="Bill payer")
+        return await agents.create_agent(
+            session, acting_as(maria), name="Bill payer", settings=settings
+        )
 
 
 async def issue(
@@ -85,7 +87,7 @@ async def test_no_agent_can_manage_agents_even_past_the_route_guard(
     # An agent of the same owner, holding every scope there is.
     itself = Principal.for_agent(maria.id, agent.id, [str(scope) for scope in Scope])
     attempts: list[Callable[[AsyncSession], Awaitable[Any]]] = [
-        lambda s: agents.create_agent(s, itself, name="A helper"),
+        lambda s: agents.create_agent(s, itself, name="A helper", settings=settings),
         lambda s: agents.list_agents(s, itself),
         lambda s: agents.pause_agent(s, itself, agent.id),
         lambda s: agents.resume_agent(s, itself, agent.id),
@@ -214,7 +216,7 @@ async def test_each_refusal_says_why_and_a_forgery_names_no_agent(
 
     async def agent_with_key(expires_at: datetime | None = None) -> tuple[uuid.UUID, str]:
         async with db.transaction() as session:
-            made = await agents.create_agent(session, owner, name="Bill payer")
+            made = await agents.create_agent(session, owner, name="Bill payer", settings=settings)
         return made.id, (await issue(db, settings, maria, made.id, expires_at=expires_at)).key
 
     revoked_key_agent, revoked_key = await agent_with_key()
@@ -255,7 +257,7 @@ async def test_a_key_whose_owner_does_not_exist_is_refused(
     # No user was ever registered with this id.
     nobody = Principal.for_user(new_id(), "user", new_id())
     async with db.transaction() as session:
-        orphan = await agents.create_agent(session, nobody, name="Orphan")
+        orphan = await agents.create_agent(session, nobody, name="Orphan", settings=settings)
         issued = await agents.issue_key(
             session, nobody, orphan.id, scopes=[Scope.WALLET_READ], settings=settings
         )

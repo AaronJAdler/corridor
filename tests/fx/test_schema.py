@@ -81,7 +81,9 @@ async def grants(db: Database, table: str) -> str:
 async def test_the_application_role_may_add_read_advance_and_purge_quotes(
     db: Database,
 ) -> None:
-    assert await grants(db, "fx_quotes") == "DELETE,INSERT,SELECT,UPDATE"
+    # On the table as a whole. A quote is advanced by its status alone, which is granted
+    # as a column, and the security tests say so.
+    assert await grants(db, "fx_quotes") == "DELETE,INSERT,SELECT"
 
 
 async def test_the_application_role_may_add_and_read_conversions_and_nothing_else(

@@ -2,7 +2,8 @@
 
 Redis holds only what can be rebuilt: rate-limit buckets, a rate cache and revocation hints.
 Every caller states what happens when Redis is unavailable by passing a default to
-``attempt``; none of them may fail a request because Redis did.
+``attempt``. For all but one that default lets the request go on. The exception is the
+rate limit on requests that move money, which would rather refuse than go uncounted.
 """
 
 from collections.abc import Awaitable

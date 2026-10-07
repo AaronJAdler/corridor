@@ -258,7 +258,7 @@ async def test_the_recipient_is_fixed_when_the_agent_asks(
 
 
 async def test_only_an_agent_with_the_movements_scope_can_ask_however_it_is_reached(
-    db: Database, maria: RegisteredUser, joao: RegisteredUser, agent: Acting
+    db: Database, settings: Settings, maria: RegisteredUser, joao: RegisteredUser, agent: Acting
 ) -> None:
     intent = agents.TransferIntent(recipient=joao.id, asset="USD", amount=50_00)
     reader = Principal.for_agent(
@@ -268,9 +268,9 @@ async def test_only_an_agent_with_the_movements_scope_can_ask_however_it_is_reac
 
     async with db.transaction() as session:
         with pytest.raises(InsufficientScope):
-            await agents.request_approval(session, reader, intent)
+            await agents.request_approval(session, reader, intent, settings=settings)
         with pytest.raises(ValueError, match="only an agent"):
-            await agents.request_approval(session, owner, intent)
+            await agents.request_approval(session, owner, intent, settings=settings)
 
     assert await count(db, "agent_approval_requests") == 0
 

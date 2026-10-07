@@ -8,14 +8,14 @@ from contextlib import asynccontextmanager
 
 import httpx
 import pytest
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Request
 from prometheus_client import REGISTRY
 from pydantic import SecretStr
 from starlette.types import Message, Receive, Scope, Send
 
 from corridor.api.app import create_app
 from corridor.api.errors import PROBLEM_CONTENT_TYPE
-from corridor.api.ratelimit import RateLimitMiddleware, rate_limit
+from corridor.api.ratelimit import RateLimitMiddleware, client_of, rate_limit
 from corridor.platform.clock import ManualClock
 from corridor.platform.config import Settings
 from corridor.platform.ratelimit import Limit, RateLimiter
@@ -64,7 +64,13 @@ def client_at(app: FastAPI, address: str | None = ADDRESS) -> httpx.AsyncClient:
 
 def with_limits(settings: Settings, *, everywhere: int, own: int = 1_000) -> Settings:
     return settings.model_copy(
-        update={"rate_limit_per_minute": everywhere, "rate_limit_auth_per_minute": own}
+        update={
+            "rate_limit_per_minute": everywhere,
+            "rate_limit_auth_per_minute": own,
+            # As a deployment that scrapes the API's own port has it, so that the exemption
+            # of the scrape from the limit can be seen.
+            "metrics_public": True,
+        }
     )
 
 
@@ -160,6 +166,63 @@ async def test_each_client_address_has_a_bucket_of_its_own(settings: Settings) -
 
     assert first == [200, 429]
     assert second == [200, 429]
+
+
+async def test_ipv6_addresses_in_one_64_share_a_bucket(settings: Settings) -> None:
+    # A /64 is what one customer is given: 2^64 addresses, and they are all one client.
+    async with (
+        running(with_limits(settings, everywhere=1)) as app,
+        client_at(app, "2001:db8:1:2::1") as one,
+        client_at(app, "2001:db8:1:2:ffff:ffff:ffff:ffff") as same_network,
+        client_at(app, "2001:db8:1:3::1") as next_network,
+    ):
+        first = await statuses(one, "/probe", 1)
+        second = await statuses(same_network, "/probe", 1)
+        other = await statuses(next_network, "/probe", 2)
+
+    assert (first, second) == ([200], [429])
+    assert other == [200, 429]
+
+
+async def test_an_ipv4_address_written_as_ipv6_is_the_ipv4_address(settings: Settings) -> None:
+    async with (
+        running(with_limits(settings, everywhere=1)) as app,
+        client_at(app, "203.0.113.7") as plain,
+        client_at(app, "::ffff:203.0.113.7") as mapped,
+        client_at(app, "::ffff:203.0.113.8") as neighbour,
+    ):
+        served = [
+            (await plain.get("/probe")).status_code,
+            (await mapped.get("/probe")).status_code,
+            # Not the same /64 as its neighbour, which is how an IPv6 address would be read.
+            (await neighbour.get("/probe")).status_code,
+        ]
+
+    assert served == [200, 429, 200]
+
+
+@pytest.mark.parametrize(
+    ("address", "counted_as"),
+    [
+        ("203.0.113.7", "203.0.113.7"),
+        ("2001:db8:1:2:3:4:5:6", "2001:db8:1:2::/64"),
+        ("2001:DB8:1:2::1", "2001:db8:1:2::/64"),
+        ("::1", "::/64"),
+        ("::ffff:203.0.113.7", "203.0.113.7"),
+        ("not-an-address", "not-an-address"),
+        (None, "unknown"),
+    ],
+)
+def test_a_client_is_counted_as_its_ipv4_address_or_its_ipv6_64(
+    address: str | None, counted_as: str
+) -> None:
+    scope = {
+        "type": "http",
+        "client": (address, 50_000) if address is not None else None,
+        "headers": [],
+    }
+
+    assert client_of(Request(scope)) == counted_as
 
 
 async def test_a_forwarded_for_header_does_not_change_whose_bucket_is_used(

@@ -66,6 +66,12 @@ async def _client_for(settings: Settings) -> AsyncIterator[httpx.AsyncClient]:
             yield http
 
 
+def without_request_id(response: httpx.Response) -> dict[str, object]:
+    body: dict[str, object] = response.json()
+    assert body.pop("request_id") == response.headers["x-request-id"]
+    return body
+
+
 # --- service endpoints ---------------------------------------------------------------------
 
 
@@ -102,8 +108,25 @@ async def test_readyz_fails_when_postgres_is_down(settings: Settings) -> None:
     assert health.status_code == 200
 
 
-async def test_metrics_are_exposed_in_prometheus_format(client: httpx.AsyncClient) -> None:
+async def test_metrics_are_not_served_on_the_api_port_unless_asked_for(
+    client: httpx.AsyncClient, settings: Settings
+) -> None:
     response = await client.get("/metrics")
+    missing = await client.get("/no-such-path")
+
+    assert settings.metrics_public is False
+    assert response.status_code == 404
+    assert "corridor_" not in response.text
+    # Answered exactly as a path that was never there.
+    assert without_request_id(response) == without_request_id(missing)
+
+
+async def test_metrics_are_exposed_in_prometheus_format_where_a_deployment_asks(
+    settings: Settings,
+) -> None:
+    async for client in _client_for(settings.model_copy(update={"metrics_public": True})):
+        response = await client.get("/metrics")
+
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/plain")
     assert "# TYPE corridor_db_transaction_retries_total counter" in response.text

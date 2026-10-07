@@ -148,6 +148,17 @@ class UnsupportedBeneficiaryAsset(BeneficiaryRejected):
         super().__init__("Bank accounts can be saved for fiat assets only.")
 
 
+class BeneficiaryLimitReached(Conflict):
+    """The user has as many saved accounts as a user may have. They are never removed, so
+    this is final for the user and says how many that is."""
+
+    code = "beneficiary_limit_reached"
+    title = "Beneficiary limit reached"
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(f"An account can have at most {limit} saved bank accounts.", limit=limit)
+
+
 class BeneficiaryKeyReused(InvalidRequest):
     """The idempotency key already registered a different account."""
 

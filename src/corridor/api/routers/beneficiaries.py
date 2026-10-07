@@ -17,6 +17,7 @@ from corridor import payments
 from corridor.api.container import Container
 from corridor.api.deps import Db, get_container, require
 from corridor.api.idempotency import IdempotencyKey
+from corridor.api.ratelimit import money_rate_limit
 from corridor.api.schemas import DisplayName, Text
 from corridor.identity import Principal, Scope
 from corridor.platform.logging import get_logger
@@ -24,7 +25,10 @@ from corridor.platform.pagination import DEFAULT_LIMIT, Page
 
 log = get_logger(__name__)
 
-router = APIRouter(prefix="/v1/beneficiaries", tags=["withdrawals"])
+# Every route here is limited by who is acting, as well as by where the request came from.
+router = APIRouter(
+    prefix="/v1/beneficiaries", tags=["withdrawals"], dependencies=[Depends(money_rate_limit)]
+)
 
 BeneficiaryWriter = Annotated[Principal, Depends(require(Scope.BENEFICIARIES_WRITE))]
 BeneficiaryReader = Annotated[Principal, Depends(require(Scope.BENEFICIARIES_READ))]
@@ -95,6 +99,7 @@ async def create_beneficiary(
             body.routing_number.get_secret_value() if body.routing_number is not None else None
         ),
         idempotency_key=key,
+        limit=container.settings.max_beneficiaries_per_user,
     )
     log.info("beneficiary.created", beneficiary_id=str(beneficiary.id), asset=beneficiary.asset)
     return BeneficiaryResponse.of(beneficiary)

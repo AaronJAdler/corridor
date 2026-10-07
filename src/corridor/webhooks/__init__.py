@@ -11,7 +11,9 @@ from corridor.webhooks.errors import (
     UnknownProvider,
 )
 from corridor.webhooks.service import (
+    PERSONAL_FIELDS,
     RECEIVED_TOPIC,
+    REDACTION_BATCH,
     WebhookHandler,
     WebhookRegistry,
     find_event,
@@ -20,6 +22,7 @@ from corridor.webhooks.service import (
     process,
     provider_named,
     record,
+    redact_payloads,
     validate_secrets,
     verify_delivery,
 )
@@ -34,7 +37,9 @@ from corridor.webhooks.types import (
 
 __all__ = [
     "MAX_BODY_BYTES",
+    "PERSONAL_FIELDS",
     "RECEIVED_TOPIC",
+    "REDACTION_BATCH",
     "Envelope",
     "EventNotFound",
     "EventOutcome",
@@ -53,6 +58,7 @@ __all__ = [
     "process",
     "provider_named",
     "record",
+    "redact_payloads",
     "validate_secrets",
     "verify_delivery",
 ]

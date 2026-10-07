@@ -24,7 +24,7 @@ from corridor.risk.screening import (
     resolve_review,
     screen_party,
 )
-from corridor.risk.service import MONEY_OUT_LOCK, authorize
+from corridor.risk.service import MONEY_OUT_LOCK, authorize, restrict_user
 from corridor.risk.types import (
     Decision,
     DenylistEntry,
@@ -70,6 +70,7 @@ __all__ = [
     "open_review",
     "release_usage",
     "resolve_review",
+    "restrict_user",
     "screen_party",
     "set_limit",
     "usd_value",

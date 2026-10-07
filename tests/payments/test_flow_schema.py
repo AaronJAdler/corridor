@@ -108,8 +108,10 @@ async def add_beneficiary(db: Database, **overrides: Any) -> None:
     [
         ("deposit_instructions", "INSERT,SELECT"),
         ("beneficiaries", "INSERT,SELECT"),
-        ("deposits", "INSERT,SELECT,UPDATE"),
-        ("withdrawals", "INSERT,SELECT,UPDATE"),
+        # On the table as a whole. What it may update in these two is granted column by
+        # column, and the security tests say which columns.
+        ("deposits", "INSERT,SELECT"),
+        ("withdrawals", "INSERT,SELECT"),
     ],
 )
 async def test_the_application_role_may_do_to_each_table_what_its_rows_need_and_no_more(

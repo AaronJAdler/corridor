@@ -3,7 +3,7 @@
 import asyncio
 import dataclasses
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import text
@@ -46,18 +46,17 @@ async def insert_user(session: AsyncSession, **overrides: object) -> uuid.UUID:
         "kyc_tier": 0,
         "status": "active",
         "restricted_reason": None,
-        "failed_logins": 0,
-        "locked_until": None,
         "created_at": NOW,
         "updated_at": NOW,
+        "tokens_valid_after": None,
     }
     values.update(overrides)
     await session.execute(
         text(
             "INSERT INTO users (id, email, handle, display_name, password_hash, role, kyc_tier,"
-            " status, restricted_reason, failed_logins, locked_until, created_at, updated_at)"
+            " status, restricted_reason, created_at, updated_at, tokens_valid_after)"
             " VALUES (:id, :email, :handle, :display_name, :password_hash, :role, :kyc_tier,"
-            " :status, :restricted_reason, :failed_logins, :locked_until, :created_at, :updated_at)"
+            " :status, :restricted_reason, :created_at, :updated_at, :tokens_valid_after)"
         ),
         values,
     )
@@ -92,7 +91,6 @@ async def test_a_well_formed_user_row_is_stored(db: Database) -> None:
         ("kyc_tier", -1, "ck_users_kyc_tier"),
         ("kyc_tier", 3, "ck_users_kyc_tier"),
         ("status", "banned", "ck_users_status"),
-        ("failed_logins", -1, "ck_users_failed_logins_not_negative"),
     ],
 )
 async def test_the_database_refuses_a_malformed_user(
@@ -131,7 +129,8 @@ async def test_no_identity_column_has_a_default(db: Database) -> None:
             await session.execute(
                 text(
                     "SELECT table_name || '.' || column_name FROM information_schema.columns"
-                    " WHERE table_schema = 'public' AND table_name IN ('users', 'refresh_tokens')"
+                    " WHERE table_schema = 'public' AND table_name IN"
+                    " ('users', 'refresh_tokens', 'login_lockouts', 'login_throttles')"
                     " AND column_default IS NOT NULL"
                 )
             )
@@ -141,12 +140,76 @@ async def test_no_identity_column_has_a_default(db: Database) -> None:
             await session.execute(
                 text(
                     "SELECT table_name, count(*) FROM information_schema.columns"
-                    " WHERE table_schema = 'public' AND table_name IN ('users', 'refresh_tokens')"
+                    " WHERE table_schema = 'public' AND table_name IN"
+                    " ('users', 'refresh_tokens', 'login_lockouts', 'login_throttles')"
                     " GROUP BY table_name"
                 )
             )
         ).all()
-    assert dict(tuple(row) for row in counted) == {"users": 13, "refresh_tokens": 8}
+    assert dict(tuple(row) for row in counted) == {
+        "users": 12,
+        "refresh_tokens": 8,
+        "login_lockouts": 5,
+        "login_throttles": 3,
+    }
+
+
+async def test_a_user_row_has_no_login_counters_for_a_stranger_to_write_to(db: Database) -> None:
+    # Failed logins are counted in tables of their own, by the address that was typed.
+    async with db.transaction() as session:
+        columns = (
+            await session.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns"
+                    " WHERE table_schema = 'public' AND table_name = 'users'"
+                )
+            )
+        ).scalars()
+        assert {"failed_logins", "locked_until"} & set(columns) == set()
+
+
+@pytest.mark.parametrize(
+    ("table", "statement"),
+    [
+        (
+            "login_lockouts",
+            "INSERT INTO login_lockouts (email_hash, client, failed_logins, locked_until,"
+            " updated_at) VALUES ('h', 'c', 0, NULL, :now)",
+        ),
+        (
+            "login_throttles",
+            "INSERT INTO login_throttles (email_hash, failed_logins, last_failed_at)"
+            " VALUES ('h', 0, :now)",
+        ),
+    ],
+)
+async def test_the_database_refuses_a_count_of_no_failures(
+    db: Database, table: str, statement: str
+) -> None:
+    # A row is there because something failed. The first failure makes it, with a count of one.
+    with pytest.raises(DBAPIError) as failure:
+        async with db.transaction() as session:
+            await session.execute(text(statement), {"now": NOW})
+
+    assert sqlstate_of(failure.value) == CHECK_VIOLATION
+    assert constraint_of(failure.value) == f"ck_{table}_failed_logins_positive"
+
+
+async def test_one_client_has_one_count_for_one_address(db: Database) -> None:
+    insert = text(
+        "INSERT INTO login_lockouts (email_hash, client, failed_logins, locked_until, updated_at)"
+        " VALUES ('h', :client, 1, NULL, :now)"
+    )
+    async with db.transaction() as session:
+        await session.execute(insert, {"client": "203.0.113.7", "now": NOW})
+        await session.execute(insert, {"client": "203.0.113.8", "now": NOW})
+
+    with pytest.raises(DBAPIError) as failure:
+        async with db.transaction() as session:
+            await session.execute(insert, {"client": "203.0.113.7", "now": NOW})
+
+    assert sqlstate_of(failure.value) == UNIQUE_VIOLATION
+    assert constraint_of(failure.value) == "pk_login_lockouts"
 
 
 async def test_the_application_role_cannot_delete_a_user(db: Database) -> None:
@@ -169,7 +232,8 @@ async def test_the_application_role_holds_exactly_the_privileges_it_needs(db: Da
                 "SELECT table_name, string_agg(privilege_type, ',' ORDER BY privilege_type) AS privileges"
                 " FROM information_schema.role_table_grants"
                 " WHERE grantee = :role AND table_schema = 'public'"
-                " AND table_name IN ('users', 'refresh_tokens') GROUP BY table_name"
+                " AND table_name IN ('users', 'refresh_tokens', 'login_lockouts',"
+                " 'login_throttles') GROUP BY table_name"
             ),
             {"role": postgres.APP_ROLE},
         )
@@ -179,6 +243,9 @@ async def test_the_application_role_holds_exactly_the_privileges_it_needs(db: Da
         "users": "INSERT,SELECT,UPDATE",
         # DELETE stays, so that expired tokens can be pruned.
         "refresh_tokens": "DELETE,INSERT,SELECT,UPDATE",
+        # And here, so that a count is dropped when its owner logs in or it has gone stale.
+        "login_lockouts": "DELETE,INSERT,SELECT,UPDATE",
+        "login_throttles": "DELETE,INSERT,SELECT,UPDATE",
     }
 
 
@@ -218,10 +285,9 @@ async def test_registration_normalises_and_stores(db: Database, clock: ManualClo
             "kyc_tier": 0,
             "status": "active",
             "restricted_reason": None,
-            "failed_logins": 0,
-            "locked_until": None,
             "created_at": clock.now(),
             "updated_at": clock.now(),
+            "tokens_valid_after": None,
         }
 
 
@@ -336,12 +402,14 @@ async def test_a_handle_already_taken_is_refused(db: Database) -> None:
         assert await count(session, "users") == 2
 
 
-async def test_when_both_are_taken_the_email_is_reported(db: Database) -> None:
+async def test_when_both_are_taken_the_handle_is_reported(db: Database) -> None:
+    # A handle is public and an address is not. Reporting the address first would let a
+    # handle known to be taken be used to ask whether any address is registered.
     async with db.transaction() as session:
         await add_user(session, "maria")
         await add_user(session, "joao")
 
-        with pytest.raises(EmailTaken):
+        with pytest.raises(HandleTaken):
             await identity.register(
                 session,
                 email="maria@example.com",
@@ -584,3 +652,170 @@ async def test_restricting_nobody_is_not_found(db: Database) -> None:
             await identity.restrict_user(session, new_id(), "deposit returned")
         with pytest.raises(UserNotFound):
             await identity.lift_restriction(session, new_id())
+
+
+# --- what registering would have returned ----------------------------------------------------
+
+
+def test_an_unregistered_user_is_what_registering_those_details_would_have_returned(
+    clock: ManualClock,
+) -> None:
+    stand_in = identity.unregistered_user(
+        email="  Maria.Souza@Example.COM ", handle=" @Maria_01 ", display_name="Maria Souza"
+    )
+
+    assert stand_in == User(
+        id=stand_in.id,
+        email="maria.souza@example.com",
+        handle="maria_01",
+        display_name="Maria Souza",
+        role="user",
+        kyc_tier=0,
+        status="active",
+        created_at=clock.now(),
+    )
+    assert stand_in.id.version == 7
+
+
+async def test_an_unregistered_user_is_nobody(db: Database) -> None:
+    stand_in = identity.unregistered_user(email="a@example.com", handle="abc", display_name="A")
+    other = identity.unregistered_user(email="a@example.com", handle="abc", display_name="A")
+
+    assert stand_in.id != other.id
+    async with db.transaction() as session:
+        with pytest.raises(UserNotFound):
+            await identity.get_user(session, stand_in.id)
+
+
+def test_an_unregistered_user_with_a_handle_that_could_not_be_registered_is_a_mistake() -> None:
+    # Registration refuses such a handle before it could come to this.
+    with pytest.raises(ValueError, match="bad handle"):
+        identity.unregistered_user(email="a@example.com", handle="a b", display_name="A")
+
+
+# --- roles -----------------------------------------------------------------------------------
+
+
+async def test_a_role_is_changed_and_the_users_tokens_are_ended(
+    db: Database, clock: ManualClock
+) -> None:
+    async with db.transaction() as session:
+        maria = await add_user(session)
+    clock.advance(seconds=90.25)
+
+    async with db.transaction() as session:
+        promoted = await identity.set_role(session, maria.id, "admin")
+        row = await user_row(session, maria.id)
+
+    assert promoted == dataclasses.replace(maria, role="admin")
+    # The first whole second after the change: see ``test_tokens`` for why not the instant.
+    assert row["tokens_valid_after"] == clock.now().replace(microsecond=0) + timedelta(seconds=1)
+    assert row["updated_at"] == clock.now()
+
+
+async def test_changing_a_role_keeps_the_users_sessions(db: Database) -> None:
+    async with db.transaction() as session:
+        maria = await add_user(session)
+        await session.execute(
+            text(
+                "INSERT INTO refresh_tokens (id, user_id, family_id, token_hash, issued_at,"
+                " expires_at) VALUES (:id, :user, :family, 'h', :now, :now)"
+            ),
+            {"id": new_id(), "user": maria.id, "family": new_id(), "now": NOW},
+        )
+
+        await identity.set_role(session, maria.id, "admin")
+
+        revoked = await session.execute(text("SELECT revoked_at FROM refresh_tokens"))
+        assert revoked.scalar_one() is None
+
+
+@pytest.mark.parametrize("role", ["root", "", "ADMIN", None])
+async def test_a_role_that_is_not_one_is_refused(db: Database, role: object) -> None:
+    async with db.transaction() as session:
+        maria = await add_user(session)
+
+        with pytest.raises(InvalidRequest):
+            await identity.set_role(session, maria.id, role)  # type: ignore[arg-type]
+
+        assert (await user_row(session, maria.id))["tokens_valid_after"] is None
+
+
+async def test_changing_the_role_of_nobody_is_not_found(db: Database) -> None:
+    async with db.transaction() as session:
+        with pytest.raises(UserNotFound):
+            await identity.set_role(session, new_id(), "admin")
+
+
+# --- closing ---------------------------------------------------------------------------------
+
+
+async def test_closing_an_account_ends_its_tokens_and_its_sessions(
+    db: Database, clock: ManualClock
+) -> None:
+    async with db.transaction() as session:
+        maria = await add_user(session)
+        joao = await add_user(session, "joao")
+        for owner in (maria, maria, joao):
+            await session.execute(
+                text(
+                    "INSERT INTO refresh_tokens (id, user_id, family_id, token_hash, issued_at,"
+                    " expires_at) VALUES (:id, :user, :family, :hash, :now, :now)"
+                ),
+                {
+                    "id": new_id(),
+                    "user": owner.id,
+                    "family": new_id(),
+                    "hash": str(new_id()),
+                    "now": NOW,
+                },
+            )
+    clock.advance(seconds=30)
+
+    async with db.transaction() as session:
+        closed = await identity.close_user(session, maria.id)
+        row = await user_row(session, maria.id)
+        revoked = (
+            await session.execute(
+                text("SELECT user_id, revoked_at FROM refresh_tokens ORDER BY user_id, id")
+            )
+        ).all()
+
+    assert closed == dataclasses.replace(maria, status="closed")
+    assert row["tokens_valid_after"] == clock.now() + timedelta(seconds=1)
+    assert sorted((owner, at) for owner, at in revoked if owner == maria.id) == [
+        (maria.id, clock.now()),
+        (maria.id, clock.now()),
+    ]
+    # Nobody else's session is touched.
+    assert [at for owner, at in revoked if owner == joao.id] == [None]
+
+
+async def test_a_closed_account_is_not_found_by_what_people_type(db: Database) -> None:
+    async with db.transaction() as session:
+        maria = await add_user(session)
+
+        await identity.close_user(session, maria.id)
+
+        assert await identity.find_user(session, "@maria") is None
+        assert (await identity.get_user(session, maria.id)).status == "closed"
+
+
+async def test_closing_a_closed_account_changes_nothing(db: Database, clock: ManualClock) -> None:
+    async with db.transaction() as session:
+        maria = await add_user(session)
+        await identity.close_user(session, maria.id)
+        before = await user_row(session, maria.id)
+    clock.advance(seconds=3600)
+
+    async with db.transaction() as session:
+        again = await identity.close_user(session, maria.id)
+
+        assert again.status == "closed"
+        assert await user_row(session, maria.id) == before
+
+
+async def test_closing_nobody_is_not_found(db: Database) -> None:
+    async with db.transaction() as session:
+        with pytest.raises(UserNotFound):
+            await identity.close_user(session, new_id())

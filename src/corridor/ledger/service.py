@@ -35,6 +35,7 @@ from corridor.ledger.types import (
 )
 from corridor.platform.clock import utcnow
 from corridor.platform.ids import new_id
+from corridor.platform.metrics import LEDGER_ENTRIES
 from corridor.platform.money import MAX_MINOR_UNITS, get_asset
 
 # Core tables. The ledger writes with explicit statements and never through the ORM's unit
@@ -246,6 +247,7 @@ async def post_entry(session: AsyncSession, draft: EntryDraft) -> PostedEntry:
         .returning(_postings.c.seq, _postings.c.account_id)
     )
     seq_of = {row.account_id: row.seq for row in written}
+    LEDGER_ENTRIES.labels(kind=draft.kind).inc()
 
     if new_balances:
         await session.execute(

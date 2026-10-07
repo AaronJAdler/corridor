@@ -170,8 +170,12 @@ class AgentPageResponse(BaseModel):
 
 
 @router.post("", status_code=201, summary="Create an agent")
-async def create_agent(body: AgentRequest, principal: CurrentPrincipal, db: Db) -> AgentResponse:
-    agent = await db.run(lambda session: agents.create_agent(session, principal, name=body.name))
+async def create_agent(
+    body: AgentRequest, principal: CurrentPrincipal, db: Db, settings: SettingsDep
+) -> AgentResponse:
+    agent = await db.run(
+        lambda session: agents.create_agent(session, principal, name=body.name, settings=settings)
+    )
     log.info("agent.created", agent_id=str(agent.id))
     return AgentResponse.of(agent)
 

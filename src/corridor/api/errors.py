@@ -13,6 +13,7 @@ from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse
 
+from corridor.api.headers import apply_security_headers
 from corridor.platform.errors import DomainError
 from corridor.platform.logging import get_logger
 
@@ -67,6 +68,8 @@ def problem(
         # The outermost error handler runs outside the request middleware, so the header is
         # set here as well as there.
         response_headers[REQUEST_ID_HEADER] = request_id
+    # And these, for the same reason: an unexpected error is still a response.
+    apply_security_headers(response_headers, path=request.url.path)
     return JSONResponse(
         body, status_code=status, headers=response_headers, media_type=PROBLEM_CONTENT_TYPE
     )

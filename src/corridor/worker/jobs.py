@@ -2,11 +2,16 @@
 
 from datetime import timedelta
 
-from corridor import fx, outbox, payments, recon
+from corridor import fx, identity, ledger, outbox, payments, recon, webhooks
 from corridor.platform.clock import utcnow
 from corridor.platform.config import Settings
 from corridor.platform.db import Database
 from corridor.platform.logging import get_logger
+from corridor.platform.metrics import (
+    LEDGER_VERIFIER_FINDINGS,
+    LEDGER_VERIFIER_LAST_RUN,
+    RECON_OPEN_BREAKS,
+)
 from corridor.providers import BankRail, Custodian
 from corridor.worker.purge import purge_idempotency_keys
 from corridor.worker.scheduler import Job
@@ -19,6 +24,13 @@ IDEMPOTENCY_KEY_RETENTION = timedelta(hours=24)
 # A quote lives for seconds. One that expired a day ago and was never converted answers no
 # question anybody still has.
 UNUSED_QUOTE_RETENTION = timedelta(hours=24)
+# A count of failed logins that nothing has added to for a day locks nobody out and slows
+# nothing down: the longest lock is an hour and the throttle's window is minutes.
+LOGIN_FAILURE_RETENTION = timedelta(hours=24)
+# The verifier reads the whole ledger, so it runs as often as an answer is worth that.
+LEDGER_VERIFY_JOB = "ledger.verify"
+LEDGER_VERIFY_INTERVAL_SECONDS = 3600.0
+WEBHOOK_REDACTION_JOB = "webhooks.redact_payloads"
 # How often overdue withdrawals are looked for. How long one waits before it counts as
 # overdue is a setting, `payout_sweep_after_seconds`.
 PAYOUT_SWEEP_INTERVAL_SECONDS = 30.0
@@ -62,6 +74,40 @@ def build_jobs(
             )
         log.info("fx.quotes_purged", deleted=deleted)
 
+    async def purge_login_failures(db: Database) -> None:
+        async with db.transaction() as session:
+            deleted = await identity.purge_login_failures(
+                session, older_than=utcnow() - LOGIN_FAILURE_RETENTION
+            )
+        log.info("auth.login_failures_purged", deleted=deleted)
+
+    async def redact_webhook_payloads(db: Database) -> None:
+        cutoff = utcnow() - timedelta(days=settings.webhook_payload_retention_days)
+        redacted = 0
+        while True:
+            # A transaction for each batch, so that none of them holds its rows for long.
+            async with db.transaction() as session:
+                batch = await webhooks.redact_payloads(
+                    session, processed_before=cutoff, limit=webhooks.REDACTION_BATCH
+                )
+            redacted += batch
+            if batch < webhooks.REDACTION_BATCH:
+                break
+        log.info("webhooks.payloads_redacted", redacted=redacted)
+
+    async def verify_ledger(db: Database) -> None:
+        async with db.transaction() as session:
+            findings = await ledger.verify(session)
+        LEDGER_VERIFIER_FINDINGS.set(len(findings))
+        LEDGER_VERIFIER_LAST_RUN.set(utcnow().timestamp())
+        if findings:
+            # Which checks found something, and how much in all. What each finding says
+            # is read with `corridor verify-ledger`, by someone looking at the ledger.
+            checks = sorted({finding.check for finding in findings})
+            log.error("ledger.verify_failed", findings=len(findings), checks=checks)
+        else:
+            log.info("ledger.verify_ok")
+
     async def sweep_payouts(db: Database) -> None:
         advanced = await payments.sweep_payouts(db, bank, custody, settings)
         log.info("payout_sweep.done", advanced=advanced)
@@ -79,11 +125,16 @@ def build_jobs(
             breaks_found=result.run.breaks_found,
             repaired=result.repaired,
         )
+        async with db.transaction() as session:
+            RECON_OPEN_BREAKS.set(await recon.count_open_breaks(session))
 
     jobs = [
         Job("outbox.purge_finished", PURGE_INTERVAL_SECONDS, purge_finished),
         Job("idempotency.purge_expired", PURGE_INTERVAL_SECONDS, purge_idempotency),
         Job("fx.purge_unused_quotes", PURGE_INTERVAL_SECONDS, purge_quotes),
+        Job("auth.purge_login_failures", PURGE_INTERVAL_SECONDS, purge_login_failures),
+        Job(WEBHOOK_REDACTION_JOB, PURGE_INTERVAL_SECONDS, redact_webhook_payloads),
+        Job(LEDGER_VERIFY_JOB, LEDGER_VERIFY_INTERVAL_SECONDS, verify_ledger),
     ]
     if bank is not None or custody is not None:
         jobs.append(Job("payments.sweep_payouts", PAYOUT_SWEEP_INTERVAL_SECONDS, sweep_payouts))

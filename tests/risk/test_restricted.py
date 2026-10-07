@@ -4,16 +4,28 @@ Each way out has a test of its own, through the real use case, so that a path wh
 stopped asking risk would be noticed by the test of that path.
 """
 
-import pytest
+import asyncio
 
-from corridor import identity, payments
+import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
+
+from corridor import identity, payments, risk
 from corridor.identity import User
 from corridor.platform.config import Settings
-from corridor.platform.db import Database
+from corridor.platform.db import (
+    LOCK_NOT_AVAILABLE,
+    Database,
+    advisory_xact_lock,
+    lock_key,
+    sqlstate_of,
+)
+from corridor.platform.ids import new_id
 from corridor.providers import SimBank, SimCustody
 from corridor.risk import UserRestricted
 from tests.fx.support import convert, quote_for, quote_status
 from tests.payments.support import (
+    acting_as,
     add_beneficiary,
     available,
     count,
@@ -133,3 +145,107 @@ async def test_a_user_whose_restriction_was_lifted_moves_money_out_again(
     await send(db, settings, maria, joao, 40_00)
 
     assert await available(db, joao) == 40_00
+
+
+# --- restricting waits for what is on its way out ------------------------------------------------
+
+
+async def test_restricting_a_user_takes_that_users_money_out_lock(
+    db: Database, maria: User
+) -> None:
+    # A movement out holds this lock from before it reads the account's standing until it
+    # commits. Here one is under way, and the restriction cannot get past it.
+    async with db.transaction() as moving:
+        await advisory_xact_lock(moving, [lock_key(risk.MONEY_OUT_LOCK, maria.id)])
+
+        with pytest.raises(DBAPIError) as failure:
+            async with db.transaction() as restricting:
+                await restricting.execute(text("SET LOCAL lock_timeout = '100ms'"))
+                await risk.restrict_user(restricting, maria.id, "under review")
+
+        assert sqlstate_of(failure.value) == LOCK_NOT_AVAILABLE
+        assert (await identity.get_user(moving, maria.id)).status == "active"
+
+
+async def until_a_transaction_is_waiting_for_a_lock(db: Database) -> None:
+    for _ in range(1000):
+        async with db.transaction() as session:
+            waiting = (
+                await session.execute(
+                    text(
+                        "SELECT count(*) FROM pg_stat_activity"
+                        " WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                    )
+                )
+            ).scalar_one()
+        if waiting:
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("no transaction ever waited for a lock")
+
+
+async def test_a_restriction_waits_for_a_transfer_under_way_and_stops_the_next(
+    db: Database, settings: Settings, maria: User, joao: User
+) -> None:
+    await deposit(db, maria, 100_00)
+    under_way = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def transfer_slowly() -> None:
+        async with db.transaction() as session:
+            # Read as active, limited, posted and written: all that is left is to commit.
+            await payments.create_transfer(
+                session,
+                acting_as(maria),
+                transfer_id=new_id(),
+                recipient=str(joao.id),
+                asset="USD",
+                amount=40_00,
+                memo=None,
+                settings=settings,
+            )
+            under_way.set()
+            await finish.wait()
+
+    async def restrict_when_under_way() -> None:
+        await under_way.wait()
+        async with db.transaction() as session:
+            await risk.restrict_user(session, maria.id, "under review")
+
+    moving = asyncio.create_task(transfer_slowly())
+    restricting = asyncio.create_task(restrict_when_under_way())
+    try:
+        await until_a_transaction_is_waiting_for_a_lock(db)
+        restricted_meanwhile = restricting.done()
+    finally:
+        finish.set()
+        await asyncio.gather(moving, restricting)
+
+    assert restricted_meanwhile is False
+    # The transfer that was under way completed, and the restriction followed it.
+    assert await available(db, joao) == 40_00
+    with pytest.raises(UserRestricted):
+        await send(db, settings, maria, joao, 10_00)
+    assert await available(db, joao) == 40_00
+
+
+async def test_restricting_a_user_restricts_them(db: Database, maria: User) -> None:
+    async with db.transaction() as session:
+        restricted = await risk.restrict_user(session, maria.id, "under review")
+
+    assert restricted.status == "restricted"
+    async with db.transaction() as session:
+        assert (await identity.get_user(session, maria.id)).status == "restricted"
+
+
+async def test_a_caller_that_holds_the_lock_already_is_not_made_to_wait_for_itself(
+    db: Database, maria: User
+) -> None:
+    # The deposit-return path restricts a user whose lock it took at the start.
+    async with db.transaction() as session:
+        await session.execute(text("SET LOCAL lock_timeout = '100ms'"))
+        await advisory_xact_lock(session, [lock_key(risk.MONEY_OUT_LOCK, maria.id)])
+
+        restricted = await risk.restrict_user(session, maria.id, "deposit returned")
+
+    assert restricted.status == "restricted"

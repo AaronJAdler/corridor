@@ -19,6 +19,7 @@ from corridor import agents, identity, payments
 from corridor.api.deps import Db, SettingsDep, require
 from corridor.api.idempotency import IdempotencyKey, StoredResponse, run_idempotent, to_response
 from corridor.api.middleware import route_template
+from corridor.api.ratelimit import money_rate_limit
 from corridor.api.routers.approvals import AwaitingApprovalResponse, awaiting_approval
 from corridor.api.schemas import Text
 from corridor.identity import Principal, Scope
@@ -29,7 +30,10 @@ from corridor.platform.pagination import DEFAULT_LIMIT, Page
 
 log = get_logger(__name__)
 
-router = APIRouter(prefix="/v1/transfers", tags=["transfers"])
+# Every route here is limited by who is acting, as well as by where the request came from.
+router = APIRouter(
+    prefix="/v1/transfers", tags=["transfers"], dependencies=[Depends(money_rate_limit)]
+)
 
 TransferCreator = Annotated[Principal, Depends(require(Scope.TRANSFERS_CREATE))]
 TransferReader = Annotated[Principal, Depends(require(Scope.TRANSFERS_READ))]
@@ -146,7 +150,9 @@ async def create_transfer(
                 intent = agents.TransferIntent(
                     recipient=body.recipient, asset=body.asset, amount=amount, memo=body.memo
                 )
-                return awaiting_approval(await agents.request_approval(session, principal, intent))
+                return awaiting_approval(
+                    await agents.request_approval(session, principal, intent, settings=settings)
+                )
         transfer = await payments.create_transfer(
             session,
             principal,

@@ -13,7 +13,7 @@ from pydantic import Field
 from sqlalchemy import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from corridor import audit, identity, ledger, wallets
+from corridor import audit, identity, ledger, risk, wallets
 from corridor.ledger import AccountKind, EntryDraft, PostingDraft, credit, debit
 from corridor.payments import deposits, withdrawals
 from corridor.payments.errors import DepositNotReceived
@@ -168,7 +168,7 @@ async def _take_back(session: AsyncSession, deposit: RowMapping) -> int:
         user = await identity.get_user(session, user_id)
         # A closed account moves no money already, and cannot be restricted.
         if user.status != "closed":
-            await identity.restrict_user(session, user_id, RESTRICTION_REASON)
+            await risk.restrict_user(session, user_id, RESTRICTION_REASON)
     return shortfall
 
 

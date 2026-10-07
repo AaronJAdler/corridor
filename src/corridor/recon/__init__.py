@@ -3,7 +3,13 @@
 Other modules use the names exported here and nothing else from this package.
 """
 
-from corridor.recon.breaks import MAX_NOTE_LENGTH, list_breaks, list_runs, resolve_break
+from corridor.recon.breaks import (
+    MAX_NOTE_LENGTH,
+    count_open_breaks,
+    list_breaks,
+    list_runs,
+    resolve_break,
+)
 from corridor.recon.errors import BreakNotFound, BreakNotOpen, InvalidNote
 from corridor.recon.service import LOOKBACK, run
 from corridor.recon.types import SYSTEM, Break, BreakKind, BreakStatus, Run, RunResult, RunStatus
@@ -21,6 +27,7 @@ __all__ = [
     "Run",
     "RunResult",
     "RunStatus",
+    "count_open_breaks",
     "list_breaks",
     "list_runs",
     "resolve_break",

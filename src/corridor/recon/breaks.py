@@ -8,7 +8,7 @@ from collections.abc import Collection
 from datetime import datetime
 from typing import Final, cast
 
-from sqlalchemy import RowMapping, Table, insert, select, update
+from sqlalchemy import RowMapping, Table, func, insert, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -134,6 +134,15 @@ async def resolve_as_system(session: AsyncSession, break_id: uuid.UUID, note: st
         resource_id=break_id,
         details={"note": note},
     )
+
+
+async def count_open_breaks(session: AsyncSession) -> int:
+    """How many breaks nobody has resolved. For the worker's gauge: a number, and nothing
+    about any break."""
+    counted = await session.execute(
+        select(func.count()).select_from(_breaks).where(_breaks.c.status == "open")
+    )
+    return int(counted.scalar_one())
 
 
 async def list_breaks(

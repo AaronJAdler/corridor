@@ -15,11 +15,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from corridor import payments
 from corridor.api.container import Container
 from corridor.api.deps import Db, get_container, require
+from corridor.api.ratelimit import money_rate_limit
 from corridor.identity import Principal, Scope
 from corridor.platform.money import format_amount
 from corridor.platform.pagination import DEFAULT_LIMIT, Page
 
-instructions_router = APIRouter(prefix="/v1/deposit-instructions", tags=["deposits"])
+# Every route here is limited by who is acting, as well as by where the request came from.
+instructions_router = APIRouter(
+    prefix="/v1/deposit-instructions", tags=["deposits"], dependencies=[Depends(money_rate_limit)]
+)
 router = APIRouter(prefix="/v1/deposits", tags=["deposits"])
 
 DepositReader = Annotated[Principal, Depends(require(Scope.DEPOSITS_READ))]
