@@ -5,6 +5,9 @@ transaction: the amount and the fee move from the user's available balance to th
 balance, the withdrawal is recorded as ``held``, and an outbox event asks for it to be sent
 to the provider. Sending, settling and releasing are in ``handlers``.
 
+``held`` means reserved and never sent. Sending begins by recording the withdrawal as
+``submitting``, and from then on the provider may have it.
+
 Every change of state happens with the withdrawal's row locked and after a look at the
 state it is in, so an event that is late, repeated or out of order finds nothing to do.
 """
@@ -193,8 +196,10 @@ async def cancel_withdrawal(
 ) -> Withdrawal:
     """Call back a withdrawal that has not been sent yet, and release its funds.
 
-    Only the user it belongs to can, and only while it is ``held``: once the provider has
-    it, or it has ended some other way, the answer is a conflict.
+    Only the user it belongs to can, and only while it is ``held``: once it is being sent
+    to the provider, or has ended some other way, the answer is a conflict. ``held`` is the
+    one state in which the provider is certain not to have it, which is what makes giving
+    the funds back safe.
     """
     identity.require_scope(principal, Scope.WITHDRAWALS_CREATE)
     # Locked only if it is this user's: nobody can hold a lock on someone else's row.
@@ -304,14 +309,20 @@ async def find(session: AsyncSession, withdrawal_id: uuid.UUID) -> Withdrawal | 
 
 
 async def overdue(session: AsyncSession, before: datetime, *, limit: int) -> list[Withdrawal]:
-    """The withdrawals still in flight that should have moved on by now, oldest first:
-    submitted before ``before`` and not settled, or held since before it and not sent."""
+    """The withdrawals a provider may have and should have been heard about by now, oldest
+    first: submitted before ``before`` and not settled, or marked as being sent before it
+    and never recorded as sent.
+
+    A withdrawal that is only held is not among them however old it is: it has never been
+    sent, so there is nothing a provider could say about it.
+    """
     rows = await session.execute(
         select(_withdrawals)
         .where(
             or_(
                 and_(_withdrawals.c.status == "submitted", _withdrawals.c.submitted_at <= before),
-                and_(_withdrawals.c.status == "held", _withdrawals.c.created_at <= before),
+                # The mark is the last thing written to a row that is still submitting.
+                and_(_withdrawals.c.status == "submitting", _withdrawals.c.updated_at <= before),
             )
         )
         .order_by(_withdrawals.c.id)

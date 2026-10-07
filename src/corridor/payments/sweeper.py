@@ -1,11 +1,11 @@
 """The payout sweeper: a scheduled job that asks a provider what became of a withdrawal
 when nothing has been heard.
 
-Webhooks get lost, and so can the outbox event that sends a withdrawal. Neither may leave
-a user's funds reserved for ever. The sweeper finds the withdrawals that have been in
-flight for too long and reads their payouts from the provider, then applies what it reads
-through the same functions the webhooks use, so it can be run at any time, any number of
-times, alongside them.
+Webhooks get lost, and so can the answer to the request that sends a withdrawal. Neither
+may leave a user's funds reserved for ever. The sweeper finds the withdrawals that have
+been in flight for too long and reads their payouts from the provider, then applies what
+it reads through the same functions the webhooks use, so it can be run at any time, any
+number of times, alongside them.
 """
 
 from datetime import timedelta
@@ -28,13 +28,14 @@ BATCH_SIZE: Final = 100
 
 
 async def sweep_payouts(
-    db: Database, bank: BankRail, custody: Custodian, settings: Settings
+    db: Database, bank: BankRail | None, custody: Custodian | None, settings: Settings
 ) -> int:
     """Advance every overdue withdrawal the provider can account for. Returns how many moved.
 
-    A withdrawal is overdue once it has been ``submitted``, or still ``held``, for
+    A withdrawal is overdue once it has been ``submitted``, or left ``submitting``, for
     ``payout_sweep_after_seconds``. The provider is read with no transaction open. A
-    provider that cannot be reached for one withdrawal costs that one its turn and no more.
+    provider that cannot be reached for one withdrawal costs that one its turn and no more,
+    and so does a provider this process was not given.
     """
     before = utcnow() - timedelta(seconds=settings.payout_sweep_after_seconds)
     due = await db.run(lambda session: withdrawals.overdue(session, before, limit=BATCH_SIZE))
@@ -57,20 +58,19 @@ async def sweep_payouts(
     return advanced
 
 
-async def _sweep(db: Database, bank: BankRail, custody: Custodian, withdrawal: Withdrawal) -> bool:
+async def _sweep(
+    db: Database, bank: BankRail | None, custody: Custodian | None, withdrawal: Withdrawal
+) -> bool:
     reference = str(withdrawal.id)
     found: Payout | CustodyWithdrawal
     moved = False
 
     if withdrawal.provider_ref is None:
-        # Held for too long: the event that sends it may be dead. If the provider has a
-        # payout under this reference, the submission did happen and only its record is
-        # missing. If it has none, the withdrawal is left held, and can still be sent.
-        candidates: tuple[Payout, ...] | tuple[CustodyWithdrawal, ...] = (
-            await bank.find_payouts(reference)
-            if withdrawal.kind == "bank"
-            else await custody.find_withdrawals(reference)
-        )
+        # Marked as being sent, and nothing recorded since: the worker that was sending it
+        # may have died, or its event may be dead. If the provider has a payout under this
+        # reference, the submission did happen and only its record is missing. If it has
+        # none, the withdrawal is left as it is for its event to send.
+        candidates = await _find(bank, custody, withdrawal)
         if not candidates:
             return False
         if len(candidates) > 1:
@@ -81,11 +81,7 @@ async def _sweep(db: Database, bank: BankRail, custody: Custodian, withdrawal: W
         await handlers.record_submission(db, withdrawal.id, found.id)
         moved = True
     else:
-        found = (
-            await bank.get_payout(withdrawal.provider_ref)
-            if withdrawal.kind == "bank"
-            else await custody.get_withdrawal(withdrawal.provider_ref)
-        )
+        found = await _get(bank, custody, withdrawal, withdrawal.provider_ref)
         if found.reference != reference:
             raise ProviderEventMismatch(f"payout {found.id} is not withdrawal {reference}'s")
 
@@ -113,3 +109,29 @@ async def _sweep(db: Database, bank: BankRail, custody: Custodian, withdrawal: W
         return True
     # Still on its way at the provider. Leave it for the webhook, or the next run.
     return moved
+
+
+async def _find(
+    bank: BankRail | None, custody: Custodian | None, withdrawal: Withdrawal
+) -> tuple[Payout, ...] | tuple[CustodyWithdrawal, ...]:
+    """What the withdrawal's provider holds under its reference."""
+    if withdrawal.kind == "bank":
+        if bank is None:
+            raise handlers.not_configured("bank")
+        return await bank.find_payouts(str(withdrawal.id))
+    if custody is None:
+        raise handlers.not_configured("chain")
+    return await custody.find_withdrawals(str(withdrawal.id))
+
+
+async def _get(
+    bank: BankRail | None, custody: Custodian | None, withdrawal: Withdrawal, provider_ref: str
+) -> Payout | CustodyWithdrawal:
+    """The payout the withdrawal was recorded as, read from its provider."""
+    if withdrawal.kind == "bank":
+        if bank is None:
+            raise handlers.not_configured("bank")
+        return await bank.get_payout(provider_ref)
+    if custody is None:
+        raise handlers.not_configured("chain")
+    return await custody.get_withdrawal(provider_ref)

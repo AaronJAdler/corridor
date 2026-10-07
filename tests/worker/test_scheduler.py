@@ -552,7 +552,7 @@ async def test_the_purge_job_runs_hourly(db: Database, settings: Settings) -> No
     assert by_name["outbox.purge_finished"].interval_seconds == 3600
 
 
-def test_the_jobs_that_exist_are_the_two_purges(settings: Settings) -> None:
+def test_the_jobs_of_a_worker_with_no_provider_are_the_two_purges(settings: Settings) -> None:
     assert sorted(job.name for job in build_jobs(settings)) == [
         "idempotency.purge_expired",
         "outbox.purge_finished",

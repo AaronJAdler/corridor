@@ -307,8 +307,10 @@ async def test_the_gauges_show_the_queue_after_a_drain(
 # --- what a worker is built from -------------------------------------------------------------
 
 
-async def test_the_registry_handles_a_ping_by_doing_nothing(db: Database) -> None:
-    registry = build_registry()
+async def test_the_registry_handles_a_ping_by_doing_nothing(
+    db: Database, settings: Settings
+) -> None:
+    registry = build_registry(db, settings)
     event_id = await enqueue_event(db, "worker.ping")
 
     handler = registry.handler_for("worker.ping")
@@ -326,7 +328,7 @@ async def test_a_transfers_event_is_done_after_a_drain_with_the_real_registry(
     await deposit(db, maria, 100_00)
     await send(db, settings, maria, joao, 30_00)
 
-    await Dispatcher(db, build_registry(), settings).drain()
+    await Dispatcher(db, build_registry(db, settings), settings).drain()
 
     assert await status_counts(db) == {"done": 1}
 
@@ -368,9 +370,11 @@ def enqueued_topics() -> dict[str, str]:
     return topics
 
 
-def test_every_topic_enqueued_anywhere_in_src_has_a_registered_handler() -> None:
+async def test_every_topic_enqueued_anywhere_in_src_has_a_registered_handler(
+    db: Database, settings: Settings
+) -> None:
     topics = enqueued_topics()
-    registry = build_registry()
+    registry = build_registry(db, settings)
 
     assert "transfer.completed" in topics
     assert {

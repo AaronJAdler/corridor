@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from corridor import __version__, identity
+from corridor import __version__, identity, webhooks
 from corridor.api import health
 from corridor.api.container import Container
 from corridor.api.errors import install_error_handlers
@@ -32,6 +32,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # a token must not start, and the error says which setting is wrong.
         keys = identity.load_keyset(resolved)
         hasher = identity.PasswordHasher(resolved)
+        # With one secret for both providers, an event signed by one would verify on the
+        # other's path. That is refused here, before a single delivery can be accepted.
+        webhooks.validate_secrets(resolved)
         # A provider with an address and no key refuses to be built, as a missing signing
         # key does. One with no address is left out, and the API runs without it.
         bank = SimBank(resolved) if resolved.bank_rail_url else None

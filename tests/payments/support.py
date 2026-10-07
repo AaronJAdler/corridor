@@ -1,7 +1,7 @@
 """Builders for payment tests: people with wallets, money in them, and a transfer in a line."""
 
 import uuid
-from typing import Any
+from typing import Any, NoReturn
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -253,3 +253,30 @@ async def held_chain_withdrawal(
     """A user with 50 USDC and one withdrawal to an address, held."""
     await deposit(db, user, 50_000_000, "USDC")
     return await withdraw(db, settings, user, amount, asset="USDC", to_address=to_address)
+
+
+class WorkerDied(Exception):
+    """Raised in place of a provider call, as a worker that dies there makes none."""
+
+
+class _NeverAsked:
+    """A provider that is never reached: the call that would ask it ends the worker."""
+
+    name = "nobody"
+
+    async def create_payout(self, **_arguments: Any) -> NoReturn:
+        raise WorkerDied
+
+    async def create_withdrawal(self, **_arguments: Any) -> NoReturn:
+        raise WorkerDied
+
+
+async def leave_submitting(db: Database, withdrawal_id: uuid.UUID) -> None:
+    """Leave a held withdrawal as a worker does that dies after marking it as being sent
+    and before asking the provider: ``submitting``, with nothing at the provider."""
+    nobody: Any = _NeverAsked()
+    try:
+        await payments.submit_withdrawal(db, nobody, nobody, withdrawal_id)
+    except WorkerDied:
+        return
+    raise AssertionError(f"withdrawal {withdrawal_id} was not held, so nothing was asked")

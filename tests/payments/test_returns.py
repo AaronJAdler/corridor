@@ -69,7 +69,7 @@ async def test_a_return_with_the_funds_intact_reverses_the_deposit(
     assert await receivable(db, maria) == 0
     assert await status_of(db) == "returned"
     assert await user_status(db, maria) == "active"
-    credit, reversal = await entries(db, "deposit", data["deposit_id"])
+    credit, reversal = await entries(db, "deposit", f"simbank:{data['deposit_id']}")
     assert (credit["kind"], reversal["kind"]) == ("deposit", "deposit_return")
     assert reversal["postings"] == [
         ("user_available", "D", 100_00),
@@ -101,7 +101,7 @@ async def test_a_return_after_spending_books_the_shortfall_and_restricts_the_use
     assert await settlement(db) == 0
     assert await available(db, joao) == 70_00
     assert await status_of(db) == "returned"
-    (_, reversal) = await entries(db, "deposit", data["deposit_id"])
+    (_, reversal) = await entries(db, "deposit", f"simbank:{data['deposit_id']}")
     assert reversal["postings"] == [
         ("user_available", "D", 30_00),
         ("user_receivable", "D", 70_00),
@@ -135,7 +135,7 @@ async def test_a_return_after_spending_everything_is_all_shortfall(
     )
 
     assert await receivable(db, maria) == 100_00
-    (_, reversal) = await entries(db, "deposit", data["deposit_id"])
+    (_, reversal) = await entries(db, "deposit", f"simbank:{data['deposit_id']}")
     assert reversal["postings"] == [
         ("user_receivable", "D", 100_00),
         ("bank_settlement", "C", 100_00),
@@ -211,7 +211,7 @@ async def test_a_returned_deposit_that_was_in_suspense_leaves_suspense(
     assert await suspense(db) == 0
     assert await settlement(db) == 0
     assert await status_of(db) == "returned"
-    (_, reversal) = await entries(db, "deposit", data["deposit_id"])
+    (_, reversal) = await entries(db, "deposit", f"simbank:{data['deposit_id']}")
     assert reversal["kind"] == "deposit_return"
     assert reversal["postings"] == [("suspense", "D", 40_00), ("bank_settlement", "C", 40_00)]
 

@@ -10,7 +10,11 @@ from pydantic import SecretStr
 
 from corridor import payments
 from corridor.identity import User
-from corridor.payments import MalformedProviderEvent, ProviderEventMismatch
+from corridor.payments import (
+    MalformedProviderEvent,
+    ProviderEventMismatch,
+    WithdrawalNotCancelable,
+)
 from corridor.platform.clock import ManualClock
 from corridor.platform.config import Settings
 from corridor.platform.db import Database
@@ -227,7 +231,7 @@ async def test_a_key_the_provider_says_was_used_for_something_else_is_not_a_refu
         await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
 
     row = await withdrawal_row(db, withdrawal.id)
-    assert (row["status"], row["failure_reason"]) == ("held", None)
+    assert (row["status"], row["failure_reason"]) == ("submitting", None)
     assert (await available(db, maria), await held(db, maria)) == (398_50, 101_50)
     assert await count(db, "journal_entries") == 2
 
@@ -247,7 +251,7 @@ async def test_an_accepted_payout_whose_answer_was_lost_is_found_by_the_retry(
 
     with pytest.raises(ProviderOutcomeUnknown):
         await payments.submit_withdrawal(db, impatient, custody, withdrawal.id)
-    assert await status_of(db, withdrawal) == "held"
+    assert await status_of(db, withdrawal) == "submitting"
     assert (await available(db, maria), await held(db, maria)) == (398_50, 101_50)
 
     await payments.submit_withdrawal(db, impatient, custody, withdrawal.id)
@@ -259,7 +263,7 @@ async def test_an_accepted_payout_whose_answer_was_lost_is_found_by_the_retry(
 
 
 @pytest.mark.parametrize("mode", ["timeout", "error"])
-async def test_a_provider_that_does_not_answer_leaves_the_funds_held_and_is_retried(
+async def test_a_provider_that_does_not_answer_leaves_the_funds_reserved_and_is_retried(
     db: Database,
     charging: Settings,
     sim: Sim,
@@ -275,9 +279,19 @@ async def test_a_provider_that_does_not_answer_leaves_the_funds_held_and_is_retr
         await payments.submit_withdrawal(db, impatient, custody, withdrawal.id)
 
     row = await withdrawal_row(db, withdrawal.id)
-    assert (row["status"], row["provider_ref"], row["failure_reason"]) == ("held", None, None)
+    assert (row["status"], row["provider_ref"], row["failure_reason"]) == (
+        "submitting",
+        None,
+        None,
+    )
     assert (await available(db, maria), await held(db, maria)) == (398_50, 101_50)
     assert await sim.payouts() == []
+
+    await payments.submit_withdrawal(db, impatient, custody, withdrawal.id)
+
+    (payout,) = await sim.payouts()
+    assert payout["idempotency_key"] == str(withdrawal.id)
+    assert await status_of(db, withdrawal) == "submitted"
 
 
 async def test_a_provider_that_rejects_corridors_key_fails_nothing_and_is_raised(
@@ -291,7 +305,7 @@ async def test_a_provider_that_rejects_corridors_key_fails_nothing_and_is_raised
     with pytest.raises(ProviderMisconfigured):
         await payments.submit_withdrawal(db, locked_out, custody, withdrawal.id)
 
-    assert await status_of(db, withdrawal) == "held"
+    assert await status_of(db, withdrawal) == "submitting"
     assert await held(db, maria) == 101_50
 
 
@@ -722,20 +736,25 @@ async def test_an_event_for_a_reference_that_is_not_a_withdrawal_is_refused(
     assert await held(db, maria) == 101_50
 
 
-class CanceledMeanwhileBank:
-    """A bank during whose call the user cancels the withdrawal, and which then answers:
-    with the payout it accepted, or with a refusal."""
+class CancelingMeanwhileBank:
+    """A bank during whose call the user tries to cancel the withdrawal, and which then
+    answers: with the payout it accepted, or with a refusal."""
 
     name = "simbank"
 
     def __init__(self, inner: SimBank, db: Database, user: User, *, refuse: bool) -> None:
         self._inner, self._db, self._user, self._refuse = inner, db, user, refuse
 
+    def __getattr__(self, name: str) -> Any:
+        # Everything but the request itself is the bank's own.
+        return getattr(self._inner, name)
+
     async def create_payout(self, **arguments: Any) -> Payout:
-        async with self._db.transaction() as session:
-            await payments.cancel_withdrawal(
-                session, acting_as(self._user), uuid.UUID(arguments["reference"])
-            )
+        with pytest.raises(WithdrawalNotCancelable):
+            async with self._db.transaction() as session:
+                await payments.cancel_withdrawal(
+                    session, acting_as(self._user), uuid.UUID(arguments["reference"])
+                )
         if self._refuse:
             raise ProviderRejected(
                 "invalid_amount", "refused", 422, provider=self.name, operation="create_payout"
@@ -743,8 +762,14 @@ class CanceledMeanwhileBank:
         return await self._inner.create_payout(**arguments)
 
 
-@pytest.mark.parametrize("refuse", [True, False])
-async def test_an_answer_that_arrives_after_the_user_canceled_does_not_change_the_withdrawal(
+@pytest.mark.parametrize(
+    ("refuse", "outcome", "balances", "entries_posted"),
+    [
+        (True, ("failed", "invalid_amount"), (500_00, 0), 3),
+        (False, ("submitted", None), (398_50, 101_50), 2),
+    ],
+)
+async def test_a_cancellation_during_the_providers_call_is_refused_and_the_answer_decides(
     db: Database,
     charging: Settings,
     sim: Sim,
@@ -752,13 +777,18 @@ async def test_an_answer_that_arrives_after_the_user_canceled_does_not_change_th
     custody: SimCustody,
     maria: User,
     refuse: bool,
+    outcome: tuple[str, str | None],
+    balances: tuple[int, int],
+    entries_posted: int,
 ) -> None:
     withdrawal = await held_bank_withdrawal(db, charging, bank, maria)
-    racing: Any = CanceledMeanwhileBank(bank, db, maria, refuse=refuse)
+    racing: Any = CancelingMeanwhileBank(bank, db, maria, refuse=refuse)
 
     await payments.submit_withdrawal(db, racing, custody, withdrawal.id)
 
     row = await withdrawal_row(db, withdrawal.id)
-    assert (row["status"], row["failure_reason"], row["submitted_at"]) == ("canceled", None, None)
-    assert (await available(db, maria), await held(db, maria)) == (500_00, 0)
-    assert await count(db, "journal_entries") == 3
+    assert (row["status"], row["failure_reason"]) == outcome
+    assert (await available(db, maria), await held(db, maria)) == balances
+    # The funds went back at most once, and only because the provider refused.
+    assert await count(db, "journal_entries") == entries_posted
+    assert len(await sim.payouts()) == (0 if refuse else 1)

@@ -117,8 +117,8 @@ class WithdrawalRow(Base):
         CheckConstraint("provider_fee >= 0", name="provider_fee"),
         CheckConstraint("kind IN ('bank', 'chain')", name="kind"),
         CheckConstraint(
-            "status IN ('held', 'under_review', 'submitted', 'completed', 'failed',"
-            " 'canceled', 'released')",
+            "status IN ('held', 'under_review', 'submitting', 'submitted', 'completed',"
+            " 'failed', 'canceled', 'released')",
             name="status",
         ),
         CheckConstraint(

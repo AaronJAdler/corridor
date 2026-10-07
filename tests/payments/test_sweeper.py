@@ -10,7 +10,7 @@ from corridor.identity import User
 from corridor.platform.clock import ManualClock
 from corridor.platform.config import Settings
 from corridor.platform.db import Database
-from corridor.providers import SimBank, SimCustody
+from corridor.providers import ProviderOutcomeUnknown, SimBank, SimCustody
 from tests.payments.support import (
     add_beneficiary,
     available,
@@ -18,6 +18,7 @@ from tests.payments.support import (
     held,
     held_bank_withdrawal,
     held_chain_withdrawal,
+    leave_submitting,
     revenue_and_expense,
     settlement,
     withdraw,
@@ -185,7 +186,7 @@ async def test_sweeping_twice_settles_once(
     assert await count(db, "journal_entries") == 3
 
 
-async def test_a_held_withdrawal_the_provider_already_has_is_found_and_advanced(
+async def test_a_withdrawal_left_submitting_that_the_provider_has_is_found_and_advanced(
     db: Database,
     charging: Settings,
     sim: Sim,
@@ -195,22 +196,19 @@ async def test_a_held_withdrawal_the_provider_already_has_is_found_and_advanced(
     maria: User,
 ) -> None:
     withdrawal = await held_bank_withdrawal(db, charging, bank, maria)
-    # The submission reached the bank and was never recorded, and its event is dead.
-    (token,) = sim.app.state.sim.bank._beneficiaries
-    payout = await bank.create_payout(
-        beneficiary_id=token,
-        asset_code="USD",
-        amount=100_00,
-        reference=str(withdrawal.id),
-        idempotency_key=str(withdrawal.id),
-    )
+    # The submission reached the bank and its answer never arrived, and its event is dead.
+    await sim.inject("bank.create_payout", "error_after_effect")
+    with pytest.raises(ProviderOutcomeUnknown):
+        await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
+    (payout,) = await sim.payouts()
+    assert (await withdrawal_row(db, withdrawal.id))["status"] == "submitting"
     clock.advance(seconds=SWEEP_AFTER)
 
     assert await payments.sweep_payouts(db, bank, custody, charging) == 1
     row = await withdrawal_row(db, withdrawal.id)
     assert (row["status"], row["provider_ref"], row["submitted_at"]) == (
         "submitted",
-        payout.id,
+        payout["id"],
         clock.now(),
     )
     assert await held(db, maria) == 101_50
@@ -221,7 +219,7 @@ async def test_a_held_withdrawal_the_provider_already_has_is_found_and_advanced(
     assert (await available(db, maria), await held(db, maria)) == (398_50, 0)
 
 
-async def test_a_held_withdrawal_found_already_paid_out_is_settled_in_the_same_sweep(
+async def test_a_withdrawal_left_submitting_and_found_paid_out_is_settled_in_the_same_sweep(
     db: Database,
     charging: Settings,
     sim: Sim,
@@ -231,14 +229,9 @@ async def test_a_held_withdrawal_found_already_paid_out_is_settled_in_the_same_s
     maria: User,
 ) -> None:
     withdrawal = await held_bank_withdrawal(db, charging, bank, maria)
-    (token,) = sim.app.state.sim.bank._beneficiaries
-    await bank.create_payout(
-        beneficiary_id=token,
-        asset_code="USD",
-        amount=100_00,
-        reference=str(withdrawal.id),
-        idempotency_key=str(withdrawal.id),
-    )
+    await sim.inject("bank.create_payout", "error_after_effect")
+    with pytest.raises(ProviderOutcomeUnknown):
+        await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
     await advance(sim, clock, SWEEP_AFTER)
 
     assert await payments.sweep_payouts(db, bank, custody, charging) == 1
@@ -247,7 +240,7 @@ async def test_a_held_withdrawal_found_already_paid_out_is_settled_in_the_same_s
     assert await settlement(db) == 399_75
 
 
-async def test_a_held_withdrawal_the_provider_has_never_seen_stays_held(
+async def test_the_sweeper_never_asks_about_a_withdrawal_that_is_only_held(
     db: Database,
     charging: Settings,
     sim: Sim,
@@ -257,6 +250,27 @@ async def test_a_held_withdrawal_the_provider_has_never_seen_stays_held(
     maria: User,
 ) -> None:
     withdrawal = await held_bank_withdrawal(db, charging, bank, maria)
+    clock.advance(seconds=10 * SWEEP_AFTER)
+
+    assert await payments.sweep_payouts(db, bank, custody, charging) == 0
+
+    # Held means never sent: there is nothing a provider could say about it.
+    assert polls(sim) == []
+    assert (await withdrawal_row(db, withdrawal.id))["status"] == "held"
+    assert await held(db, maria) == 101_50
+
+
+async def test_a_withdrawal_left_submitting_that_the_provider_has_never_seen_stays_as_it_is(
+    db: Database,
+    charging: Settings,
+    sim: Sim,
+    bank: SimBank,
+    custody: SimCustody,
+    clock: ManualClock,
+    maria: User,
+) -> None:
+    withdrawal = await held_bank_withdrawal(db, charging, bank, maria)
+    await leave_submitting(db, withdrawal.id)
     clock.advance(seconds=SWEEP_AFTER - 1)
     assert await payments.sweep_payouts(db, bank, custody, charging) == 0
     assert polls(sim) == []
@@ -266,9 +280,9 @@ async def test_a_held_withdrawal_the_provider_has_never_seen_stays_held(
 
     (poll,) = polls(sim)
     assert poll.url.params["reference"] == str(withdrawal.id)
-    assert (await withdrawal_row(db, withdrawal.id))["status"] == "held"
+    assert (await withdrawal_row(db, withdrawal.id))["status"] == "submitting"
     assert await held(db, maria) == 101_50
-    # Still held, so the submission can still go out, and the user can still call it back.
+    # The funds stay reserved, and the submission can still go out.
     await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
     assert (await withdrawal_row(db, withdrawal.id))["status"] == "submitted"
 
@@ -362,6 +376,7 @@ async def test_two_payouts_under_one_reference_are_not_chosen_between(
     maria: User,
 ) -> None:
     withdrawal = await held_bank_withdrawal(db, charging, bank, maria)
+    await leave_submitting(db, withdrawal.id)
     (token,) = sim.app.state.sim.bank._beneficiaries
     for key in ("one", "two"):
         await bank.create_payout(
@@ -376,5 +391,5 @@ async def test_two_payouts_under_one_reference_are_not_chosen_between(
     assert await payments.sweep_payouts(db, bank, custody, charging) == 0
 
     row = await withdrawal_row(db, withdrawal.id)
-    assert (row["status"], row["provider_ref"]) == ("held", None)
+    assert (row["status"], row["provider_ref"]) == ("submitting", None)
     assert await held(db, maria) == 101_50

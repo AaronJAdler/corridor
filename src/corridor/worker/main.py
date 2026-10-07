@@ -8,6 +8,7 @@ while the listener is reconnecting is lost, and the poll is what finds its event
 import asyncio
 import contextlib
 import signal
+import uuid
 from collections.abc import Sequence
 from types import FrameType
 
@@ -15,19 +16,23 @@ import asyncpg  # type: ignore[import-untyped]  # asyncpg ships no type informat
 from prometheus_client import start_http_server
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from corridor import outbox
+from corridor import outbox, payments, webhooks
 from corridor.outbox import Dispatcher, OutboxEvent, Registry
 from corridor.platform.config import Settings
 from corridor.platform.db import Database, create_engine
 from corridor.platform.logging import configure_logging, get_logger
 from corridor.platform.metrics import OUTBOX_DEAD, OUTBOX_OLDEST_PENDING_SECONDS, OUTBOX_PENDING
+from corridor.providers import BankRail, Custodian, SimBank, SimCustody
 from corridor.worker.jobs import build_jobs
 from corridor.worker.scheduler import Job, Scheduler
+from corridor.worker.webhook_routes import build_webhook_registry
 
 log = get_logger(__name__)
 
 PING_TOPIC = "worker.ping"
 TRANSFER_COMPLETED_TOPIC = "transfer.completed"
+DEPOSIT_COMPLETED_TOPIC = "deposit.completed"
+WITHDRAWAL_SUBMIT_TOPIC = "withdrawal.submit"
 
 
 class Worker:
@@ -168,11 +173,40 @@ async def _transfer_completed(_event: OutboxEvent) -> None:
     would go dead instead of done."""
 
 
-def build_registry() -> Registry:
-    """The handlers that exist today, by topic."""
+async def _deposit_completed(_event: OutboxEvent) -> None:
+    """Does nothing yet, for the same reason: nothing consumes a completed deposit."""
+
+
+def build_registry(
+    db: Database,
+    settings: Settings,
+    *,
+    bank: BankRail | None = None,
+    custody: Custodian | None = None,
+) -> Registry:
+    """The handlers that exist today, by topic.
+
+    A provider that is not configured is left out, and a worker runs without it: an event
+    that needs it fails with an error that says so, and is retried like any other failure.
+    ``settings`` is not read by any handler yet; it is taken so that the first one that
+    needs configuration does not change what every caller passes.
+    """
+    webhook_registry = build_webhook_registry()
+
+    async def webhook_received(event: OutboxEvent) -> None:
+        await webhooks.process(db, uuid.UUID(event.payload["webhook_event_id"]), webhook_registry)
+
+    async def withdrawal_submit(event: OutboxEvent) -> None:
+        await payments.submit_withdrawal(
+            db, bank, custody, uuid.UUID(event.payload["withdrawal_id"])
+        )
+
     registry = Registry()
     registry.register(PING_TOPIC, _ping)
     registry.register(TRANSFER_COMPLETED_TOPIC, _transfer_completed)
+    registry.register(DEPOSIT_COMPLETED_TOPIC, _deposit_completed)
+    registry.register(webhooks.RECEIVED_TOPIC, webhook_received)
+    registry.register(WITHDRAWAL_SUBMIT_TOPIC, withdrawal_submit)
     return registry
 
 
@@ -185,8 +219,17 @@ def run(settings: Settings) -> None:
 
 
 async def _serve(settings: Settings) -> None:
+    # As in the API: a provider with an address and no key refuses to be built, and one
+    # with no address is left out.
+    bank = SimBank(settings) if settings.bank_rail_url else None
+    custody = SimCustody(settings) if settings.custody_url else None
     db = Database(create_engine(settings, application_name="corridor-worker"))
-    worker = Worker(db, build_registry(), settings, jobs=build_jobs(settings))
+    worker = Worker(
+        db,
+        build_registry(db, settings, bank=bank, custody=custody),
+        settings,
+        jobs=build_jobs(settings, bank=bank, custody=custody),
+    )
     loop = asyncio.get_running_loop()
 
     def on_signal(_signal: int, _frame: FrameType | None) -> None:
@@ -204,3 +247,7 @@ async def _serve(settings: Settings) -> None:
         for number, handler in previous.items():
             signal.signal(number, handler)
         await db.dispose()
+        if bank is not None:
+            await bank.aclose()
+        if custody is not None:
+            await custody.aclose()

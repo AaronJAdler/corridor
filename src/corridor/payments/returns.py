@@ -144,7 +144,7 @@ async def _post(session: AsyncSession, deposit: RowMapping, debits: list[Posting
         EntryDraft(
             kind=RETURN_ENTRY_KIND,
             source_type=deposits.SOURCE_TYPE,
-            source_id=deposit["provider_ref"],
+            source_id=deposits.ledger_source_id(BANK_PROVIDER, deposit["provider_ref"]),
             postings=(*debits, credit(settlement.id, deposit["amount"])),
             metadata={"provider": BANK_PROVIDER, "deposit_id": str(deposit["id"])},
         ),

@@ -106,8 +106,10 @@ CREATE TABLE withdrawals (
     CONSTRAINT ck_withdrawals_fee CHECK (fee >= 0),
     CONSTRAINT ck_withdrawals_provider_fee CHECK (provider_fee >= 0),
     CONSTRAINT ck_withdrawals_kind CHECK (kind IN ('bank', 'chain')),
-    CONSTRAINT ck_withdrawals_status CHECK (status IN ('held', 'under_review', 'submitted',
-        'completed', 'failed', 'canceled', 'released')),
+    -- 'submitting' is written before the provider is asked, so that no payout can exist
+    -- for a withdrawal whose user was still able to call it back.
+    CONSTRAINT ck_withdrawals_status CHECK (status IN ('held', 'under_review', 'submitting',
+        'submitted', 'completed', 'failed', 'canceled', 'released')),
     -- A bank withdrawal goes to a saved beneficiary and an on-chain one to an address.
     CONSTRAINT ck_withdrawals_target CHECK (
         (kind = 'bank' AND beneficiary_id IS NOT NULL AND to_address IS NULL)

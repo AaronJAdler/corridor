@@ -209,6 +209,29 @@ async def test_a_row_that_could_not_be_a_deposit_is_refused(
 
 
 @pytest.mark.parametrize(
+    "status",
+    [
+        "held",
+        "under_review",
+        "submitting",
+        "submitted",
+        "completed",
+        "failed",
+        "canceled",
+        "released",
+    ],
+)
+async def test_a_withdrawal_can_be_recorded_in_each_state_of_its_saga(
+    db: Database, status: str
+) -> None:
+    await add_withdrawal(db, status=status)
+
+    async with db.transaction() as session:
+        stored = await session.execute(text("SELECT status FROM withdrawals"))
+        assert stored.scalars().all() == [status]
+
+
+@pytest.mark.parametrize(
     ("overrides", "constraint"),
     [
         ({"amount": 0}, "ck_withdrawals_amount"),

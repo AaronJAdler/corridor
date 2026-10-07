@@ -17,8 +17,18 @@ CUSTODY_PROVIDER: Final = "simcustody"
 FlowKind = Literal["bank", "chain"]
 
 DepositStatus = Literal["pending", "completed", "suspense", "failed", "returned"]
+# ``submitting`` is the state between deciding to ask the provider and knowing its answer:
+# the provider may or may not have the payout, so the funds stay reserved and the user can
+# no longer call the withdrawal back.
 WithdrawalStatus = Literal[
-    "held", "under_review", "submitted", "completed", "failed", "canceled", "released"
+    "held",
+    "under_review",
+    "submitting",
+    "submitted",
+    "completed",
+    "failed",
+    "canceled",
+    "released",
 ]
 
 

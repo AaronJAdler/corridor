@@ -2,11 +2,12 @@
 
 from datetime import timedelta
 
-from corridor import outbox
+from corridor import outbox, payments
 from corridor.platform.clock import utcnow
 from corridor.platform.config import Settings
 from corridor.platform.db import Database
 from corridor.platform.logging import get_logger
+from corridor.providers import BankRail, Custodian
 from corridor.worker.purge import purge_idempotency_keys
 from corridor.worker.scheduler import Job
 
@@ -15,10 +16,16 @@ log = get_logger(__name__)
 PURGE_INTERVAL_SECONDS = 3600.0
 # A day: longer than any client goes on retrying one request.
 IDEMPOTENCY_KEY_RETENTION = timedelta(hours=24)
+# How often overdue withdrawals are looked for. How long one waits before it counts as
+# overdue is a setting, `payout_sweep_after_seconds`.
+PAYOUT_SWEEP_INTERVAL_SECONDS = 30.0
 
 
-def build_jobs(settings: Settings) -> list[Job]:
-    """Every job that exists today."""
+def build_jobs(
+    settings: Settings, *, bank: BankRail | None = None, custody: Custodian | None = None
+) -> list[Job]:
+    """Every job that exists today. The payout sweep is among them only when there is a
+    provider to ask: a worker with none has no payouts to read."""
     retention = timedelta(days=settings.outbox_retention_days)
 
     async def purge_finished(db: Database) -> None:
@@ -35,7 +42,14 @@ def build_jobs(settings: Settings) -> list[Job]:
             )
         log.info("idempotency.purged", deleted=deleted)
 
-    return [
+    async def sweep_payouts(db: Database) -> None:
+        advanced = await payments.sweep_payouts(db, bank, custody, settings)
+        log.info("payout_sweep.done", advanced=advanced)
+
+    jobs = [
         Job("outbox.purge_finished", PURGE_INTERVAL_SECONDS, purge_finished),
         Job("idempotency.purge_expired", PURGE_INTERVAL_SECONDS, purge_idempotency),
     ]
+    if bank is not None or custody is not None:
+        jobs.append(Job("payments.sweep_payouts", PAYOUT_SWEEP_INTERVAL_SECONDS, sweep_payouts))
+    return jobs

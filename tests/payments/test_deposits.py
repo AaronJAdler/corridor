@@ -73,7 +73,7 @@ async def test_a_bank_deposit_is_credited_to_the_user_whose_account_it_arrived_a
     assert (row["user_id"], row["asset_code"], row["amount"]) == (maria.id, "USD", 250_00)
     assert (row["provider"], row["provider_ref"]) == ("simbank", data["deposit_id"])
     assert (row["kind"], row["status"], row["tx_hash"]) == ("bank", "completed", None)
-    (entry,) = await entries(db, "deposit", data["deposit_id"])
+    (entry,) = await entries(db, "deposit", f"simbank:{data['deposit_id']}")
     assert (entry["id"], entry["kind"]) == (row["entry_id"], "deposit")
     assert entry["postings"] == [
         ("bank_settlement", "D", 250_00),
@@ -156,7 +156,7 @@ async def test_a_deposit_to_an_account_nobody_was_given_goes_to_suspense(
     assert await available(db, maria) == 0
     (row,) = await deposit_rows(db)
     assert (row["user_id"], row["status"], row["amount"]) == (None, "suspense", 40_00)
-    (entry,) = await entries(db, "deposit", data["deposit_id"])
+    (entry,) = await entries(db, "deposit", f"simbank:{data['deposit_id']}")
     assert entry["kind"] == "deposit_suspense"
     assert entry["postings"] == [("bank_settlement", "D", 40_00), ("suspense", "C", 40_00)]
     assert await count(db, "outbox_events") == 0
@@ -330,7 +330,7 @@ async def test_a_confirmed_deposit_is_credited(
     assert await omnibus(db) == 25_000_000
     (row,) = await deposit_rows(db)
     assert (row["status"], row["user_id"]) == ("completed", maria.id)
-    (entry,) = await entries(db, "deposit", data["deposit_id"])
+    (entry,) = await entries(db, "deposit", f"simcustody:{data['deposit_id']}")
     assert (entry["id"], entry["kind"]) == (row["entry_id"], "deposit")
     assert entry["postings"] == [
         ("custody_omnibus", "D", 25_000_000),
@@ -535,6 +535,32 @@ async def test_a_chain_deposit_that_is_not_what_the_contract_says_is_refused(
         await payments.apply_chain_deposit_confirmed(db, data)
 
     assert await count(db, "deposits") == 0
+
+
+# --- two providers ---------------------------------------------------------------------------
+
+
+async def test_two_providers_that_give_their_deposits_the_same_id_are_both_credited(
+    db: Database, sim: Sim, bank: SimBank, custody: SimCustody, maria: User
+) -> None:
+    at_bank = await received(db, sim, bank, custody, maria)
+    await detected(db, sim, bank, custody, maria)
+    # Each provider numbers its own deposits, and nothing keeps their numbers apart.
+    on_chain = {**await confirmed(sim), "deposit_id": at_bank["deposit_id"]}
+
+    await payments.apply_bank_deposit_received(db, at_bank)
+    await payments.apply_chain_deposit_confirmed(db, on_chain)
+
+    assert await available(db, maria) == 250_00
+    assert await available(db, maria, "USDC") == 25_000_000
+    assert [(row["provider"], row["status"]) for row in await deposit_rows(db)] == [
+        ("simbank", "completed"),
+        ("simcustody", "completed"),
+    ]
+    (bank_entry,) = await entries(db, "deposit", f"simbank:{at_bank['deposit_id']}")
+    (chain_entry,) = await entries(db, "deposit", f"simcustody:{at_bank['deposit_id']}")
+    assert bank_entry["id"] != chain_entry["id"]
+    assert await entries(db, "deposit", at_bank["deposit_id"]) == []
 
 
 # --- reading ---------------------------------------------------------------------------------

@@ -291,6 +291,13 @@ async def find_deposit(
     return rows.mappings().one_or_none()
 
 
+def ledger_source_id(provider: str, provider_ref: str) -> str:
+    """What a deposit's journal entries are filed under: the provider with its id for the
+    deposit. Each provider numbers its own deposits, so the id alone could be two deposits,
+    and the second would be taken for a repeat of the first and never credited."""
+    return f"{provider}:{provider_ref}"
+
+
 def _amount(text: str, asset: str, kind: FlowKind) -> int:
     amount = amount_of(text, asset)
     if get_asset(asset).kind != _ASSET_KIND[kind]:
@@ -411,7 +418,7 @@ async def _credit(session: AsyncSession, deposit: RowMapping, user_id: uuid.UUID
         EntryDraft(
             kind=entry_kind,
             source_type=SOURCE_TYPE,
-            source_id=deposit["provider_ref"],
+            source_id=ledger_source_id(provider, deposit["provider_ref"]),
             postings=(debit(received.id, amount), credit(target, amount)),
             metadata={"provider": provider, "deposit_id": str(deposit["id"])},
         ),
