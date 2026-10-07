@@ -75,6 +75,10 @@ coverage = { sequence = [
 ], help = "Fail if coverage is under the thresholds: overall, then the money modules" }
 audit = { cmd = "pip-audit --progress-spinner off --skip-editable", help = "Check the installed dependencies for known vulnerabilities" }
 check = { sequence = ["lint", "typecheck", "contracts", "test-cov", "coverage"], help = "Every gate, in order" }
+e2e = { cmd = "python scripts/e2e.py", help = "Run API, worker and simulators as real processes and drive a scenario through them" }
+demo = { cmd = "python scripts/e2e.py demo", help = "Start a scratch stack and narrate a deposit, conversion, transfer and withdrawal" }
+lint-docker = { cmd = "uvx --from hadolint-bin==2.15.1 hadolint Dockerfile", help = "Lint the Dockerfile (hadolint; Linux and macOS)" }
+lint-compose = { cmd = "docker compose --env-file .env.example config --quiet", help = "Validate compose.yaml with the placeholder settings" }
 
 # --- Lint ------------------------------------------------------------------
 

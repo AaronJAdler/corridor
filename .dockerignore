@@ -1,0 +1,37 @@
+# The build context is the lockfile, the source, the migrations and nothing else. Local
+# configuration and generated keys in particular never reach the daemon.
+.git
+.github
+.venv
+.env
+.env.*
+.local
+**/__pycache__
+**/*.py[cod]
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.hypothesis
+.import_linter_cache
+.coverage
+.coverage.*
+htmlcov
+coverage.xml
+dist
+build
+*.egg-info
+
+tests
+scripts
+docs
+plans
+deploy
+infra
+Dockerfile
+.dockerignore
+compose.yaml
+.editorconfig
+.gitattributes
+.gitignore
+.idea
+.vscode

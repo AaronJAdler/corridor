@@ -1,5 +1,5 @@
-"""Command line: ``corridor serve``, ``corridor db migrate``, ``corridor keys generate``
-and, later, the rest."""
+"""Command line: ``corridor serve``, ``corridor worker``, ``corridor db migrate``,
+``corridor keys generate``, ``corridor verify-ledger`` and ``corridor demo``."""
 
 from pathlib import Path
 from typing import Annotated
@@ -79,9 +79,8 @@ def keys_generate(
     typer.echo(f"CORRIDOR_JWT_ADDITIONAL_PUBLIC_KEYS={shlex.quote(json.dumps([public_pem]))}")
 
 
-@app.command("verify-ledger")
-def verify_ledger() -> None:
-    """Recompute the ledger's invariants. Exits 1 if any is violated."""
+def _report_ledger() -> None:
+    """Recompute the ledger's invariants and say what was found. Exits 1 if any is violated."""
     import asyncio
 
     from sqlalchemy import text
@@ -111,6 +110,65 @@ def verify_ledger() -> None:
         typer.echo(f"Ledger verification FAILED: {len(findings)} finding(s).", err=True)
         raise typer.Exit(code=1)
     typer.echo("Ledger verification passed: no findings.")
+
+
+@app.command("verify-ledger")
+def verify_ledger() -> None:
+    """Recompute the ledger's invariants. Exits 1 if any is violated."""
+    _report_ledger()
+
+
+@app.command()
+def demo(
+    base_url: Annotated[str, typer.Option(help="Where the API listens.")] = "http://127.0.0.1:8000",
+    sim_url: Annotated[
+        str, typer.Option(help="Where the provider simulator listens.")
+    ] = "http://127.0.0.1:8100",
+    sim_api_key: Annotated[
+        str,
+        typer.Option(
+            envvar="CORRIDOR_BANK_RAIL_API_KEY",
+            show_envvar=True,
+            help="The provider API key the stack calls the simulator with.",
+        ),
+    ] = "",
+    sim_control_token: Annotated[
+        str,
+        typer.Option(
+            envvar="CORRIDOR_SIM_CONTROL_TOKEN",
+            show_envvar=True,
+            help="The simulator's control token, if it was started with one.",
+        ),
+    ] = "",
+    verify: Annotated[
+        bool,
+        typer.Option(help="End by verifying the ledger (needs the stack's database settings)."),
+    ] = True,
+) -> None:
+    """Walk a deposit, a conversion, a transfer and a withdrawal through a running stack.
+
+    The stack must be running against the provider simulator: the demo plays the bank.
+    """
+    from corridor import demo as story
+
+    if not sim_api_key:
+        raise typer.BadParameter(
+            "set CORRIDOR_BANK_RAIL_API_KEY or pass --sim-api-key", param_hint="--sim-api-key"
+        )
+    typer.echo(f"Corridor demo: the API at {base_url}, the simulated providers at {sim_url}.\n")
+    stack = story.Stack(
+        base_url, sim_url, sim_api_key=sim_api_key, sim_control_token=sim_control_token or None
+    )
+    try:
+        story.run(stack)
+    except story.DemoError as refusal:
+        typer.echo(f"The demo stopped: {refusal}.", err=True)
+        raise typer.Exit(code=1) from None
+    finally:
+        stack.close()
+    if verify:
+        typer.echo("6. Every balance is recomputed from the ledger's postings.")
+        _report_ledger()
 
 
 @app.command()

@@ -7,3 +7,8 @@
 *.ico binary
 *.pdf binary
 uv.lock linguist-generated=true
+
+# Shell scripts run inside Linux containers, whatever the checkout's platform: a carriage
+# return at the end of a line breaks them. Stated outright, so that it holds even if the
+# rule above is ever relaxed.
+*.sh text eol=lf

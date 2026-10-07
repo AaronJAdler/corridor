@@ -1,0 +1,184 @@
+# The whole system on one machine: PostgreSQL, Redis, a migration run, the API, the worker
+# and the simulated providers. For development and demonstration only: the providers are
+# simulated and Corridor runs in its development environment.
+#
+#   copy .env.example to .env and replace its values (the file says how)
+#   docker compose up --build --wait
+#   docker compose --profile demo run --rm demo
+#   docker compose down            (add --volumes to forget the database)
+#
+# The commands are the same in PowerShell and in a Unix shell. Only the API is reachable
+# from outside the stack's network, and only from this machine.
+
+name: corridor
+
+x-corridor: &corridor
+  image: corridor:local
+  build:
+    context: .
+    target: runtime
+  restart: unless-stopped
+  # The image writes nothing to its own filesystem and needs no privilege.
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+
+# What the API and the worker are both configured with. The owner connection is not among
+# it: only the migration run is given that.
+x-corridor-environment: &corridor-environment
+  CORRIDOR_ENVIRONMENT: development
+  CORRIDOR_DATABASE_URL: postgresql+asyncpg://corridor_app:${DB_APP_PASSWORD:?set DB_APP_PASSWORD in .env}@postgres:5432/corridor
+  CORRIDOR_REDIS_URL: redis://redis:6379/0
+  CORRIDOR_API_KEY_HASH_KEY: ${API_KEY_HASH_KEY:?set API_KEY_HASH_KEY in .env}
+  CORRIDOR_FX_CACHE_MAC_KEY: ${FX_CACHE_MAC_KEY:?set FX_CACHE_MAC_KEY in .env}
+  CORRIDOR_BANK_RAIL_URL: http://sim:8100
+  CORRIDOR_CUSTODY_URL: http://sim:8100
+  CORRIDOR_FX_RATES_URL: http://sim:8100
+  CORRIDOR_BANK_RAIL_API_KEY: ${PROVIDER_API_KEY:?set PROVIDER_API_KEY in .env}
+  CORRIDOR_CUSTODY_API_KEY: ${PROVIDER_API_KEY:?set PROVIDER_API_KEY in .env}
+  CORRIDOR_FX_RATES_API_KEY: ${PROVIDER_API_KEY:?set PROVIDER_API_KEY in .env}
+  CORRIDOR_BANK_RAIL_WEBHOOK_SECRETS: '["${BANK_WEBHOOK_SECRET:?set BANK_WEBHOOK_SECRET in .env}"]'
+  CORRIDOR_CUSTODY_WEBHOOK_SECRETS: '["${CUSTODY_WEBHOOK_SECRET:?set CUSTODY_WEBHOOK_SECRET in .env}"]'
+
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      CORRIDOR_DB_OWNER_PASSWORD: ${DB_OWNER_PASSWORD:?set DB_OWNER_PASSWORD in .env}
+      CORRIDOR_DB_APP_PASSWORD: ${DB_APP_PASSWORD:?set DB_APP_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Runs once, when the data directory is first created: the two roles and the database.
+      - ./deploy/postgres-init.sh:/docker-entrypoint-initdb.d/10-corridor.sh:ro
+    healthcheck:
+      # The database the init script makes last, so healthy means initialised.
+      test: ["CMD", "pg_isready", "--username", "postgres", "--dbname", "corridor"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+    # Nothing in Redis is the truth about anything, so nothing is kept across a restart.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Runs to completion before the API and the worker start, as the role that owns the
+  # schema. Nothing else is ever given this connection.
+  migrate:
+    <<: *corridor
+    restart: "no"
+    command: ["corridor", "db", "migrate"]
+    environment:
+      CORRIDOR_DATABASE_OWNER_URL: postgresql+asyncpg://corridor_owner:${DB_OWNER_PASSWORD:?set DB_OWNER_PASSWORD in .env}@postgres:5432/corridor
+      CORRIDOR_DATABASE_APP_ROLE: corridor_app
+    healthcheck:
+      disable: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  sim:
+    <<: *corridor
+    command: ["python", "-m", "corridor_sim"]
+    environment:
+      CORRIDOR_SIM_ENVIRONMENT: development
+      # It listens to the stack's network, so its control endpoints ask for the token.
+      CORRIDOR_SIM_HOST: 0.0.0.0
+      CORRIDOR_SIM_PORT: "8100"
+      CORRIDOR_SIM_CONTROL_TOKEN: ${SIM_CONTROL_TOKEN:?set SIM_CONTROL_TOKEN in .env}
+      CORRIDOR_SIM_API_KEY: ${PROVIDER_API_KEY:?set PROVIDER_API_KEY in .env}
+      CORRIDOR_SIM_BANK_WEBHOOK_URL: http://api:8000/v1/webhooks/simbank
+      CORRIDOR_SIM_CUSTODY_WEBHOOK_URL: http://api:8000/v1/webhooks/simcustody
+      CORRIDOR_SIM_BANK_WEBHOOK_SECRET: ${BANK_WEBHOOK_SECRET:?set BANK_WEBHOOK_SECRET in .env}
+      CORRIDOR_SIM_CUSTODY_WEBHOOK_SECRET: ${CUSTODY_WEBHOOK_SECRET:?set CUSTODY_WEBHOOK_SECRET in .env}
+      # An ACH payout settles in half a minute by default. Shorter here, so that a
+      # withdrawal can be watched from start to finish.
+      CORRIDOR_SIM_ACH_SETTLE_SECONDS: "5"
+    healthcheck:
+      # The simulator has no route that answers without a credential, so the check is
+      # that it accepts a connection.
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8100), 2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  api:
+    <<: *corridor
+    environment:
+      <<: *corridor-environment
+      CORRIDOR_JWT_SIGNING_KEY_FILE: /run/corridor/keys/${JWT_SIGNING_KEY_FILE:?set JWT_SIGNING_KEY_FILE in .env}
+    volumes:
+      - ./.local/keys:/run/corridor/keys:ro
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    healthcheck:
+      # Readiness, not only liveness: it reaches PostgreSQL and Redis.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      sim:
+        condition: service_healthy
+
+  worker:
+    <<: *corridor
+    command: ["corridor", "worker"]
+    environment:
+      <<: *corridor-environment
+      # Served inside the container only, for the health check below.
+      CORRIDOR_WORKER_METRICS_PORT: "9100"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9100/metrics', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      sim:
+        condition: service_healthy
+
+  # Not part of `up`. `docker compose --profile demo run --rm demo` narrates a deposit, a
+  # conversion, a transfer and a withdrawal against the running stack, then verifies the
+  # ledger.
+  demo:
+    <<: *corridor
+    profiles: ["demo"]
+    restart: "no"
+    command: ["corridor", "demo", "--base-url", "http://api:8000", "--sim-url", "http://sim:8100"]
+    environment:
+      <<: *corridor-environment
+      CORRIDOR_SIM_CONTROL_TOKEN: ${SIM_CONTROL_TOKEN:?set SIM_CONTROL_TOKEN in .env}
+    healthcheck:
+      disable: true
+    depends_on:
+      api:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
