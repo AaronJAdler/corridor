@@ -4,6 +4,8 @@ from fastapi import APIRouter
 
 from corridor.api.routers import (
     admin_kyc,
+    admin_ops,
+    admin_recon,
     auth,
     beneficiaries,
     deposits,
@@ -29,4 +31,6 @@ ROUTERS: tuple[APIRouter, ...] = (
     fx.router,
     webhooks.router,
     admin_kyc.router,
+    admin_recon.router,
+    admin_ops.router,
 )

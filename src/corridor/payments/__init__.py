@@ -45,6 +45,13 @@ from corridor.payments.handlers import (
     submit_withdrawal,
 )
 from corridor.payments.instructions import get_deposit_instruction
+from corridor.payments.queries import (
+    deposits_credited_between,
+    find_deposits,
+    find_withdrawals,
+    withdrawals_completed_between,
+    withdrawals_in_flight,
+)
 from corridor.payments.returns import apply_bank_deposit_returned
 from corridor.payments.sweeper import sweep_payouts
 from corridor.payments.transfers import create_transfer, get_transfer, list_transfers
@@ -115,6 +122,9 @@ __all__ = [
     "cancel_withdrawal",
     "create_beneficiary",
     "create_transfer",
+    "deposits_credited_between",
+    "find_deposits",
+    "find_withdrawals",
     "get_deposit",
     "get_deposit_instruction",
     "get_transfer",
@@ -126,4 +136,6 @@ __all__ = [
     "request_withdrawal",
     "submit_withdrawal",
     "sweep_payouts",
+    "withdrawals_completed_between",
+    "withdrawals_in_flight",
 ]

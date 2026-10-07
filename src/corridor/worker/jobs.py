@@ -2,7 +2,7 @@
 
 from datetime import timedelta
 
-from corridor import fx, outbox, payments
+from corridor import fx, outbox, payments, recon
 from corridor.platform.clock import utcnow
 from corridor.platform.config import Settings
 from corridor.platform.db import Database
@@ -22,13 +22,23 @@ UNUSED_QUOTE_RETENTION = timedelta(hours=24)
 # How often overdue withdrawals are looked for. How long one waits before it counts as
 # overdue is a setting, `payout_sweep_after_seconds`.
 PAYOUT_SWEEP_INTERVAL_SECONDS = 30.0
+RECONCILIATION_JOB = "recon.run"
+RECONCILIATION_INTERVAL_SECONDS = 300.0
+# What each run looks back over. Much longer than the interval, so that every movement is
+# compared many times and a run that was missed leaves no gap.
+RECONCILIATION_WINDOW = timedelta(hours=1)
 
 
 def build_jobs(
-    settings: Settings, *, bank: BankRail | None = None, custody: Custodian | None = None
+    settings: Settings,
+    *,
+    bank: BankRail | None = None,
+    custody: Custodian | None = None,
+    reconcile: bool = False,
 ) -> list[Job]:
     """Every job that exists today. The payout sweep is among them only when there is a
-    provider to ask: a worker with none has no payouts to read."""
+    provider to ask: a worker with none has no payouts to read. Reconciliation is among
+    them when it is asked for and there is a provider to compare with."""
     retention = timedelta(days=settings.outbox_retention_days)
 
     async def purge_finished(db: Database) -> None:
@@ -56,6 +66,20 @@ def build_jobs(
         advanced = await payments.sweep_payouts(db, bank, custody, settings)
         log.info("payout_sweep.done", advanced=advanced)
 
+    async def reconcile_window(db: Database) -> None:
+        # The scheduler runs a job on one worker at a time, so two runs do not overlap;
+        # if they did, each disagreement would still get one break.
+        now = utcnow()
+        result = await recon.run(
+            db, bank, custody, window_start=now - RECONCILIATION_WINDOW, window_end=now
+        )
+        log.info(
+            "recon.done",
+            status=result.run.status,
+            breaks_found=result.run.breaks_found,
+            repaired=result.repaired,
+        )
+
     jobs = [
         Job("outbox.purge_finished", PURGE_INTERVAL_SECONDS, purge_finished),
         Job("idempotency.purge_expired", PURGE_INTERVAL_SECONDS, purge_idempotency),
@@ -63,4 +87,6 @@ def build_jobs(
     ]
     if bank is not None or custody is not None:
         jobs.append(Job("payments.sweep_payouts", PAYOUT_SWEEP_INTERVAL_SECONDS, sweep_payouts))
+        if reconcile:
+            jobs.append(Job(RECONCILIATION_JOB, RECONCILIATION_INTERVAL_SECONDS, reconcile_window))
     return jobs

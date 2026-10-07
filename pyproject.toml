@@ -244,6 +244,18 @@ protected_modules = ["corridor.risk.models"]
 allowed_importers = ["corridor.risk"]
 
 [[tool.importlinter.contracts]]
+name = "Reconciliation tables are private to recon"
+type = "protected"
+protected_modules = ["corridor.recon.models"]
+allowed_importers = ["corridor.recon"]
+
+[[tool.importlinter.contracts]]
+name = "Operations tables are private to ops"
+type = "protected"
+protected_modules = ["corridor.ops.models"]
+allowed_importers = ["corridor.ops"]
+
+[[tool.importlinter.contracts]]
 name = "The simulator never imports production code"
 type = "forbidden"
 source_modules = ["corridor_sim"]
