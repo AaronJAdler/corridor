@@ -131,6 +131,21 @@ class Settings(BaseSettings):
             raise ValueError('name the proxies to trust; "*" trusts every client')
         return value
 
+    # Webhooks: how far a signature's timestamp may be from our clock.
+    webhook_tolerance_seconds: int = Field(default=300, ge=1)
+
+    # FX. The customer rate is the mid rate less the spread. A mid rate older than
+    # fx_rate_max_age_seconds is refused; a quote lives fx_quote_ttl_seconds.
+    fx_spread_bps: int = Field(default=50, ge=0, le=1000)
+    fx_rate_max_age_seconds: int = Field(default=15, ge=1)
+    fx_quote_ttl_seconds: int = Field(default=30, ge=1)
+    fx_rate_cache_seconds: int = Field(default=5, ge=1)
+
+    # Withdrawals. Corridor's own fee, in basis points of the amount.
+    withdrawal_fee_bps: int = Field(default=0, ge=0, le=1000)
+    # A submitted payout with no settlement webhook after this long is checked by polling.
+    payout_sweep_after_seconds: int = Field(default=120, ge=1)
+
 
 class MigrationSettings(BaseSettings):
     """What a migration run needs, and nothing else: the owner connection and the name of
