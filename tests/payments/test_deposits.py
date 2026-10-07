@@ -231,9 +231,10 @@ async def test_an_account_of_the_same_name_at_another_provider_attributes_nothin
 async def test_a_restricted_user_can_still_receive_a_deposit(
     db: Database, sim: Sim, bank: SimBank, custody: SimCustody, maria: User
 ) -> None:
+    # The account they were given while active is still theirs to be paid into.
+    data = await received(db, sim, bank, custody, maria)
     async with db.transaction() as session:
         await identity.restrict_user(session, maria.id, "under review")
-    data = await received(db, sim, bank, custody, maria)
 
     await payments.apply_bank_deposit_received(db, data)
 
@@ -621,3 +622,46 @@ async def test_reading_deposits_needs_the_deposits_scope(db: Database, maria: Us
         page = await payments.list_deposits(session, agent_of(maria, Scope.DEPOSITS_READ))
 
     assert page.items == ()
+
+
+@pytest.mark.parametrize("change", [{"amount": "999.00"}, {"asset": "MXN"}])
+async def test_a_repeated_bank_deposit_with_another_amount_or_asset_is_refused(
+    db: Database,
+    sim: Sim,
+    bank: SimBank,
+    custody: SimCustody,
+    maria: User,
+    change: dict[str, Any],
+) -> None:
+    data = await received(db, sim, bank, custody, maria)
+    await payments.apply_bank_deposit_received(db, data)
+
+    with pytest.raises(ProviderEventMismatch):
+        await payments.apply_bank_deposit_received(db, {**data, **change})
+
+    assert await available(db, maria) == 250_00
+    assert await count(db, "deposits") == 1
+    assert await count(db, "journal_entries") == 1
+
+
+@pytest.mark.parametrize(
+    ("said", "kept"),
+    [("dropped", "dropped"), ("Dropped from the mempool", "unspecified")],
+)
+async def test_the_reason_of_a_failed_deposit_is_kept_only_if_it_is_a_plain_code(
+    db: Database,
+    sim: Sim,
+    bank: SimBank,
+    custody: SimCustody,
+    maria: User,
+    said: str,
+    kept: str,
+) -> None:
+    seen = await detected(db, sim, bank, custody, maria)
+    await payments.apply_chain_deposit_detected(db, seen)
+    dropped = {**await sim.drop_chain_deposit(seen["deposit_id"]), "reason": said}
+
+    await payments.apply_chain_deposit_failed(db, dropped)
+
+    (audited,) = await rows(db, "SELECT * FROM audit_events WHERE action = 'deposit.failed'")
+    assert audited["details"]["reason"] == kept

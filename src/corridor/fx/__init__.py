@@ -14,7 +14,7 @@ from corridor.fx.errors import (
     RateUnavailable,
     SameAsset,
 )
-from corridor.fx.quotes import check_pair, create_quote
+from corridor.fx.quotes import check_pair, create_quote, purge_unused_quotes
 from corridor.fx.rates import get_mid
 from corridor.fx.rounding import buy_amount, customer_rate, format_rate
 from corridor.fx.types import Conversion, Quote, QuoteStatus
@@ -40,4 +40,5 @@ __all__ = [
     "format_rate",
     "get_conversion",
     "get_mid",
+    "purge_unused_quotes",
 ]

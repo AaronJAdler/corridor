@@ -16,6 +16,7 @@ from corridor import audit, identity
 from corridor.identity import Principal, Scope
 from corridor.payments.deposits import position_of
 from corridor.payments.errors import (
+    AccountNotActive,
     BeneficiaryKeyReused,
     BeneficiaryRejected,
     InvalidBeneficiaryAccount,
@@ -57,13 +58,19 @@ async def create_beneficiary(
     stored in a transaction afterwards. The bank is given the caller's idempotency key,
     under the caller's own id so that two callers cannot collide on one, which makes a
     repeated request find the account it already registered instead of a second one.
+
+    Only an active account registers one, and that is decided, in a transaction that has
+    ended, before the bank is given any account details.
     """
     identity.require_scope(principal, Scope.BENEFICIARIES_WRITE)
     if get_asset(asset).kind != "fiat":
         raise UnsupportedBeneficiaryAsset
+    user_id = principal.user_id
+    owner = await db.run(lambda session: identity.get_user(session, user_id))
+    if owner.status != "active":
+        raise AccountNotActive
     if bank is None:
         raise ProviderUnavailable
-    user_id = principal.user_id
 
     try:
         registered = await bank.create_beneficiary(

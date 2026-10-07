@@ -6,9 +6,9 @@ from typing import Any
 import pytest
 from sqlalchemy import text
 
-from corridor import payments
+from corridor import identity, payments
 from corridor.identity import InsufficientScope, Scope, User
-from corridor.payments import ProviderUnavailable
+from corridor.payments import AccountNotActive, ProviderUnavailable
 from corridor.platform.db import Database
 from corridor.platform.money import UnknownAsset
 from corridor.providers import SimBank, SimCustody, VirtualAccount, is_valid_address
@@ -307,3 +307,34 @@ async def test_an_answer_that_disagrees_with_the_stored_instruction_is_not_retur
 
     stored = await rows(db, "SELECT provider_ref FROM deposit_instructions")
     assert [row["provider_ref"] for row in stored] == ["va_other"]
+
+
+# --- an account that is not active ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("asset", ["USD", "USDC"])
+async def test_a_restricted_user_is_refused_a_new_instruction_before_any_provider_is_asked(
+    db: Database, sim: Sim, bank: SimBank, custody: SimCustody, maria: User, asset: str
+) -> None:
+    async with db.transaction() as session:
+        await identity.restrict_user(session, maria.id, "under review")
+
+    with pytest.raises(AccountNotActive) as refusal:
+        await instruct(db, maria, asset, bank, custody)
+
+    assert (refusal.value.status, refusal.value.code) == (403, "user_restricted")
+    assert sim.recorder.requests == []
+    assert await count(db, "deposit_instructions") == 0
+
+
+async def test_a_restricted_user_still_sees_the_instruction_they_already_have(
+    db: Database, sim: Sim, bank: SimBank, custody: SimCustody, maria: User
+) -> None:
+    first = await instruct(db, maria, "USD", bank, custody)
+    async with db.transaction() as session:
+        await identity.restrict_user(session, maria.id, "under review")
+
+    assert await instruct(db, maria, "USD", bank, custody) == first
+    with pytest.raises(AccountNotActive):
+        await instruct(db, maria, "MXN", bank, custody)
+    assert len(sim.recorder.sent("POST", VIRTUAL_ACCOUNTS)) == 1

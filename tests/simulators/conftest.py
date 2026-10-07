@@ -27,9 +27,13 @@ from corridor_sim.app import create_app
 from corridor_sim.settings import SimSettings
 
 # Not secrets: the simulator needs some value for each, and these exist only here.
-API_KEY = "sim-test-api-key"  # pragma: allowlist secret
-BANK_WEBHOOK_SECRET = "sim-test-bank-webhook-secret"  # pragma: allowlist secret
-CUSTODY_WEBHOOK_SECRET = "sim-test-custody-webhook-secret"  # pragma: allowlist secret
+API_KEY = "sim-test-api-key-of-32-characters-or-more"  # pragma: allowlist secret
+BANK_WEBHOOK_SECRET = (
+    "sim-test-bank-webhook-secret-of-32-characters-or-more"  # pragma: allowlist secret
+)
+CUSTODY_WEBHOOK_SECRET = (
+    "sim-test-custody-webhook-secret-of-32-characters-or-more"  # pragma: allowlist secret
+)
 
 START = datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
 BASE_URL = "http://sim.test"

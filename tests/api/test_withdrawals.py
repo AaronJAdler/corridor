@@ -90,6 +90,13 @@ async def post(
     return await api.post(URL, json=body, headers=headers)
 
 
+@pytest.fixture(name="settings")
+def without_a_minimum_fee(settings: Settings) -> Settings:
+    """The suite's settings with no least withdrawal fee, so that the amounts in this
+    module are the ones each test names. The minimum has tests of its own."""
+    return settings.model_copy(update={"withdrawal_min_fee": {}})
+
+
 @pytest.fixture
 async def api(
     app: FastAPI,

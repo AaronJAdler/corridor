@@ -3,6 +3,7 @@
 from typing import Final
 
 from corridor.platform.errors import Conflict, InvalidRequest, NotFound, ServiceUnavailable
+from corridor.risk import Denied
 
 # The table's check constraint states the same limit.
 MAX_MEMO_LENGTH: Final = 140
@@ -63,6 +64,18 @@ class ProviderUnavailable(ServiceUnavailable):
         super().__init__("This cannot be done at the moment. Try again shortly.")
 
 
+class AccountNotActive(Denied):
+    """A restricted or closed account asked for something new at a provider: an account to
+    deposit into, or one to withdraw to. Answered as risk answers a movement of money, and
+    like it never says why."""
+
+    code = "user_restricted"
+    title = "Account restricted"
+
+    def __init__(self) -> None:
+        super().__init__("This account cannot do this at the moment.")
+
+
 class DepositNotFound(NotFound):
     """There is no such deposit, or there is and it is not this user's to see. The two are
     never told apart."""
@@ -88,8 +101,9 @@ class ProviderEventMismatch(Exception):
 
 
 class DepositNotReceived(Exception):
-    """An event about a deposit arrived before the deposit itself. Raised so that whoever
-    delivers the event tries again, by when the deposit will have been recorded."""
+    """A return found its deposit unrecorded and, while it was recording it as returned,
+    the deposit was received by another transaction. Raised so that whoever delivers the
+    return tries again, and this time finds the deposit to reverse."""
 
 
 class InvalidBeneficiaryAccount(InvalidRequest):

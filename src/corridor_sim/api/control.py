@@ -1,17 +1,25 @@
 """``/_control``: how a test or the demo makes the outside world do something.
 
-No part of any provider's API, and unauthenticated. Never reachable from outside a
-development or test environment.
+No part of any provider's API. Open to whoever can reach it while the simulator listens on
+a loopback address only; behind the control token otherwise. The settings refuse every
+other arrangement, and any environment that is not development or test.
 """
 
 from typing import Literal
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from pydantic import Field
 from starlette.responses import JSONResponse
 
 from corridor_sim import money
-from corridor_sim.api.deps import Body, Sim, document, parse, read_object
+from corridor_sim.api.deps import (
+    Body,
+    Sim,
+    document,
+    parse,
+    read_object,
+    require_control_token,
+)
 from corridor_sim.bank import deposit_document, payout_inspection
 from corridor_sim.chaos import Fault
 from corridor_sim.clock import format_time
@@ -19,7 +27,8 @@ from corridor_sim.fx import rate_document
 from corridor_sim.state import SimState
 from corridor_sim.webhooks import Behaviour, delivery_document, event_document
 
-router = APIRouter(prefix="/_control")
+# On the router, so that a control route added later cannot be left outside it.
+router = APIRouter(prefix="/_control", dependencies=[Depends(require_control_token)])
 
 # One call moves the clock at most this far, which bounds the work a single request can ask
 # for. A test that needs longer calls again.

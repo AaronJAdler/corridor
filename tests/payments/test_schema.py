@@ -20,6 +20,7 @@ from tests.support import postgres
 
 NOW = datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
 INSUFFICIENT_PRIVILEGE = "42501"
+APPEND_ONLY = "CR001"
 INSERT = text(
     "INSERT INTO transfers (id, sender_id, recipient_id, asset_code, amount, fee, status,"
     " entry_id, memo, initiated_by_type, initiated_by_id, created_at)"
@@ -161,3 +162,27 @@ async def test_both_sides_of_a_transfer_are_indexed_for_listing(db: Database) ->
             "ix_transfers_sender_id_id",
             "ix_transfers_recipient_id_id",
         }
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE transfers SET amount = amount + 1",
+        "UPDATE transfers SET memo = memo WHERE false",
+        "DELETE FROM transfers",
+    ],
+)
+async def test_even_the_owner_cannot_rewrite_or_remove_a_transfer(
+    db: Database, owner_db: Database, statement: str
+) -> None:
+    # The owner holds every privilege on the table. The trigger is what stops it.
+    transfer = await add_row(db)
+
+    with pytest.raises(DBAPIError) as failure:
+        async with owner_db.transaction() as session:
+            await session.execute(text(statement))
+
+    assert sqlstate_of(failure.value) == APPEND_ONLY
+    async with db.transaction() as session:
+        kept = await session.execute(text("SELECT id, amount FROM transfers"))
+        assert [tuple(row) for row in kept] == [(transfer, 5_00)]

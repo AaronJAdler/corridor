@@ -22,18 +22,23 @@ from corridor.platform.db import (
 from corridor.providers import SimBank, SimCustody
 from corridor.risk import UserRestricted
 from tests.payments.support import (
+    add_beneficiary,
     available,
     balance_of,
     count,
+    deposit,
     entries,
+    held,
     instruction_for,
     rows,
     send,
     settlement,
     suspense,
     user_status,
+    withdraw,
+    withdrawal_row,
 )
-from tests.support.providers import Sim
+from tests.support.providers import EXTERNAL_ADDRESS, Sim
 
 
 async def credited(
@@ -216,21 +221,73 @@ async def test_a_returned_deposit_that_was_in_suspense_leaves_suspense(
     assert reversal["postings"] == [("suspense", "D", 40_00), ("bank_settlement", "C", 40_00)]
 
 
-async def test_a_return_that_arrives_before_its_deposit_is_retried_later(
+async def test_a_return_that_arrives_before_its_deposit_records_it_as_returned(
     db: Database, sim: Sim, bank: SimBank, custody: SimCustody, maria: User
 ) -> None:
     instruction = await instruction_for(db, maria, "USD", bank, custody)
     data = await sim.bank_deposit(instruction.provider_ref, "100.00")
     returned = await sim.return_bank_deposit(data["deposit_id"])
 
-    with pytest.raises(DepositNotReceived):
-        await payments.apply_bank_deposit_returned(db, returned)
-    assert await count(db, "deposits") == 0
+    await payments.apply_bank_deposit_returned(db, returned)
+
+    (row,) = await rows(db, "SELECT * FROM deposits")
+    assert (row["status"], row["provider_ref"]) == ("returned", data["deposit_id"])
+    assert (row["user_id"], row["entry_id"], int(row["amount"])) == (None, None, 100_00)
+    assert await count(db, "journal_entries") == 0
+    (audited,) = await rows(db, "SELECT * FROM audit_events WHERE action = 'deposit.returned'")
+    assert audited["details"]["received"] is False
+
+
+async def test_a_deposit_that_arrives_after_its_return_credits_nothing(
+    db: Database, sim: Sim, bank: SimBank, custody: SimCustody, maria: User
+) -> None:
+    instruction = await instruction_for(db, maria, "USD", bank, custody)
+    data = await sim.bank_deposit(instruction.provider_ref, "100.00")
+    returned = await sim.return_bank_deposit(data["deposit_id"])
+    await payments.apply_bank_deposit_returned(db, returned)
 
     await payments.apply_bank_deposit_received(db, data)
     await payments.apply_bank_deposit_returned(db, returned)
+
     assert await available(db, maria) == 0
+    assert await settlement(db) == 0
     assert await status_of(db) == "returned"
+    assert await count(db, "journal_entries") == 0
+    assert await count(db, "outbox_events") == 0
+    assert await user_status(db, maria) == "active"
+
+
+async def test_twenty_returns_at_once_before_the_deposit_record_it_once(
+    db: Database, sim: Sim, bank: SimBank, custody: SimCustody, maria: User
+) -> None:
+    instruction = await instruction_for(db, maria, "USD", bank, custody)
+    data = await sim.bank_deposit(instruction.provider_ref, "100.00")
+    returned = await sim.return_bank_deposit(data["deposit_id"])
+
+    outcomes = await asyncio.gather(
+        *(payments.apply_bank_deposit_returned(db, returned) for _ in range(20)),
+        return_exceptions=True,
+    )
+
+    # The ones that lost the race are delivered again, and then find it returned.
+    assert {type(outcome) for outcome in outcomes} <= {type(None), DepositNotReceived}
+    await payments.apply_bank_deposit_returned(db, returned)
+    assert await status_of(db) == "returned"
+    assert await count(db, "journal_entries") == 0
+    assert len(await rows(db, "SELECT 1 FROM audit_events WHERE action = 'deposit.returned'")) == 1
+
+
+async def test_a_return_before_its_deposit_in_an_asset_no_bank_moves_is_refused(
+    db: Database, sim: Sim, bank: SimBank, custody: SimCustody, maria: User
+) -> None:
+    instruction = await instruction_for(db, maria, "USD", bank, custody)
+    data = await sim.bank_deposit(instruction.provider_ref, "100.00")
+    returned = {**await sim.return_bank_deposit(data["deposit_id"]), "asset": "USDC"}
+
+    with pytest.raises(MalformedProviderEvent):
+        await payments.apply_bank_deposit_returned(db, returned)
+
+    assert await count(db, "deposits") == 0
 
 
 @pytest.mark.parametrize("change", [{"amount": "999.00"}, {"asset": "MXN"}])
@@ -323,3 +380,100 @@ async def test_twenty_returns_at_once_of_a_deposit_in_suspense_reverse_it_once(
     assert await suspense(db) == 0
     assert await settlement(db) == 0
     assert len(await rows(db, "SELECT 1 FROM audit_events WHERE action = 'deposit.returned'")) == 1
+
+
+# --- withdrawals that are held when the return arrives -----------------------------------------
+
+
+async def test_a_return_gives_back_a_held_withdrawal_before_it_takes_the_money(
+    db: Database,
+    settings: Settings,
+    sim: Sim,
+    bank: SimBank,
+    custody: SimCustody,
+    maria: User,
+) -> None:
+    data = await credited(db, sim, bank, custody, maria)
+    beneficiary = await add_beneficiary(db, bank, maria)
+    withdrawal = await withdraw(db, settings, maria, 80_00, beneficiary=beneficiary)
+
+    await payments.apply_bank_deposit_returned(
+        db, await sim.return_bank_deposit(data["deposit_id"])
+    )
+
+    row = await withdrawal_row(db, withdrawal.id)
+    assert (row["status"], row["failure_reason"]) == ("failed", "deposit_returned")
+    assert (await available(db, maria), await held(db, maria)) == (0, 0)
+    assert await receivable(db, maria) == 0
+    assert await settlement(db) == 0
+    assert await user_status(db, maria) == "active"
+    # The event that would have sent it finds it given back, and sends nothing.
+    await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
+    assert await sim.payouts() == []
+
+
+async def test_a_return_leaves_a_withdrawal_that_is_already_with_the_provider(
+    db: Database,
+    settings: Settings,
+    sim: Sim,
+    bank: SimBank,
+    custody: SimCustody,
+    maria: User,
+) -> None:
+    data = await credited(db, sim, bank, custody, maria)
+    beneficiary = await add_beneficiary(db, bank, maria)
+    withdrawal = await withdraw(db, settings, maria, 80_00, beneficiary=beneficiary)
+    await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
+
+    await payments.apply_bank_deposit_returned(
+        db, await sim.return_bank_deposit(data["deposit_id"])
+    )
+
+    assert (await withdrawal_row(db, withdrawal.id))["status"] == "submitted"
+    assert await held(db, maria) == 80_00 + withdrawal.fee
+    assert await receivable(db, maria) == 80_00 + withdrawal.fee
+    assert await user_status(db, maria) == "restricted"
+
+
+async def test_a_return_leaves_a_held_withdrawal_of_another_asset(
+    db: Database,
+    settings: Settings,
+    sim: Sim,
+    bank: SimBank,
+    custody: SimCustody,
+    maria: User,
+) -> None:
+    data = await credited(db, sim, bank, custody, maria)
+    await deposit(db, maria, 50_000_000, "USDC")
+    withdrawal = await withdraw(
+        db, settings, maria, 25_000_000, asset="USDC", to_address=EXTERNAL_ADDRESS
+    )
+
+    await payments.apply_bank_deposit_returned(
+        db, await sim.return_bank_deposit(data["deposit_id"])
+    )
+
+    assert (await withdrawal_row(db, withdrawal.id))["status"] == "held"
+    assert await user_status(db, maria) == "active"
+
+
+@pytest.mark.parametrize(
+    ("said", "kept"),
+    [("recalled", "recalled"), ("Recalled by the sender!", "unspecified"), ("", "unspecified")],
+)
+async def test_the_reason_of_a_return_is_kept_only_if_it_is_a_plain_code(
+    db: Database,
+    sim: Sim,
+    bank: SimBank,
+    custody: SimCustody,
+    maria: User,
+    said: str,
+    kept: str,
+) -> None:
+    data = await credited(db, sim, bank, custody, maria)
+    returned = {**await sim.return_bank_deposit(data["deposit_id"]), "reason": said}
+
+    await payments.apply_bank_deposit_returned(db, returned)
+
+    (audited,) = await rows(db, "SELECT * FROM audit_events WHERE action = 'deposit.returned'")
+    assert audited["details"]["reason"] == kept

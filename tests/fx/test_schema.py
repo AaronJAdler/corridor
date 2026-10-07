@@ -22,6 +22,7 @@ from tests.support import postgres
 NOW = datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
 INSUFFICIENT_PRIVILEGE = "42501"
 FOREIGN_KEY_VIOLATION = "23503"
+APPEND_ONLY = "CR001"
 INSERT_QUOTE = text(
     "INSERT INTO fx_quotes (id, user_id, sell_asset, buy_asset, sell_amount, buy_amount,"
     " rate, mid, status, expires_at, created_at)"
@@ -77,10 +78,10 @@ async def grants(db: Database, table: str) -> str:
         return str(rows.scalar_one())
 
 
-async def test_the_application_role_may_add_read_and_advance_a_quote_and_not_remove_one(
+async def test_the_application_role_may_add_read_advance_and_purge_quotes(
     db: Database,
 ) -> None:
-    assert await grants(db, "fx_quotes") == "INSERT,SELECT,UPDATE"
+    assert await grants(db, "fx_quotes") == "DELETE,INSERT,SELECT,UPDATE"
 
 
 async def test_the_application_role_may_add_and_read_conversions_and_nothing_else(
@@ -92,14 +93,13 @@ async def test_the_application_role_may_add_and_read_conversions_and_nothing_els
 @pytest.mark.parametrize(
     "statement",
     [
-        "DELETE FROM fx_quotes",
         "TRUNCATE fx_quotes CASCADE",
         "UPDATE fx_conversions SET user_id = user_id",
         "DELETE FROM fx_conversions",
         "TRUNCATE fx_conversions",
     ],
 )
-async def test_the_application_role_cannot_remove_a_quote_or_rewrite_a_conversion(
+async def test_the_application_role_cannot_empty_the_quotes_or_rewrite_a_conversion(
     db: Database, statement: str
 ) -> None:
     await add_conversion(db, await add_quote(db))
@@ -109,6 +109,40 @@ async def test_the_application_role_cannot_remove_a_quote_or_rewrite_a_conversio
             await session.execute(text(statement))
 
     assert sqlstate_of(failure.value) == INSUFFICIENT_PRIVILEGE
+
+
+async def test_a_quote_that_was_converted_cannot_be_deleted(db: Database) -> None:
+    quote = await add_quote(db, status="used")
+    await add_conversion(db, quote)
+
+    with pytest.raises(DBAPIError) as failure:
+        async with db.transaction() as session:
+            await session.execute(text("DELETE FROM fx_quotes WHERE id = :id"), {"id": quote})
+
+    assert sqlstate_of(failure.value) == FOREIGN_KEY_VIOLATION
+    assert constraint_of(failure.value) == "fk_fx_conversions_quote_id_fx_quotes"
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE fx_conversions SET user_id = user_id",
+        "UPDATE fx_conversions SET entry_id = entry_id WHERE false",
+        "DELETE FROM fx_conversions",
+    ],
+)
+async def test_even_the_owner_cannot_rewrite_or_remove_a_conversion(
+    db: Database, owner_db: Database, statement: str
+) -> None:
+    # The owner holds every privilege on the table. The trigger is what stops it.
+    await add_conversion(db, await add_quote(db))
+
+    with pytest.raises(DBAPIError) as failure:
+        async with owner_db.transaction() as session:
+            await session.execute(text(statement))
+
+    assert sqlstate_of(failure.value) == APPEND_ONLY
+    assert await grants(db, "fx_conversions") == "INSERT,SELECT"
 
 
 async def test_a_quote_converts_into_one_conversion_only(db: Database) -> None:

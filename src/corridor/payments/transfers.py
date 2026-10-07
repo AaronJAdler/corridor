@@ -108,7 +108,7 @@ async def create_transfer(
         ),
     )
 
-    fee = fees.transfer_fee(amount, settings)
+    fee = fees.transfer_fee(amount, asset, settings)
     if amount + fee > MAX_MINOR_UNITS:
         # Each is storable alone, but the sender is debited their sum in one posting, and
         # the ledger refuses that as a broken contract, which no client should be told.

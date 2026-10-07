@@ -113,3 +113,115 @@ def test_named_proxies_are_accepted(value: str) -> None:
     settings = Settings(_env_file=None, forwarded_allow_ips=value, **REQUIRED)  # type: ignore[arg-type]
 
     assert settings.forwarded_allow_ips == value
+
+
+# --- what production refuses -----------------------------------------------------------------
+
+PRODUCTION: dict[str, object] = {
+    **REQUIRED,
+    "environment": "production",
+    "bank_rail_url": "https://bank.example",
+    "custody_url": "https://custody.example",
+    "fx_rates_url": "https://rates.example",
+    "bank_rail_webhook_secrets": [LONG_ENOUGH],
+    "custody_webhook_secrets": [LONG_ENOUGH + "x"],
+}
+
+UNFIT = [
+    ({"bank_rail_url": "http://bank.example"}, "bank_rail_url"),
+    ({"custody_url": "http://custody.example"}, "custody_url"),
+    ({"fx_rates_url": "http://rates.example"}, "fx_rates_url"),
+    ({"fx_rates_url": "rates.example"}, "fx_rates_url"),
+    ({"bank_rail_url": "httpsx://bank.example"}, "bank_rail_url"),
+    ({"rate_limit_enabled": False}, "rate_limit_enabled"),
+    ({"webhook_tolerance_seconds": 601}, "webhook_tolerance_seconds"),
+    ({"bank_rail_webhook_secrets": []}, "bank_rail_webhook_secrets"),
+    ({"custody_webhook_secrets": []}, "custody_webhook_secrets"),
+    ({"log_level": "DEBUG"}, "log_level"),
+]
+
+
+def test_a_production_configuration_that_is_fit_for_it_is_accepted() -> None:
+    settings = Settings(_env_file=None, **PRODUCTION)  # type: ignore[arg-type]
+
+    assert settings.environment == "production"
+
+
+def test_production_accepts_the_longest_webhook_tolerance_and_an_upper_case_scheme() -> None:
+    Settings(
+        _env_file=None,
+        **{**PRODUCTION, "webhook_tolerance_seconds": 600, "bank_rail_url": "HTTPS://bank.example"},  # type: ignore[arg-type]
+    )
+
+
+def test_production_does_not_ask_for_a_provider_that_is_not_configured() -> None:
+    bare = {
+        name: value
+        for name, value in PRODUCTION.items()
+        if not name.endswith(("_url", "_secrets")) or name in REQUIRED
+    }
+
+    settings = Settings(_env_file=None, **bare)  # type: ignore[arg-type]
+
+    assert (settings.bank_rail_url, settings.bank_rail_webhook_secrets) == (None, [])
+
+
+@pytest.mark.parametrize(("change", "named"), UNFIT)
+def test_production_refuses_a_configuration_fit_only_for_development(
+    change: dict[str, object], named: str
+) -> None:
+    with pytest.raises(ValidationError) as failure:
+        Settings(_env_file=None, **{**PRODUCTION, **change})  # type: ignore[arg-type]
+
+    message = str(failure.value)
+    assert "not a production configuration" in message
+    assert named in message
+    # Only what is wrong is listed: problems are separated by semicolons.
+    assert ";" not in message
+    assert "example" not in message
+    assert LONG_ENOUGH not in message
+
+
+def test_production_names_everything_that_is_wrong_at_once() -> None:
+    with pytest.raises(ValidationError) as failure:
+        Settings(
+            _env_file=None,
+            **{**PRODUCTION, "log_level": "DEBUG", "rate_limit_enabled": False},  # type: ignore[arg-type]
+        )
+
+    assert "log_level" in str(failure.value)
+    assert "rate_limit_enabled" in str(failure.value)
+
+
+@pytest.mark.parametrize("environment", ["development", "test"])
+@pytest.mark.parametrize(("change", "_named"), UNFIT)
+def test_other_environments_are_not_held_to_what_production_is(
+    environment: str, change: dict[str, object], _named: str
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        **{**PRODUCTION, "environment": environment, **change},  # type: ignore[arg-type]
+    )
+
+    assert settings.environment == environment
+
+
+# --- settings added for FX -------------------------------------------------------------------
+
+
+def test_a_spread_of_nothing_is_refused() -> None:
+    with pytest.raises(ValidationError) as failure:
+        Settings(_env_file=None, fx_spread_bps=0, **REQUIRED)  # type: ignore[arg-type]
+
+    assert [error["loc"] for error in failure.value.errors()] == [("fx_spread_bps",)]
+    assert Settings(_env_file=None, fx_spread_bps=1, **REQUIRED).fx_spread_bps == 1  # type: ignore[arg-type]
+
+
+def test_the_key_that_authenticates_cached_rates_is_optional_and_never_short() -> None:
+    assert Settings(_env_file=None, **REQUIRED).fx_cache_mac_key is None  # type: ignore[arg-type]
+    Settings(_env_file=None, fx_cache_mac_key=LONG_ENOUGH, **REQUIRED)  # type: ignore[arg-type]
+    with pytest.raises(ValidationError) as failure:
+        Settings(_env_file=None, fx_cache_mac_key=ONE_SHORT, **REQUIRED)  # type: ignore[arg-type]
+
+    assert [error["loc"] for error in failure.value.errors()] == [("fx_cache_mac_key",)]
+    assert ONE_SHORT not in str(failure.value)

@@ -98,7 +98,7 @@ def _render(conversion: fx.Conversion) -> ConversionResponse:
 )
 async def create_quote(
     body: QuoteRequest,
-    principal: FxReader,
+    principal: FxConverter,
     container: Annotated[Container, Depends(get_container)],
     db: Db,
     redis: Redis,

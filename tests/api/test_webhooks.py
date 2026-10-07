@@ -44,7 +44,7 @@ from tests.webhooks.helpers import (
 BANK = "/v1/webhooks/simbank"
 CUSTODY = "/v1/webhooks/simcustody"
 BASE_URL = "http://corridor.test"
-SIM_API_KEY = "sim-test-api-key"  # pragma: allowlist secret
+SIM_API_KEY = "sim-test-api-key-of-32-characters-or-more"  # pragma: allowlist secret
 REQUEST_ID = "test-request-0001"
 MAX_BODY_BYTES = 64 * 1024
 

@@ -25,7 +25,7 @@ from corridor.identity import Principal, Scope
 from corridor.ledger import AccountKind, EntryDraft, credit, debit
 from corridor.payments import instructions
 from corridor.payments.errors import DepositNotFound, MalformedProviderEvent, ProviderEventMismatch
-from corridor.payments.events import ProviderEvent, amount_of, parse
+from corridor.payments.events import ProviderEvent, amount_of, parse, reason_code
 from corridor.payments.models import DepositRow
 from corridor.payments.types import BANK_PROVIDER, CUSTODY_PROVIDER, Deposit, FlowKind
 from corridor.platform.clock import utcnow
@@ -102,8 +102,12 @@ async def apply_bank_deposit_received(db: Database, data: Mapping[str, Any]) -> 
     """A bank deposit has arrived: record it and credit it, once.
 
     The row is inserted before anything is posted, and an event whose row already exists
-    stops there. A concurrent copy of the event waits on that insert until the first has
-    committed, and then finds the row.
+    credits nothing. A concurrent copy of the event waits on that insert until the first
+    has committed, and then finds the row.
+
+    The row that exists is still compared with the event. A second event under the same
+    deposit id with another asset or another amount is not a repeat of the first, and is
+    refused aloud instead of being taken for one.
     """
     event = parse(_BankDepositReceived, data)
     amount = _amount(event.amount, event.asset, "bank")
@@ -121,8 +125,10 @@ async def apply_bank_deposit_received(db: Database, data: Mapping[str, Any]) -> 
             status="pending",
             tx_hash=None,
         )
-        if deposit is not None:
-            await _credit(session, deposit, user_id)
+        if deposit is None:
+            check_same(await _lock(session, BANK_PROVIDER, event.deposit_id), event.asset, amount)
+            return
+        await _credit(session, deposit, user_id)
 
     await db.run(work)
 
@@ -195,7 +201,7 @@ async def apply_chain_deposit_failed(db: Database, data: Mapping[str, Any]) -> N
                 principal_id=deposit["user_id"],
                 resource_type="deposit",
                 resource_id=deposit["id"],
-                details={"reason": event.reason},
+                details={"reason": reason_code(event.reason)},
             )
         elif deposit["status"] != "failed":
             # The provider says a deposit it confirmed was dropped, which its contract says
@@ -289,6 +295,34 @@ async def find_deposit(
         )
     )
     return rows.mappings().one_or_none()
+
+
+async def record_returned_unseen(
+    session: AsyncSession, provider_ref: str, asset: str, amount: int
+) -> RowMapping | None:
+    """Record a bank deposit that was returned before it was ever received, as returned.
+
+    Events arrive in no particular order, and a return can overtake its deposit. The row
+    written here is what stops the deposit when it does arrive: it finds itself recorded,
+    and returned, and credits nothing. Returns None if the deposit turned out to be
+    recorded after all, by a transaction that committed while this one waited.
+    """
+    return await _insert(
+        session,
+        user_id=None,
+        asset=asset,
+        amount=amount,
+        provider=BANK_PROVIDER,
+        provider_ref=provider_ref,
+        kind="bank",
+        status="returned",
+        tx_hash=None,
+    )
+
+
+def bank_amount(text: str, asset: str) -> int:
+    """An amount of a bank event in minor units, refusing an asset no bank moves."""
+    return _amount(text, asset, "bank")
 
 
 def ledger_source_id(provider: str, provider_ref: str) -> str:

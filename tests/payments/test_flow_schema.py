@@ -21,6 +21,7 @@ from tests.support.providers import EXTERNAL_ADDRESS
 
 NOW = datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
 INSUFFICIENT_PRIVILEGE = "42501"
+APPEND_ONLY = "CR001"
 
 INSERT_DEPOSIT = text(
     "INSERT INTO deposits (id, user_id, asset_code, amount, provider, provider_ref, kind,"
@@ -309,3 +310,48 @@ async def test_the_lists_and_the_sweeper_have_their_indexes(db: Database) -> Non
             "ix_withdrawals_user_id_id",
             "ix_withdrawals_status_id",
         }
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "UPDATE beneficiaries SET provider_ref = 'ben_other'",
+        "UPDATE beneficiaries SET user_id = user_id WHERE false",
+        "DELETE FROM beneficiaries",
+        "UPDATE deposit_instructions SET user_id = gen_random_uuid()",
+        "UPDATE deposit_instructions SET details = details WHERE false",
+        "DELETE FROM deposit_instructions",
+    ],
+)
+async def test_even_the_owner_cannot_rewrite_or_remove_a_write_once_row(
+    db: Database, owner_db: Database, statement: str
+) -> None:
+    # The owner holds every privilege on these tables. The trigger is what stops it: a
+    # beneficiary that could be rewritten is a payout that could be sent somewhere else,
+    # and an instruction that could be, a deposit credited to somebody else.
+    await add_beneficiary(db)
+    await add_instruction(db)
+
+    with pytest.raises(DBAPIError) as failure:
+        async with owner_db.transaction() as session:
+            await session.execute(text(statement))
+
+    assert sqlstate_of(failure.value) == APPEND_ONLY
+    async with db.transaction() as session:
+        tokens = await session.execute(text("SELECT provider_ref FROM beneficiaries"))
+        accounts = await session.execute(text("SELECT provider_ref FROM deposit_instructions"))
+        assert (tokens.scalars().all(), accounts.scalars().all()) == (["ben_1"], ["va_1"])
+
+
+@pytest.mark.parametrize(
+    "statement",
+    ["UPDATE deposits SET status = 'returned'", "UPDATE withdrawals SET status = 'submitting'"],
+)
+async def test_the_rows_that_change_state_can_still_be_advanced(
+    db: Database, statement: str
+) -> None:
+    await add_deposit(db)
+    await add_withdrawal(db)
+
+    async with db.transaction() as session:
+        await session.execute(text(statement))

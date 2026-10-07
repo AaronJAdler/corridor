@@ -4,11 +4,15 @@ Everything comes from environment variables prefixed ``CORRIDOR_``. Values that 
 have no default: the process refuses to start without them rather than run with a guess.
 """
 
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal, Self
 
-from pydantic import Field, SecretStr, field_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from corridor.platform.errors import InvalidRequest
+from corridor.platform.money import parse_amount
 
 # The role name is interpolated into GRANT statements, so it is restricted to a plain
 # identifier.
@@ -17,6 +21,18 @@ APP_ROLE_PATTERN = r"^[a-z_][a-z0-9_]{0,62}$"
 
 MIN_WEBHOOK_SECRET_LENGTH = 32
 WebhookSecret = Annotated[SecretStr, Field(min_length=MIN_WEBHOOK_SECRET_LENGTH)]
+
+# The longest a production deployment lets a webhook's timestamp be from its own clock. A
+# captured delivery can be replayed for that long.
+MAX_PRODUCTION_WEBHOOK_TOLERANCE_SECONDS: Final = 600
+
+# What a withdrawal costs at the least, per asset, as decimal strings in major units. A fee
+# in basis points alone rounds to nothing on a small withdrawal, which still costs a payout.
+DEFAULT_WITHDRAWAL_MIN_FEE: Final[Mapping[str, str]] = {
+    "USD": "0.25",
+    "MXN": "5.00",
+    "USDC": "0.15",
+}
 
 
 class Settings(BaseSettings):
@@ -118,9 +134,10 @@ class Settings(BaseSettings):
     custody_webhook_secrets: list[WebhookSecret] = Field(default_factory=list)
 
     # What a transfer between users costs the sender: basis points of the amount, rounded
-    # down, and never less than the minimum, which is in minor units of the asset sent.
+    # down, and never less than the asset's minimum, a decimal string in major units. An
+    # asset that is not named has no minimum.
     transfer_fee_bps: int = Field(default=0, ge=0, le=1000)
-    transfer_fee_min_minor: int = Field(default=0, ge=0)
+    transfer_min_fee: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("forwarded_allow_ips")
     @classmethod
@@ -136,15 +153,70 @@ class Settings(BaseSettings):
 
     # FX. The customer rate is the mid rate less the spread. A mid rate older than
     # fx_rate_max_age_seconds is refused; a quote lives fx_quote_ttl_seconds.
-    fx_spread_bps: int = Field(default=50, ge=0, le=1000)
+    # A spread of nothing would convert at the mid rate, back and forth, for free.
+    fx_spread_bps: int = Field(default=50, ge=1, le=1000)
     fx_rate_max_age_seconds: int = Field(default=15, ge=1)
     fx_quote_ttl_seconds: int = Field(default=30, ge=1)
     fx_rate_cache_seconds: int = Field(default=5, ge=1)
+    # Authenticates the rates cached in Redis, so that whoever can write to Redis cannot
+    # set a price. Without it rates are cached in each process and Redis is not used.
+    fx_cache_mac_key: WebhookSecret | None = None
 
-    # Withdrawals. Corridor's own fee, in basis points of the amount.
+    # Withdrawals. Corridor's own fee: basis points of the amount, rounded down, and never
+    # less than the asset's minimum, a decimal string in major units.
     withdrawal_fee_bps: int = Field(default=0, ge=0, le=1000)
+    withdrawal_min_fee: dict[str, str] = Field(
+        default_factory=lambda: dict(DEFAULT_WITHDRAWAL_MIN_FEE)
+    )
     # A submitted payout with no settlement webhook after this long is checked by polling.
     payout_sweep_after_seconds: int = Field(default=120, ge=1)
+
+    @field_validator("withdrawal_min_fee", "transfer_min_fee")
+    @classmethod
+    def _amounts_of_known_assets(cls, value: dict[str, str]) -> dict[str, str]:
+        for asset, amount in value.items():
+            try:
+                parse_amount(amount, asset, allow_zero=True)
+            except InvalidRequest:
+                # How platform.money refuses an asset code or an amount.
+                raise ValueError(
+                    "each entry is an asset code and a decimal amount in that asset"
+                ) from None
+        return value
+
+    @model_validator(mode="after")
+    def _safe_in_production(self) -> Self:
+        """Refuse a production configuration that is only fit for a developer's machine.
+
+        Each message names settings and never repeats a value.
+        """
+        if self.environment != "production":
+            return self
+        problems: list[str] = []
+        for name in ("bank_rail_url", "custody_url", "fx_rates_url"):
+            url = getattr(self, name)
+            if url is not None and not url.lower().startswith("https://"):
+                problems.append(f"{name} must be an https URL")
+        if not self.rate_limit_enabled:
+            problems.append("rate_limit_enabled must be on")
+        if self.webhook_tolerance_seconds > MAX_PRODUCTION_WEBHOOK_TOLERANCE_SECONDS:
+            problems.append(
+                "webhook_tolerance_seconds must be at most "
+                f"{MAX_PRODUCTION_WEBHOOK_TOLERANCE_SECONDS}"
+            )
+        # A provider that is called and whose webhooks cannot be verified would have its
+        # payouts settled by the sweeper alone, and its deposits never.
+        for url_name, secrets_name in (
+            ("bank_rail_url", "bank_rail_webhook_secrets"),
+            ("custody_url", "custody_webhook_secrets"),
+        ):
+            if getattr(self, url_name) is not None and not getattr(self, secrets_name):
+                problems.append(f"{secrets_name} must be set when {url_name} is")
+        if self.log_level == "DEBUG":
+            problems.append("log_level must not be DEBUG")
+        if problems:
+            raise ValueError("not a production configuration: " + "; ".join(problems))
+        return self
 
 
 class MigrationSettings(BaseSettings):

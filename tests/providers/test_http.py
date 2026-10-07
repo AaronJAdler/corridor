@@ -4,9 +4,10 @@ The first half watches the requests that reach the real simulator. The second ha
 scripted provider in its place, to answer in ways the simulator never does.
 """
 
+import gzip
 import inspect
 import json
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -22,7 +23,7 @@ from corridor.providers import (
     SimCustody,
     SimRates,
 )
-from corridor.providers.http import ProviderClient
+from corridor.providers.http import MAX_RESPONSE_BYTES, ProviderClient, segment
 from tests.providers.conftest import (
     ACCOUNT_NUMBER,
     API_KEY,
@@ -539,3 +540,171 @@ async def test_no_account_number_or_key_reaches_the_logs(
     for secret in (ACCOUNT_NUMBER, ROUTING_NUMBER, account.account_number, API_KEY):
         assert secret not in logged
         assert secret not in str(unknown.value)
+
+
+# --- what the client itself will not do ------------------------------------------------------
+
+
+def test_a_client_of_its_own_takes_no_proxy_from_the_environment_and_follows_no_redirect(
+    provider_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built: list[dict[str, Any]] = []
+    real = httpx.AsyncClient
+
+    def recording(**arguments: Any) -> httpx.AsyncClient:
+        built.append(arguments)
+        return real(**arguments)
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:3128")
+    monkeypatch.setenv("ALL_PROXY", "http://proxy.invalid:3128")
+    monkeypatch.setattr(httpx, "AsyncClient", recording)
+
+    ProviderClient(
+        provider="simbank",
+        base_url=provider_settings.bank_rail_url,
+        api_key=provider_settings.bank_rail_api_key,
+        timeout_seconds=1.0,
+    )
+
+    (arguments,) = built
+    assert arguments["trust_env"] is False
+    assert arguments["follow_redirects"] is False
+
+
+async def test_a_redirect_is_not_followed_even_by_a_client_that_would(
+    provider_settings: Settings,
+) -> None:
+    asked: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append(str(request.url))
+        if request.url.host == "elsewhere.invalid":
+            return httpx.Response(201, json=PAYOUT)
+        return httpx.Response(307, headers={"Location": "http://elsewhere.invalid/payouts"})
+
+    # A client handed in belongs to whoever made it, and this one follows redirects.
+    following = httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True)
+    async with following:
+        with pytest.raises(ProviderOutcomeUnknown):
+            await pay(SimBank(provider_settings, client=following))
+
+    # The API key went to the provider and nowhere else.
+    assert len(asked) == 1
+    assert "elsewhere.invalid" not in asked[0]
+
+
+def padded(document: dict[str, object], size: int) -> bytes:
+    """A JSON document of exactly ``size`` bytes: the document, and a field of padding."""
+    bare = json.dumps({**document, "padding": ""}).encode()
+    return json.dumps({**document, "padding": "x" * (size - len(bare))}).encode()
+
+
+async def test_a_response_body_of_a_mebibyte_is_read(
+    provider_settings: Settings, stub: Stub
+) -> None:
+    body = padded(PAYOUT, MAX_RESPONSE_BYTES)
+    assert len(body) == MAX_RESPONSE_BYTES
+    bank = SimBank(
+        provider_settings, client=stub(lambda _request: httpx.Response(201, content=body))
+    )
+
+    assert (await pay(bank)).id == "po_2h5j8n"
+
+
+async def test_a_response_body_over_a_mebibyte_is_an_unknown_outcome(
+    provider_settings: Settings, stub: Stub
+) -> None:
+    body = padded(PAYOUT, MAX_RESPONSE_BYTES + 1)
+    bank = SimBank(
+        provider_settings, client=stub(lambda _request: httpx.Response(201, content=body))
+    )
+
+    with pytest.raises(ProviderOutcomeUnknown) as unknown:
+        await pay(bank)
+
+    assert "body too large" in unknown.value.detail
+
+
+async def test_a_body_that_goes_on_past_a_mebibyte_is_not_read_to_its_end(
+    provider_settings: Settings, stub: Stub
+) -> None:
+    sent = 0
+
+    class Endless(httpx.AsyncByteStream):
+        async def __aiter__(self) -> AsyncIterator[bytes]:
+            nonlocal sent
+            # No length is declared, and there is far more here than anyone should hold.
+            for _ in range(64 * 1024):
+                sent += 1024
+                yield b" " * 1024
+
+    bank = SimBank(
+        provider_settings, client=stub(lambda _request: httpx.Response(201, stream=Endless()))
+    )
+
+    with pytest.raises(ProviderOutcomeUnknown):
+        await pay(bank)
+
+    assert sent <= MAX_RESPONSE_BYTES + 1024
+
+
+async def test_an_oversized_refusal_is_not_taken_as_a_refusal(
+    provider_settings: Settings, stub: Stub
+) -> None:
+    refusal = padded(
+        {"error": {"code": "invalid_amount", "message": "No."}}, MAX_RESPONSE_BYTES + 1
+    )
+    bank = SimBank(
+        provider_settings, client=stub(lambda _request: httpx.Response(422, content=refusal))
+    )
+
+    with pytest.raises(ProviderOutcomeUnknown):
+        await pay(bank)
+
+
+async def test_a_compressed_response_is_not_expanded(
+    provider_settings: Settings, stub: Stub
+) -> None:
+    seen: list[httpx.Request] = []
+    # Thirty-odd bytes on the wire, and sixteen mebibytes once expanded.
+    bomb = gzip.compress(b" " * (16 * MAX_RESPONSE_BYTES))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(201, content=bomb, headers={"Content-Encoding": "gzip"})
+
+    with pytest.raises(ProviderOutcomeUnknown) as unknown:
+        await pay(SimBank(provider_settings, client=stub(handler)))
+
+    assert "compressed" in unknown.value.detail
+    assert seen[0].headers["accept-encoding"] == "identity"
+
+
+@pytest.mark.parametrize("identifier", [".", ".."])
+def test_an_identifier_that_is_a_relative_path_is_refused(identifier: str) -> None:
+    with pytest.raises(ValueError, match="relative path"):
+        segment(identifier)
+
+
+@pytest.mark.parametrize(
+    ("identifier", "written"),
+    [("po_2h5j8n", "po_2h5j8n"), ("...", "..."), (".hidden", ".hidden"), ("a/../b", "a%2F..%2Fb")],
+)
+def test_any_other_identifier_is_one_path_segment(identifier: str, written: str) -> None:
+    assert segment(identifier) == written
+
+
+@pytest.mark.parametrize("identifier", [".", ".."])
+async def test_no_adapter_asks_for_the_resource_above_the_one_it_was_given(
+    provider_settings: Settings, stub: Stub, identifier: str
+) -> None:
+    asked: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        asked.append(request)
+        return httpx.Response(200, json={"payouts": [PAYOUT]})
+
+    with pytest.raises(ValueError, match="relative path"):
+        await SimBank(provider_settings, client=stub(handler)).get_payout(identifier)
+
+    assert asked == []

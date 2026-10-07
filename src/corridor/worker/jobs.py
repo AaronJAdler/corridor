@@ -2,7 +2,7 @@
 
 from datetime import timedelta
 
-from corridor import outbox, payments
+from corridor import fx, outbox, payments
 from corridor.platform.clock import utcnow
 from corridor.platform.config import Settings
 from corridor.platform.db import Database
@@ -16,6 +16,9 @@ log = get_logger(__name__)
 PURGE_INTERVAL_SECONDS = 3600.0
 # A day: longer than any client goes on retrying one request.
 IDEMPOTENCY_KEY_RETENTION = timedelta(hours=24)
+# A quote lives for seconds. One that expired a day ago and was never converted answers no
+# question anybody still has.
+UNUSED_QUOTE_RETENTION = timedelta(hours=24)
 # How often overdue withdrawals are looked for. How long one waits before it counts as
 # overdue is a setting, `payout_sweep_after_seconds`.
 PAYOUT_SWEEP_INTERVAL_SECONDS = 30.0
@@ -42,6 +45,13 @@ def build_jobs(
             )
         log.info("idempotency.purged", deleted=deleted)
 
+    async def purge_quotes(db: Database) -> None:
+        async with db.transaction() as session:
+            deleted = await fx.purge_unused_quotes(
+                session, expired_before=utcnow() - UNUSED_QUOTE_RETENTION
+            )
+        log.info("fx.quotes_purged", deleted=deleted)
+
     async def sweep_payouts(db: Database) -> None:
         advanced = await payments.sweep_payouts(db, bank, custody, settings)
         log.info("payout_sweep.done", advanced=advanced)
@@ -49,6 +59,7 @@ def build_jobs(
     jobs = [
         Job("outbox.purge_finished", PURGE_INTERVAL_SECONDS, purge_finished),
         Job("idempotency.purge_expired", PURGE_INTERVAL_SECONDS, purge_idempotency),
+        Job("fx.purge_unused_quotes", PURGE_INTERVAL_SECONDS, purge_quotes),
     ]
     if bank is not None or custody is not None:
         jobs.append(Job("payments.sweep_payouts", PAYOUT_SWEEP_INTERVAL_SECONDS, sweep_payouts))

@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from corridor import identity
 from corridor.identity import Principal, Scope
-from corridor.payments.errors import ProviderUnavailable
+from corridor.payments.errors import AccountNotActive, ProviderUnavailable
 from corridor.payments.models import DepositInstructionRow
 from corridor.payments.types import BANK_PROVIDER, DepositInstruction, FlowKind
 from corridor.platform.clock import utcnow
@@ -43,12 +43,22 @@ async def get_deposit_instruction(
     for the same instruction, concurrent or repeated, is answered with the same account.
     The second stores the answer unless another request already has, and reads back
     whichever was stored.
+
+    An instruction that exists is shown to its user whatever state the account is in. A
+    new one is made only for an active account, and that is decided before the provider
+    is asked for anything.
     """
     identity.require_scope(principal, Scope.DEPOSITS_READ)
     kind = get_asset(asset).kind
     user_id = principal.user_id
 
-    stored = await db.run(lambda session: _find(session, principal, asset))
+    async def read(session: AsyncSession) -> DepositInstruction | None:
+        found = await _find(session, principal, asset)
+        if found is None and (await identity.get_user(session, user_id)).status != "active":
+            raise AccountNotActive
+        return found
+
+    stored = await db.run(read)
     if stored is not None:
         return stored
 

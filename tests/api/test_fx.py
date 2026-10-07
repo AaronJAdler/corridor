@@ -330,16 +330,18 @@ async def test_each_route_needs_its_scope(
     quote_id = await quoted(client, maria)
 
     app.dependency_overrides[get_principal] = lambda: agent_for(maria, Scope.FX_CONVERT)
-    assert_problem(await ask(client, maria), 403, "insufficient_scope")
+    assert (await ask(client, maria)).status_code == 201
     assert_problem(
         await client.get(f"{CONVERSIONS}/{new_id()}", headers=maria.headers),
         403,
         "insufficient_scope",
     )
 
+    # Reading conversions lets an agent neither price one nor make one.
     app.dependency_overrides[get_principal] = lambda: agent_for(maria, Scope.FX_READ)
-    assert (await ask(client, maria)).status_code == 201
+    assert_problem(await ask(client, maria), 403, "insufficient_scope")
     assert_problem(await convert(client, maria, quote_id), 403, "insufficient_scope")
+    assert (await client.get(f"{CONVERSIONS}/{new_id()}", headers=maria.headers)).status_code == 404
 
     app.dependency_overrides[get_principal] = lambda: agent_for(maria, Scope.FX_CONVERT)
     assert (await convert(client, maria, quote_id, key="key-2")).status_code == 201

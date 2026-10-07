@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from corridor import audit, identity, ledger, outbox, risk, wallets
 from corridor.identity import Principal, Scope
 from corridor.ledger import EntryDraft, credit, debit
-from corridor.payments import beneficiaries
+from corridor.payments import beneficiaries, fees
 from corridor.payments.deposits import position_of
 from corridor.payments.errors import (
     BeneficiaryAssetMismatch,
@@ -52,14 +52,6 @@ HOLD_ENTRY_KIND: Final = "withdrawal_hold"
 RELEASE_ENTRY_KIND: Final = "withdrawal_release"
 WITHDRAWAL_SUBMIT: Final = "withdrawal.submit"
 CURSOR_KIND: Final = "withdrawals"
-
-_BASIS_POINTS: Final = 10_000
-
-
-def withdrawal_fee(amount: int, settings: Settings) -> int:
-    """What Corridor charges for a withdrawal of ``amount`` minor units, on top of it.
-    Rounded down, so that rounding never charges more than the configured rate."""
-    return amount * settings.withdrawal_fee_bps // _BASIS_POINTS
 
 
 async def request_withdrawal(
@@ -125,7 +117,7 @@ async def request_withdrawal(
         ),
     )
 
-    fee = withdrawal_fee(amount, settings)
+    fee = fees.withdrawal_fee(amount, asset, settings)
     reserved = amount + fee
     if reserved > MAX_MINOR_UNITS:
         # Each is storable alone, but they are held as their sum in one posting.
@@ -171,8 +163,7 @@ async def request_withdrawal(
     )
     withdrawal = as_withdrawal(inserted.mappings().one())
 
-    # Only the id: the handler reads the row, and finds whatever state it is in by then.
-    await outbox.enqueue(session, WITHDRAWAL_SUBMIT, {"withdrawal_id": str(withdrawal.id)})
+    await ask_to_be_sent(session, withdrawal.id)
     await audit.record(
         session,
         actor=_actor(principal),
@@ -189,6 +180,15 @@ async def request_withdrawal(
         },
     )
     return withdrawal
+
+
+async def ask_to_be_sent(session: AsyncSession, withdrawal_id: uuid.UUID) -> None:
+    """Write the event that has a withdrawal sent to its provider.
+
+    Only the id: the handler reads the row, and finds whatever state it is in by then. So
+    the event can be written again for a withdrawal whose first one never ran its course.
+    """
+    await outbox.enqueue(session, WITHDRAWAL_SUBMIT, {"withdrawal_id": str(withdrawal_id)})
 
 
 async def cancel_withdrawal(
@@ -308,27 +308,47 @@ async def find(session: AsyncSession, withdrawal_id: uuid.UUID) -> Withdrawal | 
     return as_withdrawal(row) if row is not None else None
 
 
-async def overdue(session: AsyncSession, before: datetime, *, limit: int) -> list[Withdrawal]:
-    """The withdrawals a provider may have and should have been heard about by now, oldest
-    first: submitted before ``before`` and not settled, or marked as being sent before it
-    and never recorded as sent.
+async def overdue(
+    session: AsyncSession, before: datetime, *, after: uuid.UUID | None = None, limit: int
+) -> list[Withdrawal]:
+    """One batch of the withdrawals a provider may have and should have been heard about
+    by now, oldest first: submitted before ``before`` and not settled, or marked as being
+    sent before it and never recorded as sent.
+
+    ``after`` is the id the batch before this one ended on. Without it every call would
+    return the same first rows, and a batch of withdrawals that cannot be advanced would
+    keep every later one from ever being looked at.
 
     A withdrawal that is only held is not among them however old it is: it has never been
     sent, so there is nothing a provider could say about it.
     """
+    query = select(_withdrawals).where(
+        or_(
+            and_(_withdrawals.c.status == "submitted", _withdrawals.c.submitted_at <= before),
+            # The mark, or the sweeper's last request to send it again, whichever is later.
+            and_(_withdrawals.c.status == "submitting", _withdrawals.c.updated_at <= before),
+        )
+    )
+    if after is not None:
+        query = query.where(_withdrawals.c.id > after)
+    rows = await session.execute(query.order_by(_withdrawals.c.id).limit(limit))
+    return [as_withdrawal(row) for row in rows.mappings()]
+
+
+async def lock_held(session: AsyncSession, user_id: uuid.UUID, asset: str) -> list[RowMapping]:
+    """A user's withdrawals of one asset that are reserved and were never sent, locked for
+    the rest of the transaction, oldest first. The provider is certain not to have them."""
     rows = await session.execute(
         select(_withdrawals)
         .where(
-            or_(
-                and_(_withdrawals.c.status == "submitted", _withdrawals.c.submitted_at <= before),
-                # The mark is the last thing written to a row that is still submitting.
-                and_(_withdrawals.c.status == "submitting", _withdrawals.c.updated_at <= before),
-            )
+            _withdrawals.c.user_id == user_id,
+            _withdrawals.c.asset_code == asset,
+            _withdrawals.c.status == "held",
         )
         .order_by(_withdrawals.c.id)
-        .limit(limit)
+        .with_for_update()
     )
-    return [as_withdrawal(row) for row in rows.mappings()]
+    return list(rows.mappings())
 
 
 async def lock(session: AsyncSession, withdrawal_id: uuid.UUID) -> RowMapping | None:

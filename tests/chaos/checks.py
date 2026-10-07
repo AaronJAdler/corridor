@@ -107,8 +107,15 @@ async def assert_each_deposit_credited_once(
         " WHERE source_type = 'deposit' AND kind IN ('deposit', 'deposit_suspense')"
         " GROUP BY source_id",
     )
+    # A deposit whose return was heard of first is recorded as returned and never credited:
+    # the bank had taken the money back before Corridor knew it had come.
+    returned_unseen = {
+        f"{deposit['provider']}:{deposit['provider_ref']}"
+        for deposit in await stack.deposits()
+        if deposit["status"] == "returned" and deposit["entry_id"] is None
+    }
     assert {credit["source_id"]: credit["entries"] for credit in credits} == dict.fromkeys(
-        arrived - set(lost_deposits), 1
+        arrived - set(lost_deposits) - returned_unseen, 1
     )
 
 

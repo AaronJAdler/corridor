@@ -40,6 +40,26 @@ def require_api_key(request: Request, sim: Sim) -> None:
         )
 
 
+def require_control_token(request: Request, sim: Sim) -> None:
+    """Every control route sits behind this. With no token configured the simulator only
+    listens on a loopback address, and the route is open; with one, the caller presents it
+    as ``Authorization: Bearer <control token>``."""
+    if sim.settings.control_token is None:
+        return
+    scheme, _, credential = request.headers.get("authorization", "").partition(" ")
+    expected = sim.settings.control_token.get_secret_value()
+    # As bytes and in constant time, as the API key is.
+    if scheme.lower() != "bearer" or not hmac.compare_digest(
+        credential.encode(), expected.encode()
+    ):
+        raise ApiError(
+            401,
+            "unauthorized",
+            "Send the control token as 'Authorization: Bearer <control token>'.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
 class Body(BaseModel):
     """The shape of a request body. Nothing is coerced: a string is not a number here.
 

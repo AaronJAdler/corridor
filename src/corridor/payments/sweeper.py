@@ -8,8 +8,12 @@ it reads through the same functions the webhooks use, so it can be run at any ti
 number of times, alongside them.
 """
 
-from datetime import timedelta
+import uuid
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta
 from typing import Final
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from corridor.payments import handlers, withdrawals
 from corridor.payments.errors import ProviderEventMismatch
@@ -23,7 +27,8 @@ from corridor.providers import Withdrawal as CustodyWithdrawal
 
 log = get_logger(__name__)
 
-# How many withdrawals one run looks at. The rest are still overdue at the next.
+# How many withdrawals are read at a time. A run reads batch after batch until it has
+# looked at every one that is overdue.
 BATCH_SIZE: Final = 100
 
 
@@ -36,30 +41,53 @@ async def sweep_payouts(
     ``payout_sweep_after_seconds``. The provider is read with no transaction open. A
     provider that cannot be reached for one withdrawal costs that one its turn and no more,
     and so does a provider this process was not given.
+
+    Every overdue withdrawal gets its turn in every run. They are read in batches, each
+    starting after the id the last one ended on, so the ones that cannot be advanced do
+    not stand in front of the ones that can.
     """
     before = utcnow() - timedelta(seconds=settings.payout_sweep_after_seconds)
-    due = await db.run(lambda session: withdrawals.overdue(session, before, limit=BATCH_SIZE))
 
     advanced = 0
-    for withdrawal in due:
-        try:
-            advanced += await _sweep(db, bank, custody, withdrawal)
-        except ProviderError as error:
-            log.warning(
-                "payout_sweep.provider_failed",
-                withdrawal_id=str(withdrawal.id),
-                provider=error.provider,
-                operation=error.operation,
-            )
-        except ProviderEventMismatch:
-            # What the provider holds is not this withdrawal. Nothing was moved, and the
-            # next withdrawal is no worse for it.
-            log.error("payout_sweep.mismatch", withdrawal_id=str(withdrawal.id))
-    return advanced
+    last_seen: uuid.UUID | None = None
+    while True:
+        due = await db.run(_batch_after(last_seen, before))
+        for withdrawal in due:
+            try:
+                advanced += await _sweep(db, bank, custody, withdrawal, before)
+            except ProviderError as error:
+                log.warning(
+                    "payout_sweep.provider_failed",
+                    withdrawal_id=str(withdrawal.id),
+                    provider=error.provider,
+                    operation=error.operation,
+                )
+            except ProviderEventMismatch:
+                # What the provider holds is not this withdrawal. Nothing was moved, and
+                # the next withdrawal is no worse for it.
+                log.error("payout_sweep.mismatch", withdrawal_id=str(withdrawal.id))
+        if len(due) < BATCH_SIZE:
+            return advanced
+        last_seen = due[-1].id
+
+
+def _batch_after(
+    after: uuid.UUID | None, before: datetime
+) -> Callable[[AsyncSession], Awaitable[list[Withdrawal]]]:
+    """The read of one batch, as work for a transaction."""
+
+    async def read(session: AsyncSession) -> list[Withdrawal]:
+        return await withdrawals.overdue(session, before, after=after, limit=BATCH_SIZE)
+
+    return read
 
 
 async def _sweep(
-    db: Database, bank: BankRail | None, custody: Custodian | None, withdrawal: Withdrawal
+    db: Database,
+    bank: BankRail | None,
+    custody: Custodian | None,
+    withdrawal: Withdrawal,
+    before: datetime,
 ) -> bool:
     reference = str(withdrawal.id)
     found: Payout | CustodyWithdrawal
@@ -69,9 +97,12 @@ async def _sweep(
         # Marked as being sent, and nothing recorded since: the worker that was sending it
         # may have died, or its event may be dead. If the provider has a payout under this
         # reference, the submission did happen and only its record is missing. If it has
-        # none, the withdrawal is left as it is for its event to send.
+        # none, nothing was sent, and the withdrawal is asked for again: its own event
+        # may never run. Nothing has moved by that, so it does not count as advanced.
         candidates = await _find(bank, custody, withdrawal)
         if not candidates:
+            if await handlers.resubmit(db, withdrawal.id, before):
+                log.info("payout_sweep.resubmitted", withdrawal_id=reference)
             return False
         if len(candidates) > 1:
             # One key makes one payout. More than one is not something to choose among.

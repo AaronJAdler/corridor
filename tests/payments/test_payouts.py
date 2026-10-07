@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from pydantic import SecretStr
 
-from corridor import payments
+from corridor import identity, payments
 from corridor.identity import User
 from corridor.payments import (
     MalformedProviderEvent,
@@ -35,6 +35,7 @@ from tests.payments.support import (
     held,
     held_bank_withdrawal,
     held_chain_withdrawal,
+    leave_submitting,
     omnibus,
     revenue_and_expense,
     rows,
@@ -358,7 +359,8 @@ async def test_a_completed_payout_without_a_corridor_fee_has_no_revenue_posting(
     clock: ManualClock,
     maria: User,
 ) -> None:
-    withdrawal = await submitted_bank(db, settings, bank, custody, maria)
+    free = settings.model_copy(update={"withdrawal_min_fee": {}})
+    withdrawal = await submitted_bank(db, free, bank, custody, maria)
 
     await payments.apply_payout_completed(db, await payout_completed(sim, clock))
 
@@ -792,3 +794,157 @@ async def test_a_cancellation_during_the_providers_call_is_refused_and_the_answe
     # The funds went back at most once, and only because the provider refused.
     assert await count(db, "journal_entries") == entries_posted
     assert len(await sim.payouts()) == (0 if refuse else 1)
+
+
+# --- an account that stopped being active while its withdrawal was held ----------------------
+
+
+async def test_a_held_withdrawal_of_a_user_restricted_since_is_given_back_and_never_sent(
+    db: Database,
+    charging: Settings,
+    sim: Sim,
+    bank: SimBank,
+    custody: SimCustody,
+    maria: User,
+) -> None:
+    withdrawal = await held_bank_withdrawal(db, charging, bank, maria)
+    async with db.transaction() as session:
+        await identity.restrict_user(session, maria.id, "under review")
+
+    await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
+
+    row = await withdrawal_row(db, withdrawal.id)
+    assert (row["status"], row["failure_reason"]) == ("failed", "account_not_active")
+    assert row["provider_ref"] is None
+    assert await sim.payouts() == []
+    assert sim.recorder.sent("POST", PAYOUTS) == []
+    assert (await available(db, maria), await held(db, maria)) == (500_00, 0)
+    (_, release) = await entries(db, "withdrawal", str(withdrawal.id))
+    assert release["kind"] == "withdrawal_release"
+    (audited,) = await rows(db, "SELECT * FROM audit_events WHERE action = 'withdrawal.failed'")
+    assert (audited["actor_type"], audited["principal_id"]) == ("system", maria.id)
+    assert audited["details"]["reason"] == "account_not_active"
+
+
+async def test_a_withdrawal_given_back_for_a_restricted_user_stays_given_back(
+    db: Database,
+    charging: Settings,
+    sim: Sim,
+    bank: SimBank,
+    custody: SimCustody,
+    maria: User,
+) -> None:
+    withdrawal = await held_bank_withdrawal(db, charging, bank, maria)
+    async with db.transaction() as session:
+        await identity.restrict_user(session, maria.id, "under review")
+    await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
+    async with db.transaction() as session:
+        await identity.lift_restriction(session, maria.id)
+
+    # The event is delivered again after the restriction was lifted.
+    await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
+
+    assert await status_of(db, withdrawal) == "failed"
+    assert await sim.payouts() == []
+    assert (await available(db, maria), await held(db, maria)) == (500_00, 0)
+
+
+async def test_a_withdrawal_already_being_sent_is_still_sent_for_a_user_restricted_since(
+    db: Database,
+    charging: Settings,
+    sim: Sim,
+    bank: SimBank,
+    custody: SimCustody,
+    maria: User,
+) -> None:
+    # Past the mark the provider may have it, and giving the funds back could pay it twice.
+    withdrawal = await held_bank_withdrawal(db, charging, bank, maria)
+    await leave_submitting(db, withdrawal.id)
+    async with db.transaction() as session:
+        await identity.restrict_user(session, maria.id, "under review")
+
+    await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
+
+    assert await status_of(db, withdrawal) == "submitted"
+    assert len(await sim.payouts()) == 1
+
+
+# --- what a provider says about why -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("said", "kept"),
+    [
+        ("account_closed", "account_closed"),
+        ("r01:insufficient-funds.v2", "r01:insufficient-funds.v2"),
+        ("Account Closed", "unspecified"),
+        ("<script>alert(1)</script>", "unspecified"),
+        ("", "unspecified"),
+        ("a" * 65, "unspecified"),
+        ("line\nbreak", "unspecified"),
+    ],
+)
+async def test_a_failure_reason_is_kept_only_if_it_is_a_plain_code(
+    db: Database,
+    charging: Settings,
+    sim: Sim,
+    bank: SimBank,
+    custody: SimCustody,
+    clock: ManualClock,
+    maria: User,
+    said: str,
+    kept: str,
+) -> None:
+    withdrawal = await submitted_bank(
+        db, charging, bank, custody, maria, account_number=CLOSED_ACCOUNT_NUMBER
+    )
+    await advance(sim, clock, 30)
+    failed = {**await sim.last_event("payout.failed"), "failure_reason": said}
+
+    await payments.apply_payout_failed(db, failed)
+
+    row = await withdrawal_row(db, withdrawal.id)
+    assert (row["status"], row["failure_reason"]) == ("failed", kept)
+    (audited,) = await rows(db, "SELECT * FROM audit_events WHERE action = 'withdrawal.failed'")
+    assert audited["details"]["reason"] == kept
+
+
+class RefusingBank:
+    """A bank that refuses every payout in words of its own choosing, and holds none."""
+
+    name = "simbank"
+
+    def __init__(self, code: str) -> None:
+        self._code = code
+
+    async def create_payout(self, **_arguments: Any) -> Payout:
+        raise ProviderRejected(
+            self._code, "No.", 422, provider=self.name, operation="create_payout"
+        )
+
+    async def find_payouts(self, _reference: str) -> tuple[Payout, ...]:
+        return ()
+
+
+@pytest.mark.parametrize(
+    ("said", "kept"),
+    [("beneficiary_closed", "beneficiary_closed"), ("Beneficiary closed; call us", "unspecified")],
+)
+async def test_the_code_of_a_refusal_is_kept_only_if_it_is_a_plain_code(
+    db: Database,
+    charging: Settings,
+    bank: SimBank,
+    custody: SimCustody,
+    maria: User,
+    said: str,
+    kept: str,
+) -> None:
+    withdrawal = await held_bank_withdrawal(db, charging, bank, maria)
+    refusing: Any = RefusingBank(said)
+
+    await payments.submit_withdrawal(db, refusing, custody, withdrawal.id)
+
+    row = await withdrawal_row(db, withdrawal.id)
+    assert (row["status"], row["failure_reason"]) == ("failed", kept)
+    (audited,) = await rows(db, "SELECT * FROM audit_events WHERE action = 'withdrawal.failed'")
+    assert audited["details"]["reason"] == kept

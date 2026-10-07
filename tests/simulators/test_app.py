@@ -1,5 +1,6 @@
 """The simulator as an application: settings, authentication, errors and start-up."""
 
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 import httpx
@@ -9,7 +10,7 @@ from fastapi import Depends, FastAPI
 from pydantic import SecretStr, ValidationError
 
 from corridor_sim import __main__ as entry_point
-from corridor_sim.api.deps import require_api_key
+from corridor_sim.api.deps import require_api_key, require_control_token
 from corridor_sim.app import create_app
 from corridor_sim.settings import SimSettings
 from tests.simulators.conftest import (
@@ -20,6 +21,13 @@ from tests.simulators.conftest import (
     Sim,
     sim_settings,
 )
+from tests.support.auth import served_routes
+
+Launch = Callable[..., Awaitable[Sim]]
+
+# Not secrets: they open a simulator that lives for one test.
+CONTROL_TOKEN = "sim-test-control-token-of-32-characters"  # pragma: allowlist secret
+ONE_SHORT = "not-thirty-two-characters-long!"  # pragma: allowlist secret
 
 # --- settings ------------------------------------------------------------------------------
 
@@ -61,6 +69,7 @@ def test_the_defaults_are_the_contracts_schedule() -> None:
     assert (settings.block_seconds, settings.confirmations) == (2, 3)
     assert settings.webhook_timeout_seconds == 5
     assert (settings.host, settings.port) == ("127.0.0.1", 8100)
+    assert (settings.environment, settings.control_token) == ("development", None)
 
 
 def test_settings_are_read_from_the_environment_under_the_simulators_prefix(
@@ -106,10 +115,86 @@ def test_a_setting_that_makes_no_sense_is_refused(overrides: dict[str, object]) 
 
 
 def test_secrets_are_not_shown_when_settings_are_printed() -> None:
-    shown = repr(sim_settings())
+    shown = repr(sim_settings(control_token=SecretStr(CONTROL_TOKEN)))
 
-    for secret in (API_KEY, BANK_WEBHOOK_SECRET, CUSTODY_WEBHOOK_SECRET):
+    for secret in (API_KEY, BANK_WEBHOOK_SECRET, CUSTODY_WEBHOOK_SECRET, CONTROL_TOKEN):
         assert secret not in shown
+
+
+SECRETS = ["api_key", "bank_webhook_secret", "custody_webhook_secret", "control_token"]
+
+
+@pytest.mark.parametrize("name", SECRETS)
+def test_a_secret_shorter_than_32_characters_is_refused_and_not_repeated(name: str) -> None:
+    assert len(ONE_SHORT) == 31
+    # As it arrives from the environment: plain text, which an error could quote.
+    with pytest.raises(ValidationError) as refusal:
+        sim_settings(**{name: ONE_SHORT})
+
+    assert [error["loc"] for error in refusal.value.errors()] == [(name,)]
+    assert ONE_SHORT not in str(refusal.value)
+
+
+@pytest.mark.parametrize("name", SECRETS)
+def test_a_secret_of_32_characters_is_accepted(name: str) -> None:
+    settings = sim_settings(**{name: SecretStr(ONE_SHORT + "x")})
+
+    assert getattr(settings, name).get_secret_value() == ONE_SHORT + "x"
+
+
+# --- where the simulator may run -----------------------------------------------------------
+
+
+@pytest.mark.parametrize("environment", ["development", "test"])
+def test_the_simulator_runs_in_development_and_in_test(environment: str) -> None:
+    assert sim_settings(environment=environment).environment == environment
+
+
+@pytest.mark.parametrize("environment", ["production", "staging", "prod", "", "Development"])
+def test_the_simulator_refuses_to_start_anywhere_else(environment: str) -> None:
+    with pytest.raises(ValidationError) as refusal:
+        sim_settings(environment=environment)
+
+    assert [error["loc"] for error in refusal.value.errors()] == [("environment",)]
+
+
+def test_the_environment_is_read_from_the_simulators_own_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CORRIDOR_SIM_ENVIRONMENT", "production")
+
+    with pytest.raises(ValidationError):
+        sim_settings()
+
+    monkeypatch.setenv("CORRIDOR_SIM_ENVIRONMENT", "test")
+    # Corridor's own environment is not the simulator's.
+    monkeypatch.setenv("CORRIDOR_ENVIRONMENT", "production")
+    assert sim_settings().environment == "test"
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "127.8.9.10", "::1", "localhost"])
+def test_on_a_loopback_address_the_control_endpoints_need_no_token(host: str) -> None:
+    assert sim_settings(host=host).control_token is None
+
+
+@pytest.mark.parametrize(
+    "host",
+    ["0.0.0.0", "::", "10.0.0.7", "192.168.1.7", "sim.internal", "", "localhost."],  # noqa: S104
+)
+@pytest.mark.parametrize("environment", ["development", "test"])
+def test_listening_beyond_loopback_without_a_control_token_is_refused(
+    host: str, environment: str
+) -> None:
+    with pytest.raises(ValidationError) as refusal:
+        sim_settings(host=host, environment=environment)
+
+    assert "control_token" in str(refusal.value)
+    assert (
+        sim_settings(
+            host=host, environment=environment, control_token=SecretStr(CONTROL_TOKEN)
+        ).host
+        == host
+    )
 
 
 # --- authentication ------------------------------------------------------------------------
@@ -168,6 +253,125 @@ async def test_a_missing_or_wrong_credential_is_refused_with_the_contracts_error
     assert set(body["error"]) == {"code", "message"}
     assert body["error"]["code"] == "unauthorized"
     assert API_KEY not in response.text
+
+
+# --- the control token ---------------------------------------------------------------------
+
+# One request to every control route, valid or not: authentication comes before the body.
+CONTROL_ROUTES = [
+    ("POST", "/reset"),
+    ("GET", "/clock"),
+    ("POST", "/clock/advance"),
+    ("POST", "/bank/deposits"),
+    ("POST", "/bank/deposits/dep_1/return"),
+    ("GET", "/bank/payouts"),
+    ("GET", "/bank/deposits"),
+    ("GET", "/bank/balances"),
+    ("POST", "/custody/deposits"),
+    ("POST", "/custody/deposits/dep_1/drop"),
+    ("POST", "/chain/mine"),
+    ("GET", "/custody/withdrawals"),
+    ("GET", "/custody/deposits"),
+    ("GET", "/custody/balances"),
+    ("POST", "/fx/rates"),
+    ("POST", "/fx/freeze"),
+    ("POST", "/faults"),
+    ("DELETE", "/faults"),
+    ("POST", "/webhooks/behaviour"),
+    ("POST", "/webhooks/deliver"),
+    ("GET", "/webhooks/events"),
+]
+
+
+def test_the_list_of_control_routes_is_every_control_route(sim: Sim) -> None:
+    served = {
+        (route.method, route.path.removeprefix("/_control"))
+        for route in served_routes(sim.app)
+        if route.path.startswith("/_control")
+    }
+
+    assert served == {
+        (method, path.replace("dep_1", "{deposit_id}")) for method, path in CONTROL_ROUTES
+    }
+
+
+def test_every_control_route_has_the_token_check_in_front_of_it(sim: Sim) -> None:
+    unguarded = [
+        (route.method, route.path)
+        for route in served_routes(sim.app)
+        if route.path.startswith("/_control") and require_control_token not in route.calls
+    ]
+
+    assert unguarded == []
+
+
+@pytest.mark.parametrize(("method", "path"), CONTROL_ROUTES)
+async def test_every_control_route_asks_for_the_token_when_one_is_configured(
+    launch: Launch, method: str, path: str
+) -> None:
+    sim = await launch(host="0.0.0.0", control_token=SecretStr(CONTROL_TOKEN))  # noqa: S104
+
+    response = await sim.anonymous.request(method, f"/_control{path}", json={})
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert response.json()["error"]["code"] == "unauthorized"
+
+
+@pytest.mark.parametrize(
+    "authorization",
+    [
+        None,
+        "",
+        "Bearer",
+        "Bearer not-the-token",
+        f"Bearer {CONTROL_TOKEN}x",
+        f"Bearer {CONTROL_TOKEN[:-1]}",
+        f"Basic {CONTROL_TOKEN}",
+        f"{CONTROL_TOKEN}",
+        # The key of the provider API is not the key to the control endpoints.
+        f"Bearer {API_KEY}",
+        "Bearer cl\u00e9",
+    ],
+)
+async def test_a_missing_or_wrong_control_token_is_refused_and_changes_nothing(
+    launch: Launch, authorization: str | None
+) -> None:
+    sim = await launch(control_token=SecretStr(CONTROL_TOKEN))
+    headers = {} if authorization is None else {"Authorization": authorization.encode("latin-1")}
+
+    response = await sim.anonymous.post(
+        "/_control/clock/advance", json={"seconds": 30}, headers=headers
+    )
+
+    assert response.status_code == 401
+    assert CONTROL_TOKEN not in response.text
+    clock = await sim.anonymous.get(
+        "/_control/clock", headers={"Authorization": f"Bearer {CONTROL_TOKEN}"}
+    )
+    assert clock.json()["now"] == "2026-01-15T12:00:00Z"
+
+
+async def test_the_control_token_opens_the_control_routes(launch: Launch) -> None:
+    sim = await launch(control_token=SecretStr(CONTROL_TOKEN))
+
+    response = await sim.anonymous.post(
+        "/_control/clock/advance",
+        json={"seconds": 30},
+        headers={"Authorization": f"bearer {CONTROL_TOKEN}"},
+    )
+
+    assert (response.status_code, response.json()["now"]) == (200, "2026-01-15T12:00:30Z")
+
+
+async def test_the_control_token_is_not_a_key_to_the_provider_api(launch: Launch) -> None:
+    sim = await launch(control_token=SecretStr(CONTROL_TOKEN))
+
+    response = await sim.anonymous.get(
+        "/bank/v1/payouts", headers={"Authorization": f"Bearer {CONTROL_TOKEN}"}
+    )
+
+    assert response.status_code == 401
 
 
 # --- the clock, through the control endpoints ----------------------------------------------

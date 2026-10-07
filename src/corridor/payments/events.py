@@ -5,14 +5,20 @@ from the provider. That makes it authentic, not correct: it is still parsed agai
 shape the provider contract gives it before any of it is used.
 """
 
+import re
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Final
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from corridor.payments.errors import MalformedProviderEvent
 from corridor.platform.errors import InvalidRequest
 from corridor.platform.money import parse_amount
+
+# What a reason from a provider has to look like to be kept: a short code, as the contract
+# gives, and not a sentence.
+_REASON_CODE: Final = re.compile(r"[a-z0-9_.:-]{1,64}", re.ASCII)
+UNSPECIFIED_REASON: Final = "unspecified"
 
 
 class ProviderEvent(BaseModel):
@@ -41,3 +47,15 @@ def amount_of(text: str, asset: str, *, allow_zero: bool = False) -> int:
         # How platform.money refuses an amount or an asset code. Here it is the provider's
         # mistake and not a client's, and what was sent is not repeated.
         raise MalformedProviderEvent("invalid amount or asset") from None
+
+
+def reason_code(text: object) -> str:
+    """A provider's reason for a failure or a return, if it is a code, and ``unspecified``
+    if it is anything else.
+
+    The field is free text chosen by someone outside Corridor, and it is stored, audited
+    and shown to the user. Whatever is not a plain code is dropped and not cleaned up.
+    """
+    if isinstance(text, str) and _REASON_CODE.fullmatch(text) is not None:
+        return text
+    return UNSPECIFIED_REASON

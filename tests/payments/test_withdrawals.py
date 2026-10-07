@@ -47,6 +47,13 @@ from tests.payments.support import (
 from tests.support.providers import CLABE, EXTERNAL_ADDRESS
 
 
+@pytest.fixture(name="settings")
+def without_a_minimum_fee(settings: Settings) -> Settings:
+    """The suite's settings with no least withdrawal fee, so that the amounts in this
+    module are the ones each test names. The minimum has tests of its own."""
+    return settings.model_copy(update={"withdrawal_min_fee": {}})
+
+
 @pytest.fixture
 def charging(settings: Settings) -> Settings:
     """The test settings with a 1.5% withdrawal fee."""
@@ -137,6 +144,56 @@ async def test_the_whole_balance_can_be_withdrawn_when_there_is_no_fee(
     await withdraw(db, settings, maria, 100_00, beneficiary=beneficiary)
 
     assert (await available(db, maria), await held(db, maria)) == (0, 100_00)
+
+
+@pytest.fixture
+def with_a_minimum(charging: Settings) -> Settings:
+    """A 1.5% withdrawal fee that is never less than 0.25 USD or 0.15 USDC."""
+    return charging.model_copy(update={"withdrawal_min_fee": {"USD": "0.25", "USDC": "0.15"}})
+
+
+@pytest.mark.parametrize(("amount", "fee"), [(1, 25), (16_66, 25), (17_34, 26), (100_00, 1_50)])
+async def test_a_small_withdrawal_is_charged_the_minimum_fee_of_its_asset(
+    db: Database, with_a_minimum: Settings, bank: SimBank, maria: User, amount: int, fee: int
+) -> None:
+    await deposit(db, maria, 500_00)
+    beneficiary = await add_beneficiary(db, bank, maria)
+
+    withdrawal = await withdraw(db, with_a_minimum, maria, amount, beneficiary=beneficiary)
+
+    assert withdrawal.fee == fee
+    assert (await available(db, maria), await held(db, maria)) == (
+        500_00 - amount - fee,
+        amount + fee,
+    )
+    assert (await withdrawal_row(db, withdrawal.id))["fee"] == fee
+
+
+async def test_the_minimum_fee_is_in_the_asset_withdrawn(
+    db: Database, with_a_minimum: Settings, maria: User
+) -> None:
+    await deposit(db, maria, 50_000_000, "USDC")
+
+    withdrawal = await withdraw(
+        db, with_a_minimum, maria, 1_000_000, asset="USDC", to_address=EXTERNAL_ADDRESS
+    )
+
+    assert withdrawal.fee == 150_000
+    assert await held(db, maria, "USDC") == 1_150_000
+
+
+async def test_a_balance_that_covers_the_amount_and_not_the_minimum_fee_holds_nothing(
+    db: Database, with_a_minimum: Settings, bank: SimBank, maria: User
+) -> None:
+    await deposit(db, maria, 10_24)
+    beneficiary = await add_beneficiary(db, bank, maria)
+
+    with pytest.raises(InsufficientFunds):
+        await withdraw(db, with_a_minimum, maria, 10_00, beneficiary=beneficiary)
+
+    assert await available(db, maria) == 10_24
+    assert await held(db, maria) == 0
+    assert await count(db, "withdrawals") == 0
 
 
 async def nothing_is_held(db: Database, user: User, asset: str = "USD") -> None:

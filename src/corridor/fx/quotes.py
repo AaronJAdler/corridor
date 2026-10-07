@@ -1,11 +1,11 @@
 """Quotes: the two amounts of a conversion, worked out once and stored."""
 
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import cast
+from typing import Any, cast
 
-from sqlalchemy import RowMapping, Table, insert
+from sqlalchemy import CursorResult, RowMapping, Table, delete, insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from corridor import identity
@@ -47,8 +47,11 @@ async def create_quote(
     ``rate`` is the mid rate from ``sell_asset`` to ``buy_asset``, fetched by the caller
     before its transaction began. Both amounts are fixed here; converting the quote moves
     them as they are.
+
+    A quote is the first half of a conversion and is of use to nobody who cannot convert,
+    so it asks for the scope that converting does.
     """
-    identity.require_scope(principal, Scope.FX_READ)
+    identity.require_scope(principal, Scope.FX_CONVERT)
     check_pair(sell_asset, buy_asset)
     if isinstance(sell_amount, bool) or not isinstance(sell_amount, int) or sell_amount <= 0:
         raise InvalidAmount("The amount must be greater than zero.")
@@ -81,6 +84,20 @@ async def create_quote(
         .returning(_quotes)
     )
     return quote_of(inserted.mappings().one())
+
+
+async def purge_unused_quotes(session: AsyncSession, *, expired_before: datetime) -> int:
+    """Delete the quotes that expired before ``expired_before`` and were never converted,
+    and say how many.
+
+    A quote nobody took is of no use once it has expired, and anyone may ask for as many
+    as they like. One that was converted is the record of what its conversion was priced
+    at, and stays.
+    """
+    deleted = await session.execute(
+        delete(_quotes).where(_quotes.c.status == "open", _quotes.c.expires_at < expired_before)
+    )
+    return cast(CursorResult[Any], deleted).rowcount
 
 
 def quote_of(row: RowMapping) -> Quote:

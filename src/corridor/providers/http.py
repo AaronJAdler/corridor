@@ -12,6 +12,7 @@ Nothing here logs a request or response body. Bodies carry account numbers.
 import asyncio
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final, Literal
 from urllib.parse import quote
@@ -35,6 +36,24 @@ IDEMPOTENCY_HEADER: Final = "Idempotency-Key"
 
 # The first answer to a POST is 201; a read, or a repeat that finds the resource, is 200.
 _SUCCESS: Final = frozenset({200, 201})
+
+# The most of a response body that is read. No answer in the contract is a hundredth of
+# this; a body that goes on past it is not an answer, and reading it all would let whoever
+# sent it choose how much memory this process uses.
+MAX_RESPONSE_BYTES: Final = 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class _Answer:
+    """What was read of a response: its status and its body, which is whole."""
+
+    status_code: int
+    content: bytes
+
+
+class _UnreadableBody(Exception):
+    """A response body that was not read to its end: it went past ``MAX_RESPONSE_BYTES``,
+    or it was compressed, which nothing asked for."""
 
 
 class Document(BaseModel):
@@ -90,7 +109,14 @@ class ProviderClient:
         self._timeout_seconds = timeout_seconds
         # A client handed in belongs to whoever made it, and is not closed here.
         self._owns_client = client is None
-        self._client = client if client is not None else httpx.AsyncClient(timeout=timeout_seconds)
+        # A client of its own takes nothing from the environment: a proxy variable set
+        # on the host would otherwise route every provider call, credentials and all,
+        # through whatever it names.
+        self._client = (
+            client
+            if client is not None
+            else httpx.AsyncClient(timeout=timeout_seconds, trust_env=False, follow_redirects=False)
+        )
 
     async def aclose(self) -> None:
         if self._owns_client:
@@ -169,29 +195,40 @@ class ProviderClient:
         params: Mapping[str, str] | None,
         body: Mapping[str, object] | None,
         headers: Mapping[str, str] | None,
-    ) -> httpx.Response:
+    ) -> _Answer:
+        request = self._client.build_request(
+            method,
+            self._base_url + path,
+            params=params,
+            json=body,
+            headers={
+                **(headers or {}),
+                "Authorization": f"Bearer {self._api_key.get_secret_value()}",
+                # A compressed body has no size until it has been expanded.
+                "Accept-Encoding": "identity",
+            },
+        )
         try:
             # The deadline covers the whole exchange. httpx's own timeouts bound each phase
             # separately, and an in-process transport does not enforce them at all.
             async with asyncio.timeout(self._timeout_seconds):
-                return await self._client.request(
-                    method,
-                    self._base_url + path,
-                    params=params,
-                    json=body,
-                    headers={
-                        **(headers or {}),
-                        "Authorization": f"Bearer {self._api_key.get_secret_value()}",
-                    },
-                )
+                # A redirect is never followed, whatever the client was built to do: the
+                # request carries the API key, and would carry it wherever it was sent.
+                response = await self._client.send(request, stream=True, follow_redirects=False)
+                try:
+                    return _Answer(response.status_code, await _read_capped(response))
+                finally:
+                    await response.aclose()
         except TimeoutError:
             raise self._unknown(operation, "no response within the deadline") from None
+        except _UnreadableBody as unreadable:
+            raise self._unknown(operation, f"invalid response: {unreadable}") from None
         except (httpx.HTTPError, OSError) as error:
             # Only the kind of failure: the text of a transport error can quote the URL.
             raise self._unknown(operation, f"transport error: {type(error).__name__}") from None
 
     def _read[D: Document, T](
-        self, operation: str, response: httpx.Response, model: type[D], convert: Callable[[D], T]
+        self, operation: str, response: _Answer, model: type[D], convert: Callable[[D], T]
     ) -> T:
         status = response.status_code
         if status == 401:
@@ -212,7 +249,7 @@ class ProviderClient:
             # InvalidRequest is how platform.money refuses an amount or an asset code.
             raise self._unknown(operation, f"unbelievable response: {error}") from None
 
-    def _refusal(self, operation: str, response: httpx.Response) -> Exception:
+    def _refusal(self, operation: str, response: _Answer) -> Exception:
         """A ``4xx`` is a definite refusal only if it is the provider's own. One without the
         contract's error body came from something in between, and proves nothing."""
         try:
@@ -253,6 +290,29 @@ class ProviderClient:
             outcome=outcome,
             **extra,
         )
+
+
+async def _read_capped(response: httpx.Response) -> bytes:
+    """The body of a response that is being streamed, or ``_UnreadableBody``.
+
+    What the response says about its own length is not asked: the count is of the bytes
+    that arrive. They are taken as they arrive and never expanded, so a small compressed
+    body cannot become a large one here.
+    """
+    if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
+        raise _UnreadableBody("body is compressed")
+    if response.is_stream_consumed:
+        # Handed over whole by a transport that does not stream, as an in-process one may.
+        # There is nothing left to refuse to read, only to refuse to use.
+        if len(response.content) > MAX_RESPONSE_BYTES:
+            raise _UnreadableBody("body too large")
+        return response.content
+    body = bytearray()
+    async for chunk in response.aiter_raw():
+        body += chunk
+        if len(body) > MAX_RESPONSE_BYTES:
+            raise _UnreadableBody("body too large")
+    return bytes(body)
 
 
 def _fields(error: ValidationError) -> str:
@@ -301,6 +361,10 @@ def segment(identifier: str) -> str:
     """An identifier as one path segment, so that no id can name another resource."""
     if not identifier:
         raise ValueError("an identifier is not empty")
+    if identifier in (".", ".."):
+        # Quoting leaves a dot as it is, and a client or a proxy that normalises the path
+        # would read these two as "here" and "the resource above".
+        raise ValueError("an identifier is not a relative path")
     return quote(identifier, safe="")
 
 

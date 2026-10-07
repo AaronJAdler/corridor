@@ -114,7 +114,7 @@ async def test_a_confirmation_delivered_before_its_detection_credits_the_deposit
     assert stored["status"] == "completed"
 
 
-async def test_a_return_delivered_before_its_deposit_waits_for_it_and_then_takes_it_back(
+async def test_a_return_delivered_before_its_deposit_leaves_nothing_for_it_to_credit(
     stack: Stack,
 ) -> None:
     await stack.webhooks_behave(hold=True, reverse=True)
@@ -124,17 +124,18 @@ async def test_a_return_delivered_before_its_deposit_waits_for_it_and_then_takes
     await stack.webhooks_behave(hold=False)
     await stack.settle()
 
-    # The return was tried first, found no deposit, and was retried after it.
+    # The return was applied first and recorded the deposit as returned. The deposit then
+    # found itself recorded and credited nothing, and neither event had to be tried twice.
     await assert_at_rest(stack)
     assert await stack.wallet(user, asset) == (0, 0)
     (stored,) = await stack.deposits()
-    assert stored["status"] == "returned"
-    retried = await rows(
+    assert (stored["status"], stored["entry_id"]) == ("returned", None)
+    handled = await rows(
         stack.db,
-        "SELECT max(attempts) AS attempts FROM outbox_events WHERE topic = :t",
+        "SELECT status, attempts FROM outbox_events WHERE topic = :t",
         t="webhook.received",
     )
-    assert retried[0]["attempts"] >= 2
+    assert [(event["status"], event["attempts"]) for event in handled] == [("done", 1)] * 2
 
 
 @pytest.mark.parametrize("kind", KINDS)

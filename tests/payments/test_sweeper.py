@@ -1,5 +1,6 @@
 """The payout sweeper: what advances a withdrawal when its webhook never arrives."""
 
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -7,6 +8,7 @@ from sqlalchemy import text
 
 from corridor import payments
 from corridor.identity import User
+from corridor.payments import handlers, sweeper
 from corridor.platform.clock import ManualClock
 from corridor.platform.config import Settings
 from corridor.platform.db import Database
@@ -20,6 +22,7 @@ from tests.payments.support import (
     held_chain_withdrawal,
     leave_submitting,
     revenue_and_expense,
+    rows,
     settlement,
     withdraw,
     withdrawal_row,
@@ -260,7 +263,14 @@ async def test_the_sweeper_never_asks_about_a_withdrawal_that_is_only_held(
     assert await held(db, maria) == 101_50
 
 
-async def test_a_withdrawal_left_submitting_that_the_provider_has_never_seen_stays_as_it_is(
+async def submissions_asked_for(db: Database) -> int:
+    """How many times a withdrawal has been asked to be sent: its own event, and every
+    one the sweeper wrote after it."""
+    found = await rows(db, "SELECT 1 FROM outbox_events WHERE topic = 'withdrawal.submit'")
+    return len(found)
+
+
+async def test_a_withdrawal_left_submitting_that_the_provider_has_never_seen_is_asked_for_again(
     db: Database,
     charging: Settings,
     sim: Sim,
@@ -274,6 +284,7 @@ async def test_a_withdrawal_left_submitting_that_the_provider_has_never_seen_sta
     clock.advance(seconds=SWEEP_AFTER - 1)
     assert await payments.sweep_payouts(db, bank, custody, charging) == 0
     assert polls(sim) == []
+    assert await submissions_asked_for(db) == 1
 
     clock.advance(seconds=1)
     assert await payments.sweep_payouts(db, bank, custody, charging) == 0
@@ -282,9 +293,111 @@ async def test_a_withdrawal_left_submitting_that_the_provider_has_never_seen_sta
     assert poll.url.params["reference"] == str(withdrawal.id)
     assert (await withdrawal_row(db, withdrawal.id))["status"] == "submitting"
     assert await held(db, maria) == 101_50
-    # The funds stay reserved, and the submission can still go out.
+    (_, again) = await rows(
+        db, "SELECT payload FROM outbox_events WHERE topic = 'withdrawal.submit' ORDER BY id"
+    )
+    assert again["payload"] == {"withdrawal_id": str(withdrawal.id)}
+    # The funds stay reserved, and the submission goes out under the withdrawal's own id.
     await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
     assert (await withdrawal_row(db, withdrawal.id))["status"] == "submitted"
+    (payout,) = await sim.payouts()
+    assert payout["reference"] == str(withdrawal.id)
+
+
+async def test_a_withdrawal_is_asked_for_again_at_most_once_in_each_sweep_period(
+    db: Database,
+    charging: Settings,
+    sim: Sim,
+    bank: SimBank,
+    custody: SimCustody,
+    clock: ManualClock,
+    maria: User,
+) -> None:
+    withdrawal = await held_bank_withdrawal(db, charging, bank, maria)
+    await leave_submitting(db, withdrawal.id)
+    clock.advance(seconds=SWEEP_AFTER)
+    await payments.sweep_payouts(db, bank, custody, charging)
+    assert await submissions_asked_for(db) == 2
+
+    await payments.sweep_payouts(db, bank, custody, charging)
+    clock.advance(seconds=SWEEP_AFTER - 1)
+    await payments.sweep_payouts(db, bank, custody, charging)
+    assert await submissions_asked_for(db) == 2
+
+    clock.advance(seconds=1)
+    await payments.sweep_payouts(db, bank, custody, charging)
+    assert await submissions_asked_for(db) == 3
+    assert (await withdrawal_row(db, withdrawal.id))["status"] == "submitting"
+
+
+async def test_a_withdrawal_sent_since_the_sweeper_read_it_is_not_asked_for_again(
+    db: Database,
+    charging: Settings,
+    bank: SimBank,
+    custody: SimCustody,
+    clock: ManualClock,
+    maria: User,
+) -> None:
+    withdrawal = await held_bank_withdrawal(db, charging, bank, maria)
+    await leave_submitting(db, withdrawal.id)
+    clock.advance(seconds=SWEEP_AFTER)
+    before = clock.now() - timedelta(seconds=SWEEP_AFTER)
+    await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
+
+    assert await handlers.resubmit(db, withdrawal.id, before) is False
+
+    assert await submissions_asked_for(db) == 1
+
+
+async def test_two_sweepers_that_read_a_withdrawal_at_once_ask_for_it_once(
+    db: Database,
+    charging: Settings,
+    bank: SimBank,
+    clock: ManualClock,
+    maria: User,
+) -> None:
+    withdrawal = await held_bank_withdrawal(db, charging, bank, maria)
+    await leave_submitting(db, withdrawal.id)
+    clock.advance(seconds=SWEEP_AFTER)
+    before = clock.now() - timedelta(seconds=SWEEP_AFTER)
+
+    # Both read it as overdue before either wrote; the second finds it asked for.
+    assert await handlers.resubmit(db, withdrawal.id, before) is True
+    assert await handlers.resubmit(db, withdrawal.id, before) is False
+
+    assert await submissions_asked_for(db) == 2
+
+
+async def test_one_run_looks_at_every_overdue_withdrawal_however_many_cannot_be_advanced(
+    db: Database,
+    charging: Settings,
+    sim: Sim,
+    bank: SimBank,
+    custody: SimCustody,
+    clock: ManualClock,
+    maria: User,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sweeper, "BATCH_SIZE", 2)
+    stuck_one = await held_bank_withdrawal(db, charging, bank, maria, 10_00)
+    beneficiary = await add_beneficiary(db, bank, maria)
+    others = [
+        await withdraw(db, charging, maria, amount, beneficiary=beneficiary)
+        for amount in (20_00, 30_00, 40_00, 50_00)
+    ]
+    for withdrawal in (stuck_one, *others):
+        await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
+    await advance(sim, clock, SWEEP_AFTER)
+    # The oldest two, a whole batch, cannot be read this time.
+    await sim.inject("bank.get_payout", "error", times=2)
+
+    assert await payments.sweep_payouts(db, bank, custody, charging) == 3
+
+    statuses = [
+        (await withdrawal_row(db, withdrawal.id))["status"] for withdrawal in (stuck_one, *others)
+    ]
+    assert statuses == ["submitted", "submitted", "completed", "completed", "completed"]
+    assert len(polls(sim)) == 5
 
 
 async def test_a_provider_that_fails_for_one_withdrawal_does_not_stop_the_others(

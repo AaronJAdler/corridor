@@ -14,6 +14,7 @@ from corridor.payments.deposits import (
 )
 from corridor.payments.errors import (
     MAX_MEMO_LENGTH,
+    AccountNotActive,
     BeneficiaryAssetMismatch,
     BeneficiaryKeyReused,
     BeneficiaryNotFound,
@@ -71,6 +72,7 @@ __all__ = [
     "BANK_PROVIDER",
     "CUSTODY_PROVIDER",
     "MAX_MEMO_LENGTH",
+    "AccountNotActive",
     "Beneficiary",
     "BeneficiaryAssetMismatch",
     "BeneficiaryKeyReused",

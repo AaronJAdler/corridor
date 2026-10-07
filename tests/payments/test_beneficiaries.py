@@ -6,9 +6,10 @@ from typing import Any
 
 import pytest
 
-from corridor import payments
+from corridor import identity, payments
 from corridor.identity import InsufficientScope, Scope, User
 from corridor.payments import (
+    AccountNotActive,
     BeneficiaryKeyReused,
     BeneficiaryRejected,
     InvalidBeneficiaryAccount,
@@ -247,3 +248,29 @@ async def test_a_token_the_bank_already_gave_another_user_is_not_handed_over(
 
     (row,) = await rows(db, "SELECT id, user_id FROM beneficiaries")
     assert (row["id"], row["user_id"]) == (hers.id, maria.id)
+
+
+async def test_a_restricted_user_is_refused_a_beneficiary_before_the_bank_is_given_anything(
+    db: Database, sim: Sim, bank: SimBank, maria: User
+) -> None:
+    async with db.transaction() as session:
+        await identity.restrict_user(session, maria.id, "under review")
+
+    with pytest.raises(AccountNotActive) as refusal:
+        await add_beneficiary(db, bank, maria)
+
+    assert (refusal.value.status, refusal.value.code) == (403, "user_restricted")
+    # The account number never left: nothing was sent at all.
+    assert sim.recorder.requests == []
+    assert await count(db, "beneficiaries") == 0
+
+
+async def test_a_user_whose_restriction_was_lifted_registers_a_beneficiary_again(
+    db: Database, bank: SimBank, maria: User
+) -> None:
+    async with db.transaction() as session:
+        await identity.restrict_user(session, maria.id, "under review")
+    async with db.transaction() as session:
+        await identity.lift_restriction(session, maria.id)
+
+    assert (await add_beneficiary(db, bank, maria)).user_id == maria.id

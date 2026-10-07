@@ -12,17 +12,18 @@ second and the stale find the withdrawal already past them and do nothing.
 
 import uuid
 from collections.abc import Mapping
+from datetime import datetime
 from typing import Any, Final
 
 from pydantic import Field
 from sqlalchemy import RowMapping
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from corridor import audit, ledger, wallets
+from corridor import audit, identity, ledger, wallets
 from corridor.ledger import AccountKind, EntryDraft, PostingDraft, credit, debit
 from corridor.payments import beneficiaries, withdrawals
 from corridor.payments.errors import MalformedProviderEvent, ProviderEventMismatch
-from corridor.payments.events import ProviderEvent, amount_of, parse
+from corridor.payments.events import ProviderEvent, amount_of, parse, reason_code
 from corridor.payments.types import BANK_PROVIDER, CUSTODY_PROVIDER, FlowKind, Withdrawal
 from corridor.platform.clock import utcnow
 from corridor.platform.db import Database
@@ -45,6 +46,10 @@ SETTLE_ENTRY_KIND: Final = "withdrawal_settle"
 # request with another body: it says something about the key, and nothing about whether a
 # payout for this withdrawal exists.
 _IDEMPOTENCY_CONFLICT: Final = "idempotency_conflict"
+
+# Why a withdrawal that was never sent was given back: its user stopped being allowed to
+# move money out between asking for it and the worker reaching it.
+ACCOUNT_NOT_ACTIVE: Final = "account_not_active"
 
 # The states in which a withdrawal's funds are still reserved, and so can still be paid
 # out or given back. Everything else is final.
@@ -123,6 +128,10 @@ async def submit_withdrawal(
     outbox to try again with the same key; so is a fault in Corridor's own configuration,
     which no retry will mend until someone has. A provider this process was not given is
     such a fault, and is raised before anything is sent or changed.
+
+    The user is looked at again before the mark. The request was authorised when it was
+    made, and the account may have been restricted or closed since: a returned deposit
+    does that. A held withdrawal of such an account is given back and never sent.
     """
 
     async def begin(session: AsyncSession) -> tuple[Withdrawal, str | None] | None:
@@ -131,6 +140,20 @@ async def submit_withdrawal(
             # The event is written with the row, so this is a bug and not a race.
             raise LookupError(f"there is no withdrawal {withdrawal_id} to submit")
         if row["status"] == "held":
+            if (await identity.get_user(session, row["user_id"])).status != "active":
+                await withdrawals.release(
+                    session, row, status="failed", failure_reason=ACCOUNT_NOT_ACTIVE
+                )
+                await audit.record(
+                    session,
+                    actor=audit.Actor.system("withdrawal.submit"),
+                    action="withdrawal.failed",
+                    principal_id=row["user_id"],
+                    resource_type="withdrawal",
+                    resource_id=withdrawal_id,
+                    details={"provider": row["provider"], "reason": ACCOUNT_NOT_ACTIVE},
+                )
+                return None
             if (bank if row["kind"] == "bank" else custody) is None:
                 # Before the mark: the withdrawal stays held, and its user can still cancel.
                 raise not_configured(row["kind"])
@@ -373,6 +396,8 @@ async def fail(
 ) -> None:
     """Close a withdrawal the provider could not pay out, and give its funds back. Shared by
     the webhooks and the sweeper."""
+    # The provider's own words, kept only if they are a code.
+    reason = reason_code(reason)
 
     async def work(session: AsyncSession) -> None:
         row = await _lock_and_check(session, withdrawal_id, kind, asset, amount, provider_ref)
@@ -399,6 +424,31 @@ async def record_submission(db: Database, withdrawal_id: uuid.UUID, provider_ref
     """Note that the provider has a withdrawal that is still recorded as being sent. For
     the sweeper, when it finds at the provider what the submission never got to record."""
     await db.run(lambda session: _record_submission(session, withdrawal_id, provider_ref))
+
+
+async def resubmit(db: Database, withdrawal_id: uuid.UUID, before: datetime) -> bool:
+    """Ask again for a withdrawal to be sent that was marked as being sent before
+    ``before`` and that the provider knows nothing of. For the sweeper. Says whether it did.
+
+    The event that was sending it may be dead, and nothing else would ever send it. A
+    second submission is safe: it goes out under the same idempotency key, the withdrawal's
+    id, so the provider makes one payout however many times it is asked.
+
+    The row is touched as the event is written, and it is by that time that the sweeper
+    finds a withdrawal overdue, so one withdrawal is asked for again at most once in each
+    ``payout_sweep_after_seconds``.
+    """
+
+    async def work(session: AsyncSession) -> bool:
+        row = await _lock(session, withdrawal_id)
+        if row["status"] != "submitting" or row["updated_at"] > before:
+            # Sent, settled or released since the sweeper read it, or already asked for.
+            return False
+        await withdrawals.ask_to_be_sent(session, withdrawal_id)
+        await withdrawals.advance(session, withdrawal_id)
+        return True
+
+    return await db.run(work)
 
 
 async def _record_submission(
@@ -435,7 +485,8 @@ async def _reject(session: AsyncSession, withdrawal_id: uuid.UUID, code: str) ->
     row = await _lock(session, withdrawal_id)
     if row["status"] != "submitting":
         return
-    await withdrawals.release(session, row, status="failed", failure_reason=code)
+    reason = reason_code(code)
+    await withdrawals.release(session, row, status="failed", failure_reason=reason)
     await audit.record(
         session,
         actor=audit.Actor.system("withdrawal.submit"),
@@ -443,7 +494,7 @@ async def _reject(session: AsyncSession, withdrawal_id: uuid.UUID, code: str) ->
         principal_id=row["user_id"],
         resource_type="withdrawal",
         resource_id=withdrawal_id,
-        details={"provider": row["provider"], "reason": code},
+        details={"provider": row["provider"], "reason": reason},
     )
 
 

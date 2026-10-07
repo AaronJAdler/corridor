@@ -178,6 +178,11 @@ def histories(draw: st.DrawFn) -> list[Step]:
     return steps
 
 
+# The least a withdrawal costs in each asset: the defaults of ``withdrawal_min_fee``, in
+# minor units. A history is free to withdraw a single cent.
+WITHDRAWAL_MIN_FEE = {"USD": 25, "USDC": 150_000}
+
+
 def minor(amount: int, rail: str) -> int:
     """The generated amount in the rail's minor units: cents, or 10,000 micro-USDC."""
     return amount if rail == "bank" else amount * 10_000
@@ -296,7 +301,9 @@ class History:
             if asked["id"] in self.doomed:
                 assert row["status"] != "completed", row
             if row["status"] == "completed":
-                assert row["fee"] == row["amount"] * WITHDRAWAL_FEE_BPS // 10_000
+                assert row["fee"] == max(
+                    WITHDRAWAL_MIN_FEE[asset], row["amount"] * WITHDRAWAL_FEE_BPS // 10_000
+                )
                 self.expected[user, asset] -= row["amount"] + row["fee"]
                 withdrawal_fees[asset] += row["fee"]
                 completed[asset] += 1
