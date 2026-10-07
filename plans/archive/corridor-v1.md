@@ -37,7 +37,7 @@ Updated in the same change that lands each phase.
 | 13 | Local stack | 4 | **done** 2026-10-07; the image was not built and the stack not started | `uv run poe lint-docker`, `uv run poe lint-compose` (`docker compose config`, no daemon), `uv run poe e2e`: "End-to-end run passed", `uv run poe demo`: "Ledger verification passed: no findings", `uv run poe smoke` |
 | 14 | Deployment | 6 | **done** 2026-10-07 as definitions; nothing applied, no workflow run | `uv run poe lint-ci` (actionlint, zizmor: no findings); the Terraform was validated with OpenTofu, not with Terraform (decision log) |
 | 15 | Documentation | 5 | **done** 2026-10-07 | `uv run poe lint-docs`; the API guide's examples recorded from the API, the worker and the simulators running as processes; the settings and error-code tables generated from the code |
-| 16 | Final verification | 3 | not started | |
+| 16 | Final verification | 3 | **done** 2026-10-07 | `uv run poe check`: 4476 passed, 2 skipped, coverage 98%; e2e, smoke and the document checks pass |
 
 ## Success criteria
 
@@ -766,3 +766,36 @@ during the build are appended here with the date and the reason.
 | 2026-10-07 | A hand-written adjustment may not debit `user_held`, when asked for and again when approved. A hand-written credit to `user_held` or `suspense` is still allowed, and the payments verifier reports it | Same reason as suspense: the balance belongs to rows that each take it out once. The credits were not in the review's finding; they are recorded in section 22 |
 | 2026-10-07 | The Dockerfile's `runtime` target has `corridor_sim` removed from the installed environment by a stage of its own; a `sim` target keeps it, and `compose.yaml` builds the simulator service from that target as `corridor-sim:local`. Not built: there is still no Docker daemon in the workspace; `hadolint` and `docker compose config` pass | The deployed image carried code that plays a bank. `pyproject.toml` packages both together and was not changed, so the package is removed after installation, with a check that it was there and is gone |
 | 2026-10-07 | The deploy workflow refuses a commit unless every job of the CI workflow has a successful check run on it, read with `gh api` and `checks: read`. The nine job names are listed in the deploy workflow, and `tests/assembly/test_workflows.py` fails when they differ from `ci.yml` | A deploy could be started by hand from a commit whose CI had failed or never run. With `checks: read` a check run is known by its name and not by its workflow, so the names have to be written down, and a test keeps them true. Never run against GitHub |
+
+## Execution record
+
+Finished 2026-10-07. The work was done in slices on separate branches, each combined onto
+one line of history after its gates passed. Four independent reviews were made, after
+phases 5, 8, 11 and 15, by reviewers who had not seen the code being written; none found a
+Critical defect, and every High and Medium finding was fixed with a test that fails without
+the fix, or is listed in the decision log above as an accepted limit.
+
+What the last run showed, on the final commit:
+
+| Check | Result |
+|---|---|
+| `uv run poe check` (lint, types, module boundaries, the suite with coverage) | 4476 passed, 2 skipped (the end-to-end tests, run separately); 98% overall and 98% on ledger, payments, fx and risk |
+| `uv run poe e2e` | passed: API, worker and simulators as processes, ending with a clean ledger verification |
+| `uv run poe smoke` | passed |
+| `uv run poe lint-docs`, `lint-compose`, `lint-docker`, `lint-ci` | passed |
+| `uv run poe audit` | no known vulnerabilities |
+| secret scan | no findings |
+
+Not verified, and why:
+
+- **No container was built or started.** The workspace has no Docker daemon. The Dockerfile
+  is linted and the Compose file is validated by `docker compose config`; neither has run.
+- **The Terraform has never been planned or applied**, and was last validated with OpenTofu
+  before the final review's changes to `infra/main.tf`, which were checked only by the test
+  that loads each task's settings from it. `uv run poe lint-infra` needs Terraform installed.
+- **The GitHub workflows have never run.** They pass their linters.
+- **Nothing was run on Windows or in PowerShell.**
+- **Diagrams** are checked for structure, not rendered.
+- **No load test** (step 12.5), and no pre-commit configuration (step 12.4, in part).
+- **The verifier cannot detect a whole balanced entry being deleted** by someone with owner
+  access to the database; that needs a hash chain, which was not built.

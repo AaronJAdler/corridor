@@ -6,7 +6,7 @@ ledger. PostgreSQL is the only source of truth. Providers are simulated in `src/
 - Design, as built: [docs/architecture.md](docs/architecture.md). Decisions: [docs/adr/](docs/adr/README.md)
 - API: [docs/api.md](docs/api.md). Operations: [docs/runbook.md](docs/runbook.md)
 - Provider contract: [docs/provider-api.md](docs/provider-api.md)
-- Work plan and progress: [plans/pending/corridor-v1.md](plans/pending/corridor-v1.md)
+- The plan this was built from, with its decision log: [plans/archive/corridor-v1.md](plans/archive/corridor-v1.md)
 
 ## Commands
 
