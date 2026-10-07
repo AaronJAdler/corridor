@@ -7,7 +7,7 @@ from corridor.identity import KeySet, PasswordHasher
 from corridor.platform.config import Settings
 from corridor.platform.db import Database
 from corridor.platform.redis import RedisStore
-from corridor.providers import BankRail, Custodian
+from corridor.providers import BankRail, Custodian, RateSource
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,3 +20,4 @@ class Container:
     # None when the provider has no address configured: what needs it answers 503.
     bank: BankRail | None = None
     custody: Custodian | None = None
+    rates: RateSource | None = None

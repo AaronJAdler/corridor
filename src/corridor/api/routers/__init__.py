@@ -6,6 +6,7 @@ from corridor.api.routers import (
     auth,
     beneficiaries,
     deposits,
+    fx,
     transfers,
     wallets,
     webhooks,
@@ -24,5 +25,6 @@ ROUTERS: tuple[APIRouter, ...] = (
     deposits.router,
     beneficiaries.router,
     withdrawals.router,
+    fx.router,
     webhooks.router,
 )

@@ -232,6 +232,12 @@ protected_modules = ["corridor.webhooks.models"]
 allowed_importers = ["corridor.webhooks"]
 
 [[tool.importlinter.contracts]]
+name = "FX tables are private to fx"
+type = "protected"
+protected_modules = ["corridor.fx.models"]
+allowed_importers = ["corridor.fx"]
+
+[[tool.importlinter.contracts]]
 name = "The simulator never imports production code"
 type = "forbidden"
 source_modules = ["corridor_sim"]

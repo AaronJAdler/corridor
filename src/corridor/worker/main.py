@@ -33,6 +33,7 @@ PING_TOPIC = "worker.ping"
 TRANSFER_COMPLETED_TOPIC = "transfer.completed"
 DEPOSIT_COMPLETED_TOPIC = "deposit.completed"
 WITHDRAWAL_SUBMIT_TOPIC = "withdrawal.submit"
+FX_CONVERTED_TOPIC = "fx.converted"
 
 
 class Worker:
@@ -173,6 +174,10 @@ async def _transfer_completed(_event: OutboxEvent) -> None:
     would go dead instead of done."""
 
 
+async def _fx_converted(_event: OutboxEvent) -> None:
+    """Does nothing yet, for the same reason: nothing consumes a conversion."""
+
+
 async def _deposit_completed(_event: OutboxEvent) -> None:
     """Does nothing yet, for the same reason: nothing consumes a completed deposit."""
 
@@ -207,6 +212,7 @@ def build_registry(
     registry.register(DEPOSIT_COMPLETED_TOPIC, _deposit_completed)
     registry.register(webhooks.RECEIVED_TOPIC, webhook_received)
     registry.register(WITHDRAWAL_SUBMIT_TOPIC, withdrawal_submit)
+    registry.register(FX_CONVERTED_TOPIC, _fx_converted)
     return registry
 
 
