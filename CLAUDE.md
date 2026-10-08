@@ -117,7 +117,7 @@ CORRIDOR_TEST_POSTGRES_CLONE_STRATEGY   optional: FILE_COPY is faster on a throw
 - **Migrations.** Hand-written SQL, one statement per `op.execute`, `NNNN_name.py`, a real
   `downgrade`. Triggers and grants are part of the migration: revoke what the application
   role must not do, and grant `UPDATE` on named columns only.
-- **Authorisation.** Routes take `require(scope)`, `CurrentPrincipal` or `AdminPrincipal`;
+- **Authorization.** Routes take `require(scope)`, `CurrentPrincipal` or `AdminPrincipal`;
   only `require` admits an agent key. Services check the scope again and answer another
   user's resource as not found. A new route goes into the route tables of the tests, and
   what an admin reads or changes is audited in the transaction that serves it.
