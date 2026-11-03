@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Corridor Architecture</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Schibsted+Grotesk:wght@400;500;700&display=swap">
+<style>
+/* Layout: two-pane explorer. Left is a tiered map of the system, right is the detail for the selected layer or step. */
+:root{
+  --bg:#EDF0F3; --panel:#FFFFFF; --panel-2:#F5F7F9; --ink:#101A24; --muted:#556473;
+  --line:#D2D9E0; --line-strong:#9FACB8;
+  --accent:#0A6B5D; --accent-soft:#DAEFEA;
+  --store:#3B49A3; --store-soft:#E3E6F7;
+  --ext:#E2E6EA;
+  --warn:#8F5200; --warn-soft:#F8EBD6;
+  --font:"Schibsted Grotesk",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0D1318; --panel:#141C23; --panel-2:#1A242D; --ink:#E7EDF2; --muted:#9AA9B6;
+    --line:#27343F; --line-strong:#4A5B69;
+    --accent:#52C7B1; --accent-soft:#12312C;
+    --store:#9AA6FF; --store-soft:#1C2250;
+    --ext:#1F2A33;
+    --warn:#E5AE55; --warn-soft:#33260F;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0D1318; --panel:#141C23; --panel-2:#1A242D; --ink:#E7EDF2; --muted:#9AA9B6;
+  --line:#27343F; --line-strong:#4A5B69;
+  --accent:#52C7B1; --accent-soft:#12312C;
+  --store:#9AA6FF; --store-soft:#1C2250;
+  --ext:#1F2A33;
+  --warn:#E5AE55; --warn-soft:#33260F;
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 var(--font);
+  padding-block:28px 56px;
+  padding-left:max(16px,env(safe-area-inset-left,0px));
+  padding-right:max(16px,env(safe-area-inset-right,0px))}
+.wrap{max-width:1180px;margin:0 auto}
+button{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.mono-label{font:500 12px/1.3 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0}
+
+header.top{display:grid;gap:10px;margin-bottom:22px}
+h1{font-size:clamp(28px,5vw,44px);line-height:1.05;letter-spacing:-.025em;font-weight:700;margin:0;text-wrap:balance}
+.lede{margin:0;max-width:64ch;color:var(--muted);font-size:16px}
+.facts{display:flex;flex-wrap:wrap;gap:6px 22px;margin:6px 0 0;padding:0;list-style:none}
+.facts li{font:400 13px var(--mono);color:var(--muted)}
+.facts b{font-weight:500;color:var(--ink)}
+
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:24px}
+.tab{background:none;border:0;border-bottom:2px solid transparent;padding:10px 14px;margin-bottom:-1px;cursor:pointer;font-weight:500;color:var(--muted)}
+.tab[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent)}
+.tab:hover{color:var(--ink)}
+
+.explorer{display:grid;grid-template-columns:minmax(0,460px) minmax(0,1fr);gap:28px;align-items:start}
+@media (max-width:900px){.explorer{grid-template-columns:minmax(0,1fr)}}
+@media (min-width:901px) and (min-height:780px){.map{position:sticky;top:16px}}
+
+/* map */
+.node{--k:var(--accent);--ks:var(--accent-soft);display:block;width:100%;min-width:0;text-align:left;padding:10px 12px;border:1px solid var(--line);border-radius:6px;background:var(--panel);cursor:pointer}
+.node[data-kind="store"]{--k:var(--store);--ks:var(--store-soft)}
+.node[data-kind="ext"]{--k:var(--muted);--ks:var(--ext)}
+.node:hover{border-color:var(--k)}
+.n-name{display:block;font-weight:700;font-size:15px;overflow-wrap:anywhere}
+.n-name::before{content:"";display:inline-block;width:8px;height:8px;background:var(--k);margin-right:8px;vertical-align:.05em}
+.n-sub{display:block;font-size:12.5px;color:var(--muted);margin-top:1px;padding-left:16px;overflow-wrap:anywhere}
+.node[aria-pressed="true"]{background:var(--ks);border-color:var(--k);box-shadow:inset 0 0 0 1px var(--k)}
+.node.linked{border-style:dashed;border-color:var(--k)}
+.frame{position:relative;border:1px dashed var(--line-strong);border-radius:10px;padding:34px 12px 12px}
+.frame>.mono-label{position:absolute;left:14px;top:12px}
+.mods{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+@media (max-width:560px){.mods{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.hrow{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:8px;align-items:center}
+.hrow .arrow{font:400 12px var(--mono);color:var(--muted);text-align:center;max-width:64px}
+.conn{position:relative;height:32px;display:flex;align-items:center;justify-content:center}
+.conn::before{content:"";position:absolute;left:50%;top:0;bottom:0;border-left:1px solid var(--line-strong)}
+.conn::after{content:"";position:absolute;left:50%;bottom:0;width:6px;height:6px;border-right:1px solid var(--line-strong);border-bottom:1px solid var(--line-strong);transform:translate(-3.5px,-1px) rotate(45deg)}
+.conn span{position:relative;z-index:1;background:var(--bg);padding:1px 8px;font:400 12px var(--mono);color:var(--muted);text-align:center}
+.conn.blank span,.conn.blank::before,.conn.blank::after{display:none}
+
+/* detail */
+.detail,.flowpanel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:24px 26px;min-width:0;scroll-margin-top:12px}
+@media (max-width:560px){.detail,.flowpanel{padding:18px 16px}}
+.detail h2,.flowpanel h2{font-size:clamp(24px,3.4vw,32px);line-height:1.1;letter-spacing:-.02em;font-weight:700;margin:6px 0 10px;text-wrap:balance}
+.summary{font-size:17px;margin:0 0 20px;max-width:62ch}
+h3.sec{font:500 12px/1.3 var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:26px 0 10px}
+.does{margin:0;padding-left:20px;display:grid;gap:6px;max-width:66ch}
+.adr{background:var(--panel-2);border:1px solid var(--line);border-radius:8px;padding:16px 18px;margin-bottom:12px}
+.adr h4{font-size:17px;line-height:1.3;font-weight:700;margin:4px 0 12px;text-wrap:balance}
+.adr dl{display:grid;grid-template-columns:104px minmax(0,1fr);gap:10px 16px;margin:0}
+.adr dt{font:500 12px/1.6 var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.adr dd{margin:0;overflow-wrap:anywhere}
+@media (max-width:560px){.adr dl{grid-template-columns:minmax(0,1fr);gap:2px}.adr dd{margin-bottom:8px}}
+.note{background:var(--warn-soft);border-radius:6px;padding:12px 14px;margin:0 0 10px}
+.note .mono-label{color:var(--warn);margin-bottom:4px}
+.note p{margin:0}
+.say{margin:0;padding:2px 0 2px 16px;border-left:2px solid var(--accent);font-size:18px;line-height:1.45;max-width:58ch;text-wrap:pretty}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{--k:var(--accent);--ks:var(--accent-soft);background:var(--panel);border:1px solid var(--line);border-radius:4px;padding:5px 10px;font:400 13px var(--mono);cursor:pointer}
+.chip[data-kind="store"]{--k:var(--store);--ks:var(--store-soft)}
+.chip[data-kind="ext"]{--k:var(--muted);--ks:var(--ext)}
+.chip:hover{border-color:var(--k);background:var(--ks)}
+.chip.flow{border-style:dashed}
+.src{font-size:13px;color:var(--muted);margin:0 0 10px}
+
+/* workflows */
+.flows{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-bottom:20px}
+@media (max-width:1000px){.flows{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:480px){.flows{grid-template-columns:minmax(0,1fr)}}
+.flowbtn{text-align:left;background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px 14px;cursor:pointer;display:grid;gap:4px;align-content:start}
+.flowbtn:hover{border-color:var(--accent)}
+.flowbtn[aria-pressed="true"]{border-color:var(--accent);background:var(--accent-soft);box-shadow:inset 0 0 0 1px var(--accent)}
+.flowbtn b{font-weight:700;line-height:1.25}
+.flowbtn span{font-size:13px;color:var(--muted)}
+.controls{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:0 0 18px}
+.btn{background:var(--panel);border:1px solid var(--line-strong);border-radius:6px;padding:7px 14px;cursor:pointer;font-weight:500}
+.btn:hover:not(:disabled){border-color:var(--accent)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--bg)}
+.btn:disabled{opacity:.4;cursor:default}
+.progress{flex:1 1 120px;height:4px;background:var(--line);border-radius:2px;min-width:80px}
+.progress i{display:block;height:100%;background:var(--accent);border-radius:2px;transition:width .2s}
+.count{font:400 13px var(--mono);color:var(--muted)}
+.steps{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.step{border:1px solid var(--line);border-radius:6px;background:var(--panel)}
+.step.on{border-color:var(--accent);background:var(--panel-2)}
+.step-head{display:grid;grid-template-columns:30px minmax(0,1fr);gap:14px;width:100%;text-align:left;background:none;border:0;padding:12px 14px;cursor:pointer}
+.num{font:500 13px var(--mono);width:28px;height:28px;display:grid;place-items:center;border:1px solid var(--line-strong);border-radius:4px;background:var(--bg)}
+.step.on .num{background:var(--accent);border-color:var(--accent);color:var(--bg)}
+.step-meta{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:3px}
+.actor{--k:var(--accent);--ks:var(--accent-soft);font:500 12px var(--mono);background:var(--ks);padding:1px 8px;border-radius:3px}
+.actor[data-kind="store"]{--k:var(--store);--ks:var(--store-soft)}
+.actor[data-kind="ext"]{--k:var(--muted);--ks:var(--ext)}
+.cond{font:400 12px var(--mono);color:var(--warn)}
+.step-title{display:block;font-weight:700}
+.step-text{display:block;color:var(--muted);margin-top:2px}
+.step.on .step-text{color:var(--ink)}
+.step-more{padding:0 14px 14px 58px;display:grid;gap:10px}
+@media (max-width:560px){.step-more{padding-left:14px}}
+.step-more p{margin:0}
+.step-more .chips{margin-top:2px}
+.participants{margin:0 0 18px}
+.foot{margin-top:36px;display:grid;gap:12px;max-width:80ch}
+.foot p{margin:0;color:var(--muted);font-size:14px}
+@media (prefers-reduced-motion:reduce){.progress i{transition:none}}
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header class="top">
+    <p class="mono-label">Wallet and payments backend</p>
+    <h1>Corridor architecture</h1>
+    <p class="lede">Select any layer to see what it does and the decision behind it. Open Workflows to step through the paths money takes.</p>
+    <ul class="facts" aria-label="Project facts">
+      <li><b>4,476</b> tests on real PostgreSQL and Redis</li>
+      <li><b>98%</b> coverage</li>
+      <li><b>17</b> import contracts kept</li>
+      <li><b>20</b> migrations</li>
+      <li><b>18</b> decision records</li>
+    </ul>
+  </header>
+
+  <div class="tabs" role="tablist" aria-label="Views">
+    <button class="tab" role="tab" id="tab-arch" aria-controls="view-arch" data-tab="arch">Architecture</button>
+    <button class="tab" role="tab" id="tab-flow" aria-controls="view-flow" data-tab="flow">Workflows</button>
+  </div>
+
+  <section id="view-arch" role="tabpanel" aria-labelledby="tab-arch">
+    <div class="explorer">
+      <div class="map" id="map" aria-label="System map"></div>
+      <article class="detail" id="detail" aria-live="polite"></article>
+    </div>
+  </section>
+
+  <section id="view-flow" role="tabpanel" aria-labelledby="tab-flow" hidden>
+    <div class="flows" id="flowlist"></div>
+    <article class="flowpanel" id="flowpanel" aria-live="polite"></article>
+  </section>
+
+  <footer class="foot">
+    <p class="mono-label">What has not been proven</p>
+    <p>No container has been built or started, the Terraform has never been planned or applied, the GitHub workflows have never run, and nothing has been run on Windows.</p>
+    <p>Content is summarised from the design notes and the independent test run of 2026-10-08. The full decision records are in <code>docs/adr/</code> and the design is in <code>docs/architecture.md</code> in the repository.</p>
+  </footer>
+</div>
+
+<script>
+const LAYERS = {
+  clients:{name:"Callers",sub:"Users, agents, operators",kind:"ext",tag:"Edge",
+    summary:"Three kinds of caller reach the API. Wallet users move money in four currencies. AI agents act with their own API keys under a spend policy. Operators run back-office actions that need a second person.",
+    does:["Wallet users hold balances in USD, MXN, BRL and USDC, and deposit, convert, send and withdraw to a bank or on-chain.","AI agents hold API keys tied to an owner. A key with no policy can pay nobody.","Operators use internal tooling with dual approval and follow docs/runbook.md for each alert."],
+    adrs:[{title:"Agents are denied by default",context:"An agent holding a key can send money faster than its owner can notice a mistake.",decision:"Agent keys are their own kind of caller with a spend policy. With no policy a key pays nobody. Above the owner's threshold nothing moves until the owner approves.",consequences:"The safe state is the starting state. Granting spend is an explicit act by the owner."}],
+    say:"An agent key starts with no authority. Every unit of spend is something the owner granted.",
+    related:["request","agents","operators"]},
+  request:{name:"Request layer",sub:"Auth, idempotency, rate limit",kind:"app",tag:"Cross-cutting layer",
+    summary:"Every money-moving request passes through here first. It identifies the actor, makes retries safe, and throttles callers.",
+    does:["Authenticates the API key and resolves who is acting.","Takes an advisory lock on (actor, key) so duplicate requests line up behind each other.","Compares a fingerprint of method, path and body with the stored key, and replays the stored response when they match.","Applies rate limits using Redis."],
+    adrs:[
+      {title:"Idempotency lives in PostgreSQL, in the same transaction as the work",context:"A client that times out will retry. A retry must not move money twice, and there must be no moment where the money moved but the key was not recorded.",decision:"Take an advisory lock on (actor, key). Check a fingerprint of method, path and body. Do the work. Store the response, refusals included, in the same transaction.",consequences:"Concurrent duplicates serialise on the lock and replay the stored answer. Reusing a key for a different request is detectable. Redis plays no part in correctness."},
+      {title:"When the rate limiter is down, money writes refuse",context:"The limiter depends on Redis. A limiter that silently passes everything removes a control on money movement.",decision:"If the rate limiter is unavailable, money writes are refused. Cancelling a payout is exempt on purpose.",consequences:"A Redis outage costs availability, not safety. Cancelling stays possible during the outage."}],
+    say:"The key and the work commit together, so there is no window where one exists without the other.",
+    related:["postgres","redis","ledger"]},
+  ledger:{name:"Ledger",sub:"post_entry, verifier",kind:"app",tag:"Application module",
+    summary:"The only place balances change. Every other module asks the ledger to post an entry.",
+    does:["Stores amounts as integer minor units in NUMERIC(38,0), so cents and USDC decimals share one representation.","Exposes ledger.post_entry as the single function that changes a balance.","Keeps entries and postings append-only with database triggers.","Runs a verifier that recomputes every balance from postings."],
+    adrs:[{title:"Money is never a float and only one function moves it",context:"If any module can update a balance, a bug or a hand edit can change history without leaving a trace.",decision:"Integer minor units. Every balance change goes through ledger.post_entry. Entries and postings are append-only, enforced by database triggers instead of convention. A verifier recomputes balances from postings.",consequences:"Corrections are new entries, never edits. Other modules are callers, never writers. Each guard on a money path was removed once to confirm its test fails."}],
+    notes:[{kind:"limit",text:"The verifier cannot detect deletion of a whole balanced entry by someone with owner access. That needs a hash chain, which is written down as not built."}],
+    say:"One function moves money, and the database itself refuses to let history be edited.",
+    related:["postgres","payments","fx","risk"]},
+  payments:{name:"Payments",sub:"Deposits, withdrawal saga",kind:"app",tag:"Application module",
+    summary:"Moves money in and out through banks and on-chain rails. A withdrawal is a saga with states, because a call to a provider can succeed while the reply is lost.",
+    does:["Credits deposits, and withdraws to bank accounts and on-chain addresses.","Runs each withdrawal through held, submitting, submitted, then completed or failed.","Commits submitting before the provider call, so a cancel cannot release funds for a payout already on its way.","When a provider refuses, asks what it holds under that reference before releasing the funds."],
+    adrs:[{title:"A withdrawal is a saga, and the dangerous moment is the provider call",context:"A provider can accept a payout and lose the reply. An earlier attempt that looked failed may have paid. A cancel in that window could release funds that already left.",decision:"Commit the submitting state before calling the provider. On a refusal, query the provider for what it holds under that reference before releasing anything.",consequences:"A lost reply cannot cause a double release. The failure-injection suite found two real money-loss bugs here before this rule existed."}],
+    notes:[{kind:"limit",text:"A deposit repaired from a bank statement is credited unscreened, because the statement names no sender."}],
+    say:"The dangerous moment is the provider call, so the state that says a payout may be on its way is committed before it.",
+    related:["ledger","worker","providers","risk"]},
+  fx:{name:"FX",sub:"Rates, conversion",kind:"app",tag:"Application module",
+    summary:"Converts between USD, MXN, BRL and USDC at a rate that has been checked before use.",
+    does:["Applies conversion rates from the rate provider.","Caches rates in Redis for speed.","Authenticates each cached rate with an HMAC before using it.","Posts the result through the ledger like any other movement."],
+    adrs:[{title:"Redis is never the source of truth",context:"An independent reviewer showed that a value planted in Redis could change a conversion rate and mint money.",decision:"The cached FX rate carries an HMAC and is verified before it is used.",consequences:"Write access to Redis alone cannot move a price. Redis stays a speed layer."}],
+    say:"A reviewer planted a rate in Redis and showed it could mint money. The HMAC closes that.",
+    related:["redis","ledger","providers"]},
+  risk:{name:"Risk",sub:"Limits, screening, locks",kind:"app",tag:"Application module",
+    summary:"Decides whether money may leave, and keeps limits true when requests run at the same time.",
+    does:["Applies spending limits and screening to money going out.","Takes per-user money-out locks in ascending order.","Keeps a combined daily limit across assets true under concurrency."],
+    adrs:[{title:"One lock order, everywhere",context:"Two sends in two different assets at once can each pass a daily limit alone, and locks taken in different orders deadlock.",decision:"Take locks in one fixed order: idempotency key, then per-user money-out locks in ascending order, then the business row, then balance rows in ascending account id.",consequences:"Two sends in two assets cannot together pass the daily limit, and this holds without serialisable isolation."}],
+    notes:[{kind:"review",text:"Independent review found a held withdrawal that was still paid after a returned deposit restricted the user. Tests had not caught it."}],
+    say:"Every path takes locks in the same order, so the combined limit holds without serialisable isolation.",
+    related:["ledger","payments","postgres"]},
+  agents:{name:"Agent keys",sub:"Spend policy, owner approval",kind:"app",tag:"Application module",
+    summary:"Lets AI agents spend within a policy their owner set, and nothing beyond it.",
+    does:["Issues API keys for agents, each with a spend policy.","Refuses every payment from a key that has no policy.","Holds payments above the owner's threshold until the owner approves.","Executes an approval exactly once, under a row lock, with a fixed movement id."],
+    adrs:[{title:"Default deny, and an approval executes once",context:"An approval is a second chance to move money. Replaying it, or approving twice, must not pay twice.",decision:"A key without a policy pays nobody. Above the threshold nothing moves. Approval runs under a row lock and uses a fixed movement id.",consequences:"A repeated approval lands on the same movement, so it cannot pay again."}],
+    say:"Default deny, one approval, one movement id.",
+    related:["clients","ledger","risk"]},
+  operators:{name:"Operator tooling",sub:"Dual approval, runbook",kind:"app",tag:"Application module",
+    summary:"Back-office actions that need a second person, plus the runbook that tells an operator what to do for each alert.",
+    does:["Provides operator tooling where sensitive actions need two approvers.","Supports reconciliation and repairs, such as adjustments tied to a deposit.","Keeps docs/runbook.md with the response for each alert."],
+    adrs:[{title:"Dual approval for operator actions",context:"Operators can change money state. One person acting alone is a single point of failure.",decision:"Sensitive operator actions need a second approver.",consequences:"A repair takes two people, which is the point."}],
+    notes:[{kind:"review",text:"Independent review found that suspense money could be paid out twice, because an adjustment was not tied to its deposit."}],
+    say:"Operators get the same discipline as agents: no single actor can move money alone.",
+    related:["ledger","payments","agents"]},
+  postgres:{name:"PostgreSQL",sub:"Ledger, outbox, idempotency",kind:"store",tag:"Data store",
+    summary:"The source of truth for every balance, every idempotency key and every pending job.",
+    does:["Holds ledger entries and postings, with append-only triggers.","Holds idempotency keys, so a key commits with its work.","Holds the outbox that carries intent to the worker.","Provides the advisory locks used for idempotency.","Is changed by twenty hand-written migrations."],
+    adrs:[{title:"Guards live in the database, and every test gets its own",context:"Application checks can be skipped by a bug. Tests that share a database hide interference between cases.",decision:"Enforce append-only history with triggers. Keep idempotency and the outbox in the same database as the ledger. Run each test in its own database.",consequences:"One transaction can cover the work, its key and its outbox row. About 4,500 tests run against a real PostgreSQL."}],
+    say:"Everything that must commit together lives in one database.",
+    related:["ledger","request","worker"]},
+  redis:{name:"Redis",sub:"Rate limits, FX cache",kind:"store",tag:"Data store",
+    summary:"A speed layer. Losing it, or having someone lie through it, must never move money.",
+    does:["Backs rate limiting.","Caches FX rates with an HMAC attached.","Plays no part in idempotency or in balances."],
+    adrs:[{title:"Redis is never the source of truth",context:"Any value in a cache can be stale, lost or planted.",decision:"Correctness depends on PostgreSQL. The one cached value that affects money, the FX rate, is authenticated. Money writes refuse when the limiter is down.",consequences:"Redis can fail or be tampered with and still cannot change a balance by itself."}],
+    say:"Redis can be down or hostile and the ledger stays right.",
+    related:["fx","request","postgres"]},
+  worker:{name:"Outbox worker",sub:"Calls providers, commits results",kind:"app",tag:"Separate process",
+    summary:"The process that talks to providers. It reads intent from the outbox, makes the call with no transaction open, then commits the result.",
+    does:["Reads pending intent from the outbox in PostgreSQL.","Calls the bank, custody or rate provider outside any transaction.","Commits the result in a second transaction.","Processes webhooks that were stored first, treating duplicates and reordering as ordinary cases."],
+    adrs:[{title:"No network call inside a transaction; the outbox carries intent",context:"A transaction held open over a network call holds locks for as long as the provider takes, and a crash leaves the outcome unknown.",decision:"Transaction one commits intent. The worker calls the provider. Transaction two commits the result. Webhooks are stored first and processed from the outbox.",consequences:"A crash between the steps leaves durable intent to resume from. Handlers must be safe to run twice."}],
+    notes:[{kind:"review",text:"Independent review found the worker could not have started in production, because the settings check demanded secrets that only the API task was given."}],
+    say:"Intent is committed, the call happens outside any transaction, then the result is committed.",
+    related:["postgres","providers","payments"]},
+  providers:{name:"Simulated providers",sub:"Bank, custody, rates",kind:"ext",tag:"External boundary",
+    summary:"Simulated bank, custody and rate providers in a separate package. Nothing here moves real money.",
+    does:["Stand in for a bank, a custody service and a rate source.","Live in their own package, so the boundary to the outside world is explicit."],
+    adrs:[{title:"Simulate providers behind a package boundary",context:"The project uses fake money and no real rails, yet the provider boundary is where the hardest failures happen.",decision:"Bank, custody and rate providers are simulated in a separate package that the worker calls.",consequences:"Failures such as a lost reply can be rehearsed without real accounts. A real integration would replace this package."}],
+    say:"The code treats providers as unreliable even though these ones are simulated.",
+    related:["worker","payments","fx"]}
+};
+
+const FLOWS = [
+  {id:"flow-send",title:"Send money, safely, twice",blurb:"A client retries the same send. Money moves once.",
+   intro:"A wallet user sends money and the client retries, or 50 duplicates arrive at once. This is the path that makes the second request harmless.",
+   steps:[
+    {layer:"clients",title:"Client sends the request",text:"A wallet user posts a transfer with an idempotency key.",why:"The key is the client's promise that two requests are the same intent."},
+    {layer:"request",title:"Authenticate and identify the actor",text:"The API key resolves to the actor that owns the idempotency key.",why:"Keys are scoped to an actor, so two actors can use the same string without colliding."},
+    {layer:"request",title:"Take the advisory lock",text:"A lock on (actor, key) is taken inside the transaction. A duplicate arriving now waits behind it.",why:"This turns concurrent duplicates into a queue instead of a race."},
+    {layer:"request",title:"Check the fingerprint",text:"A fingerprint of method, path and body is compared with any stored key. A match replays the stored response. A mismatch is a reused key.",why:"Stored responses include refusals, so a retry of a refused request is refused the same way."},
+    {layer:"risk",title:"Lock for limits",text:"Per-user money-out locks are taken in ascending order and limits are checked.",why:"This is the second lock in the global order, so two sends in two assets queue instead of racing."},
+    {layer:"ledger",title:"Post the entry",text:"Balance rows are locked in ascending account id and ledger.post_entry writes the entry and its postings.",why:"Triggers make the entry append-only from this moment."},
+    {layer:"postgres",title:"Store the response and commit",text:"The response is stored with the key in the same transaction, then everything commits together.",why:"There is no state where the money moved and the key is missing."},
+    {layer:"clients",title:"Client gets the answer, now or on retry",text:"A retry returns the stored response without touching the ledger.",why:"Retries are consistent, including for refusals."}]},
+  {id:"flow-withdrawal",title:"Withdrawal saga",blurb:"Held, submitting, submitted, then completed or failed.",
+   intro:"A payout leaves the system through a provider call. The saga is built around the one moment where the outcome can be unknown.",
+   steps:[
+    {layer:"clients",title:"Client requests a withdrawal",text:"A user asks to withdraw to a bank account or an on-chain address.",why:"This request takes the same idempotent path as a send."},
+    {layer:"payments",title:"Hold the funds",text:"The withdrawal starts in held. The intent is written to the outbox in the same transaction.",why:"Committing intent first means a crash cannot lose the request."},
+    {layer:"worker",title:"Commit submitting",text:"The worker marks the withdrawal submitting and commits before any call is made.",why:"From here a cancel cannot release the funds, because a payout may already be on its way."},
+    {layer:"worker",title:"Call the provider",text:"The worker calls the bank or custody provider with no transaction open.",why:"No network call inside a transaction, so no locks are held while a provider is slow."},
+    {layer:"providers",cond:"if the provider accepts",title:"Accepted, then completed",text:"The withdrawal moves to submitted, then to completed when the provider confirms.",why:"Confirmation can also arrive as a webhook, which is stored first and processed from the outbox."},
+    {layer:"providers",cond:"if the provider refuses",title:"Ask what the provider holds",text:"Corridor queries the provider for anything held under that reference before releasing funds.",why:"An earlier attempt whose reply was lost may have paid. The failure-injection suite found two real money-loss bugs before this rule existed."},
+    {layer:"payments",cond:"if nothing was paid",title:"Release and mark failed",text:"If the provider holds nothing, the hold is released and the withdrawal becomes failed. If it does hold a payout, the withdrawal continues as submitted.",why:"Funds are released only when the provider confirms there is nothing to lose."},
+    {layer:"postgres",title:"Commit the result",text:"The result commits in a second transaction.",why:"Every state change is durable, so a crashed worker resumes from the last committed state."}]},
+  {id:"flow-agent",title:"Agent payment",blurb:"Default deny, then one approval and one movement.",
+   intro:"An AI agent asks to pay someone. The path shows how authority is granted, limited and executed exactly once.",
+   steps:[
+    {layer:"clients",title:"Agent requests a payment",text:"An AI agent calls the API with its key.",why:"The key identifies the agent and its owner."},
+    {layer:"agents",title:"Look up the policy",text:"A key with no policy can pay nobody, so the request is refused.",why:"Default deny: a new key has no authority."},
+    {layer:"agents",cond:"within the threshold",title:"Pay within policy",text:"A payment inside the owner's threshold proceeds through the normal send path.",why:"It still gets idempotency, limits and a ledger entry like any other transfer."},
+    {layer:"agents",cond:"above the threshold",title:"Hold for the owner",text:"Above the owner's threshold nothing moves. An approval waits for the owner.",why:"The agent cannot argue past the threshold, because no money has moved."},
+    {layer:"clients",title:"Owner approves",text:"The owner approves the pending payment.",why:"Approval is the only way spend above the threshold happens."},
+    {layer:"agents",title:"Execute exactly once",text:"The approval runs under a row lock and uses a fixed movement id.",why:"A double click or a replay finds the same movement and does nothing more."},
+    {layer:"ledger",title:"Post the movement",text:"ledger.post_entry records the payment.",why:"To the ledger an approved agent payment is an ordinary entry."}]},
+  {id:"flow-webhook",title:"Webhook to deposit",blurb:"Stored first, processed from the outbox.",
+   intro:"A provider tells Corridor that a deposit arrived. Providers retry, duplicate and reorder events, so the path assumes all three.",
+   note:{kind:"limit",text:"A deposit repaired from a bank statement is credited unscreened, because the statement names no sender."},
+   steps:[
+    {layer:"providers",title:"Provider sends a webhook",text:"The bank or custody provider reports an event such as a deposit.",why:"Providers retry, send duplicates and send events out of order."},
+    {layer:"payments",title:"Store the event, nothing else",text:"The event is written to PostgreSQL and acknowledged. No processing happens inside the request.",why:"Storing first means a crash cannot lose it and a slow handler cannot trigger more retries."},
+    {layer:"postgres",title:"The outbox carries it forward",text:"A pending outbox row points the worker at the stored event.",why:"Same mechanism as outgoing payments, so there is one pattern to explain."},
+    {layer:"worker",title:"Process, expecting repeats",text:"The worker processes the event. Duplicates and reordering are treated as ordinary cases.",why:"Handlers must be safe to run twice."},
+    {layer:"risk",title:"Screen the deposit",text:"The deposit is screened before it is credited.",why:"A returned deposit can restrict a user, which later affects held withdrawals."},
+    {layer:"ledger",title:"Credit the balance",text:"ledger.post_entry credits the user.",why:"The same single path that every other balance change uses."}]},
+  {id:"flow-fx",title:"FX conversion",blurb:"A cached rate is verified before it is used.",
+   intro:"A user converts between currencies. The interesting part is the rate, because a rate is a price and a wrong price mints money.",
+   steps:[
+    {layer:"clients",title:"Client asks to convert",text:"A user converts, for example USD to MXN.",why:"Conversion is a money write, so it takes the same idempotent path."},
+    {layer:"request",title:"Check the rate limiter",text:"Redis backs the limiter. If it is down, money writes refuse.",why:"Cancelling a payout is exempt on purpose."},
+    {layer:"redis",title:"Read the cached rate",text:"The cached rate is read from Redis along with its HMAC.",why:"Redis is a speed layer, not a source of truth."},
+    {layer:"fx",title:"Verify before use",text:"FX checks the HMAC. A rate that fails the check is not used.",why:"A reviewer showed that a planted Redis value could mint money. The HMAC closes that."},
+    {layer:"ledger",title:"Post the conversion",text:"The conversion is posted through ledger.post_entry in integer minor units.",why:"Currencies have different decimals, so a float anywhere would be a bug."},
+    {layer:"postgres",title:"Commit with the key",text:"The idempotency key and the posting commit in one transaction.",why:"A retried conversion replays the stored answer instead of converting twice."}]}
+];
+
+const FLOW_BY_ID = Object.fromEntries(FLOWS.map(f=>[f.id,f]));
+const FLOWS_BY_LAYER = {};
+FLOWS.forEach(f=>f.steps.forEach(s=>{(FLOWS_BY_LAYER[s.layer]=FLOWS_BY_LAYER[s.layer]||new Set()).add(f.id)}));
+
+const state = {view:"arch",layer:"ledger",flow:"flow-send",step:0,scroll:false};
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const node = id => {const L=LAYERS[id];return `<button class="node" data-go="${id}" data-layer="${id}" data-kind="${L.kind}" aria-pressed="false"><span class="n-name">${esc(L.name)}</span><span class="n-sub">${esc(L.sub)}</span></button>`};
+const conn = (t,cls="") => `<div class="conn ${cls}" aria-hidden="true"><span>${esc(t)}</span></div>`;
+
+function buildMap(){
+  $("map").innerHTML =
+    node("clients") + conn("HTTPS and API key") + node("request") + conn("authenticated, idempotent request") +
+    `<div class="frame"><span class="mono-label">FastAPI modular monolith</span><div class="mods">${["ledger","payments","fx","risk","agents","operators"].map(node).join("")}</div></div>` +
+    `<div class="pair">${conn("entries, locks, triggers")}${conn("limits, rate cache")}</div>` +
+    `<div class="pair">${node("postgres")}${node("redis")}</div>` +
+    `<div class="pair">${conn("outbox rows")}${conn("blank","blank")}</div>` +
+    `<div class="hrow">${node("worker")}<span class="arrow" aria-hidden="true">calls &rarr;</span>${node("providers")}</div>`;
+}
+
+function chip(id){const L=LAYERS[id];return `<button class="chip" data-go="${id}" data-kind="${L.kind}">${esc(L.name)}</button>`}
+function flowChip(id){return `<button class="chip flow" data-go="${id}">${esc(FLOW_BY_ID[id].title)}</button>`}
+function noteHTML(n){return `<div class="note"><p class="mono-label">${n.kind==="limit"?"Known limit":"Found in review"}</p><p>${esc(n.text)}</p></div>`}
+function adrHTML(a){return `<article class="adr"><p class="mono-label">Decision record</p><h4>${esc(a.title)}</h4><dl><dt>Context</dt><dd>${esc(a.context)}</dd><dt>Decision</dt><dd>${esc(a.decision)}</dd><dt>Consequences</dt><dd>${esc(a.consequences)}</dd></dl></article>`}
+
+function renderArch(){
+  const L = LAYERS[state.layer];
+  document.querySelectorAll("#map .node").forEach(n=>{
+    const id=n.dataset.layer;
+    n.setAttribute("aria-pressed", id===state.layer);
+    n.classList.toggle("linked", L.related.includes(id));
+  });
+  const flows = [...(FLOWS_BY_LAYER[state.layer]||[])];
+  $("detail").innerHTML =
+    `<p class="mono-label">${esc(L.tag)}</p><h2>${esc(L.name)}</h2><p class="summary">${esc(L.summary)}</p>` +
+    `<h3 class="sec">What it does</h3><ul class="does">${L.does.map(d=>`<li>${esc(d)}</li>`).join("")}</ul>` +
+    `<h3 class="sec">Decision records</h3><p class="src">Summarised from the design notes. Full pages live in docs/adr/.</p>${L.adrs.map(adrHTML).join("")}` +
+    (L.notes?L.notes.map(noteHTML).join(""):"") +
+    `<h3 class="sec">In one sentence</h3><p class="say">${esc(L.say)}</p>` +
+    `<h3 class="sec">Talks to</h3><div class="chips">${L.related.map(chip).join("")}</div>` +
+    (flows.length?`<h3 class="sec">Appears in workflows</h3><div class="chips">${flows.map(flowChip).join("")}</div>`:"");
+}
+
+function buildFlowList(){
+  $("flowlist").innerHTML = FLOWS.map(f=>`<button class="flowbtn" data-go="${f.id}" data-flow="${f.id}" aria-pressed="false"><b>${esc(f.title)}</b><span>${esc(f.blurb)}</span></button>`).join("");
+}
+
+function renderFlow(){
+  const F = FLOW_BY_ID[state.flow];
+  const n = F.steps.length;
+  document.querySelectorAll("#flowlist .flowbtn").forEach(b=>b.setAttribute("aria-pressed", b.dataset.flow===state.flow));
+  const parts = [...new Set(F.steps.map(s=>s.layer))];
+  const active = F.steps[state.step];
+  $("flowpanel").innerHTML =
+    `<p class="mono-label">Workflow</p><h2>${esc(F.title)}</h2><p class="summary">${esc(F.intro)}</p>` +
+    `<div class="participants"><p class="mono-label" style="margin-bottom:8px">Who is involved</p><div class="chips">${parts.map(p=>`<button class="chip" data-go="${p}" data-kind="${LAYERS[p].kind}"${p===active.layer?' style="border-color:var(--k);background:var(--ks)"':''}>${esc(LAYERS[p].name)}</button>`).join("")}</div></div>` +
+    `<div class="controls"><button class="btn" data-nav="-1"${state.step===0?" disabled":""}>Previous</button><button class="btn primary" data-nav="1"${state.step===n-1?" disabled":""}>Next step</button><span class="count">Step ${state.step+1} of ${n}</span><div class="progress" aria-hidden="true"><i style="width:${((state.step+1)/n*100).toFixed(1)}%"></i></div></div>` +
+    `<ol class="steps">${F.steps.map((s,i)=>{
+      const L=LAYERS[s.layer], on=i===state.step;
+      return `<li class="step${on?" on":""}"><button class="step-head" data-step="${i}" aria-expanded="${on}"><span class="num">${i+1}</span><span><span class="step-meta"><span class="actor" data-kind="${L.kind}">${esc(L.name)}</span>${s.cond?`<span class="cond">${esc(s.cond)}</span>`:""}</span><span class="step-title">${esc(s.title)}</span><span class="step-text">${esc(s.text)}</span></span></button>` +
+        (on?`<div class="step-more"><div><p class="mono-label" style="margin-bottom:4px">Why it matters</p><p>${esc(s.why)}</p></div><div class="chips"><button class="chip" data-go="${s.layer}" data-kind="${L.kind}">Open ${esc(L.name)} layer</button></div></div>`:"") + `</li>`;
+    }).join("")}</ol>` +
+    (F.note?`<div style="margin-top:18px">${noteHTML(F.note)}</div>`:"");
+}
+
+function render(){
+  const arch = state.view==="arch";
+  $("view-arch").hidden = !arch; $("view-flow").hidden = arch;
+  $("tab-arch").setAttribute("aria-selected", arch); $("tab-flow").setAttribute("aria-selected", !arch);
+  $("tab-arch").tabIndex = arch?0:-1; $("tab-flow").tabIndex = arch?-1:0;
+  if(arch) renderArch(); else renderFlow();
+}
+
+function route(){
+  let h=""; try{h=decodeURIComponent(location.hash.slice(1))}catch(e){}
+  if(LAYERS[h]){state.view="arch";state.layer=h}
+  else if(FLOW_BY_ID[h]){state.view="flow";state.flow=h;state.step=0}
+  render();
+  if(state.scroll){
+    state.scroll=false;
+    if(matchMedia("(max-width:900px)").matches){
+      const el = state.view==="arch"?$("detail"):$("flowpanel");
+      el.scrollIntoView({behavior:matchMedia("(prefers-reduced-motion:reduce)").matches?"auto":"smooth",block:"start"});
+    }
+  }
+}
+
+document.addEventListener("click",e=>{
+  const go=e.target.closest("[data-go]");
+  if(go){state.scroll=true;const id=go.dataset.go;if(location.hash.slice(1)===id){route()}else{location.hash=id}return}
+  const tab=e.target.closest("[data-tab]");
+  if(tab){const id=tab.dataset.tab==="arch"?state.layer:state.flow;if(location.hash.slice(1)===id){state.view=tab.dataset.tab;render()}else{location.hash=id}return}
+  const st=e.target.closest("[data-step]");
+  if(st){state.step=+st.dataset.step;renderFlow();return}
+  const nav=e.target.closest("[data-nav]");
+  if(nav){const n=FLOW_BY_ID[state.flow].steps.length;state.step=Math.max(0,Math.min(n-1,state.step+(+nav.dataset.nav)));renderFlow();return}
+});
+window.addEventListener("hashchange",route);
+
+buildMap(); buildFlowList(); route();
+</script>
+</body>
+</html>
