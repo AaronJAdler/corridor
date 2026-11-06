@@ -1,5 +1,7 @@
 # Corridor
 
+[![CI](https://github.com/AaronJAdler/corridor/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/AaronJAdler/corridor/actions/workflows/ci.yml)
+
 Corridor is the backend of a consumer wallet that holds fiat money and stablecoins side by
 side. A user can receive a bank deposit or an on-chain deposit, convert between assets at a
 quoted rate, send money to another user, and withdraw to a bank account or a chain
@@ -91,12 +93,12 @@ worker and the provider simulators. It builds two images from the one Dockerfile
 `runtime` target for the API, the worker and the migration, which does not contain the
 simulator, and the `sim` target for the simulator.
 
-**This stack has not been started by the automation that wrote this repository.** No
-container registry was reachable from where it was built, so the image has never been
-built there. The Dockerfile is linted, and `compose.yaml` is verified only by
-`docker compose config`. The same three programs are run as plain processes by
-`uv run poe e2e`, which does pass. Expect to find a problem on the first run that a
-validator could not, and see the notes after the steps.
+**This stack has not yet been started end to end.** CI builds the image from the
+Dockerfile on every push and pull request, and `compose.yaml` is verified by
+`docker compose config`, but no run has yet brought the containers up together. The same
+three programs run as plain processes in `uv run poe e2e`, which CI runs and which passes.
+Expect to find a problem on the first run that a build and a validator could not, and see
+the notes after the steps.
 
 1. Copy the example settings.
 
@@ -357,9 +359,11 @@ CLAUDE.md            the rules and conventions for working in this repository
   device binding.
 - **Not a compliance system.** KYC tiers, screening and limits are stubs with the right
   shape and no real rules behind them.
-- **Not deployed.** The container image has not been built, the compose stack has not been
-  started, the Terraform has not been applied and the CI workflows have not run. Each is
-  checked statically. There is no load test.
+- **Not deployed.** The Terraform has not been planned or applied, and the compose stack
+  has not been started end to end. CI runs on every push and pull request: lint, strict
+  types and module boundaries; the full suite, the smoke run and the end-to-end run against
+  PostgreSQL 16, 17 and 18; a secret scan; a dependency audit; workflow and Terraform
+  linting; and an image build. There is no load test.
 
 The full list is in [the architecture](docs/architecture.md#22-known-limits-of-this-build).
 
