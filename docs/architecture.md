@@ -1591,8 +1591,9 @@ sleeps to let time pass.
   PostgreSQL's own row order.
 - **Coverage.** `uv run poe check` fails below 94% overall and below 96% on `ledger`,
   `payments`, `fx` and `risk`, measured over lines and branches.
-- **What is not tested.** There is no load test, and the container image and the compose
-  stack have not been run (section 22).
+- **What is not tested.** There is no load test, and the compose stack has not been
+  started end to end (section 22). CI builds the `runtime` image on every push and pull
+  request.
 
 ---
 
@@ -1806,13 +1807,15 @@ Stated plainly, so nothing is mistaken for verified.
 - **Compliance is stubbed.** KYC, screening and limits have the right shape and no real
   rules or data behind them. The reference rates used to value limits are fixed numbers in
   a migration.
-- **The container image has not been built and the compose stack has not been started** by
-  the automation that produced this repository. That includes the step that removes the
-  simulator from the `runtime` image and the separate `sim` target. The Dockerfile is
-  linted and `compose.yaml` is validated with `docker compose config`. The same processes are exercised by
-  `uv run poe e2e` outside containers.
-- **The AWS infrastructure has not been applied to an account.** It is checked statically
-  only. The CI and deploy workflows have been linted and not run.
+- **The compose stack has not been started end to end.** CI builds the `runtime` image,
+  the Dockerfile's last stage, on every push and pull request; the `sim` target is not
+  built there, and no run has brought the containers up together. The Dockerfile is linted
+  and `compose.yaml` is validated with `docker compose config`. The same processes are
+  exercised by `uv run poe e2e` outside containers, which CI runs against PostgreSQL 16, 17
+  and 18.
+- **The AWS infrastructure has not been applied to an account.** It is checked statically:
+  CI runs `terraform fmt`, `validate`, checkov and tflint on every push and pull request.
+  The deploy workflow has never run.
 - **The verifiers cannot see a whole entry that was deleted.** They compare rows that
   exist. An entry removed together with its postings, with the cached balances rewritten
   to match, leaves books that still add up. Seeing that needs a hash chain over the
