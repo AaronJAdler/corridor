@@ -93,8 +93,8 @@ worker and the provider simulators. It builds two images from the one Dockerfile
 `runtime` target for the API, the worker and the migration, which does not contain the
 simulator, and the `sim` target for the simulator.
 
-**This stack has not yet been started end to end.** CI builds the image from the
-Dockerfile on every push and pull request, and `compose.yaml` is verified by
+**This stack has not yet been started end to end.** CI builds the `runtime` image from
+the Dockerfile on every push and pull request (not the `sim` image), and `compose.yaml` is verified by
 `docker compose config`, but no run has yet brought the containers up together. The same
 three programs run as plain processes in `uv run poe e2e`, which CI runs and which passes.
 Expect to find a problem on the first run that a build and a validator could not, and see
