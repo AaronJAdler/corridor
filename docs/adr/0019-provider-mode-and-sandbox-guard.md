@@ -44,10 +44,10 @@ implementation to use, and how it is stopped from reaching the wrong host.
   Increase's documented behaviour, a second line of defence and not the first.
 - **Also refused:** `increase_sandbox` without `increase_api_key`, and `increase_sandbox` in a
   `production` environment.
-- **Selecting a sandbox never falls back to the simulator.** Until the adapter is written
-  (the next stage of this work), the factory raises `ProviderMisconfigured` for
-  `increase_sandbox` rather than start a process that quietly has either no bank rail or the
-  simulator.
+- **Selecting a sandbox never falls back to the simulator.** Before the adapter existed, the
+  factory raised `ProviderMisconfigured` for `increase_sandbox` rather than start a process
+  that quietly had either no bank rail or the simulator. It now builds the Increase adapter
+  ([0020](0020-increase-bank-rail-adapter.md)), and still never the simulator in its place.
 - **CI stays on the simulator.** No job in `ci.yml` selects a sandbox, holds a provider key or
   calls a provider. The sandbox runs by hand, in its own workflow, in an environment that holds
   the key.
@@ -116,7 +116,8 @@ production does under load, with real counterparties or with real money.
   - Migration `0021` lets the webhook table hold `increase`; a test compares the table's
     constraint with the enumeration. Simulator and sandbox rows share one database, told
     apart by the name.
-  - `increase` deliveries are named and routed but refused at verification until the
-    signature scheme is implemented, so nothing of one is believed in the meantime.
+  - `increase` deliveries were named and routed but refused at verification until the
+    signature scheme was implemented, so nothing of one was believed in the meantime.
+    [0020](0020-increase-bank-rail-adapter.md) implements it and removes the refusal.
 - The sandbox can prove the adapter's shapes. It cannot prove the error semantics under
   failure after the effect; the simulator remains the only place that is tested.

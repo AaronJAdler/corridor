@@ -15,6 +15,21 @@ same ports, not by changing this contract.
 | Custodian | `simcustody` | `/custody/v1` | `POST /v1/webhooks/simcustody` |
 | FX rates | `simfx` | `/fx/v1` | none |
 
+One real provider is integrated alongside the simulator: the **Increase sandbox**, as a bank
+rail for USD over ACH, chosen with `CORRIDOR_BANK_RAIL_PROVIDER=increase_sandbox`. It is
+named `increase` and its webhooks go to `POST /v1/webhooks/increase`. It does not follow this
+contract: its own API is mapped onto the bank rail port in
+[ADR 0020](adr/0020-increase-bank-rail-adapter.md), with a citation for every fact about it.
+Nothing in CI calls it.
+
+| Setting | For the Increase sandbox |
+|---|---|
+| `CORRIDOR_BANK_RAIL_PROVIDER` | `increase_sandbox` |
+| `CORRIDOR_INCREASE_BASE_URL` | exactly `https://sandbox.increase.com`, the default; anything else stops every process from starting |
+| `CORRIDOR_INCREASE_API_KEY` | the sandbox API key. Never in the repository: a GitHub Actions environment secret, or a local `.env` |
+| `CORRIDOR_INCREASE_ACCOUNT_ID` | the Increase account money moves from and account numbers open on |
+| `CORRIDOR_INCREASE_WEBHOOK_SECRETS` | a JSON list of the Event Subscription's shared secrets, each 32+ characters and none shared with another provider |
+
 ## Conventions
 
 - **Authentication.** `Authorization: Bearer <api key>`. A missing or wrong key is

@@ -2848,12 +2848,14 @@ HTTP 200
 ### `POST /v1/webhooks/{provider}`
 
 Where a provider reports what happened to a deposit or a payout. `provider` is `simbank`,
-`simcustody` or `increase`; any other name is `404`. Until the Increase signature scheme is
-implemented, every delivery to `increase` is refused with `401`, whatever it carries, and
-nothing is stored. The contract for the events themselves is in
-[provider-api.md](provider-api.md).
+`simcustody` or `increase`; any other name is `404`. The contract for the simulators' events
+is in [provider-api.md](provider-api.md); Increase's are described in
+[ADR 0020](adr/0020-increase-bank-rail-adapter.md).
 
-The endpoint takes no bearer credential. A delivery is authenticated by its signature:
+The endpoint takes no bearer credential. A delivery is authenticated by its signature, by
+the scheme of the provider its path names, and only that scheme.
+
+From `simbank` and `simcustody`:
 
 - The header is `X-Signature: t=<unix seconds>,v1=<hex digest>`.
 - The digest is HMAC-SHA256, keyed with the secret shared with that provider, over the
@@ -2862,6 +2864,18 @@ The endpoint takes no bearer credential. A delivery is authenticated by its sign
   (`CORRIDOR_WEBHOOK_TOLERANCE_SECONDS`).
 - Each provider can have several active secrets, so a secret can be rotated without
   dropping deliveries.
+
+From `increase`, the Standard Webhooks scheme that Increase documents:
+
+- Three headers, each exactly once: `webhook-id` (the event's id), `webhook-timestamp` (Unix
+  seconds) and `webhook-signature`.
+- `webhook-signature` is a space-separated list of `v1,<base64 digest>`: HMAC-SHA256, keyed
+  with the Event Subscription's shared secret (`CORRIDOR_INCREASE_WEBHOOK_SECRETS`), over
+  `<webhook-id>.<webhook-timestamp>.<raw request body>`. During a rotation it carries one
+  signature per secret; any one that matches is enough.
+- The same 5-minute tolerance.
+- The body is an Increase Event, whose `id` must be the `webhook-id`. It is stored under its
+  `category`; the worker reads the object it names from Increase to learn what happened.
 
 What the endpoint does, in this order: read the raw body (at most 64 KiB), verify the
 signature, parse the body, store the event and an outbox row in one transaction, answer
