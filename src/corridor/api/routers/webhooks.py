@@ -22,8 +22,6 @@ log = get_logger(__name__)
 
 router = APIRouter(prefix="/v1/webhooks", tags=["webhooks"])
 
-_SIGNATURE_HEADER = "x-signature"
-
 
 class ReceivedResponse(BaseModel):
     received: Literal[True] = True
@@ -56,14 +54,17 @@ async def receive_webhook(
 ) -> ReceivedResponse:
     sender = webhooks.provider_named(provider)
     body = await _read_capped(request)
+    # Every value of each header the sender's scheme signs with, so that a repeated header is
+    # seen and refused rather than one of its values chosen.
+    signed_by = {name: request.headers.getlist(name) for name in webhooks.signature_headers(sender)}
     try:
-        webhooks.verify_delivery(settings, sender, request.headers.getlist(_SIGNATURE_HEADER), body)
+        webhooks.verify_delivery(settings, sender, signed_by, body)
     except webhooks.InvalidSignature:
         _count(sender, "bad_signature")
         raise
     # Only now is the body read as anything but bytes.
     try:
-        envelope = webhooks.parse_envelope(body)
+        envelope = webhooks.parse_envelope(body, sender, signed_by)
     except webhooks.MalformedEvent:
         _count(sender, "malformed")
         raise

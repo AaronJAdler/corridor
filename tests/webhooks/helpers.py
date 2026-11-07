@@ -1,6 +1,7 @@
 """What the webhook tests share: synthetic secrets, a signer written from the contract's
 text, and readers of the two tables a delivery writes."""
 
+import base64
 import hashlib
 import hmac
 import json
@@ -21,6 +22,8 @@ BANK_SECRET = "test-bank-webhook-signing-value-0001"  # pragma: allowlist secret
 BANK_NEXT_SECRET = "test-bank-webhook-signing-value-0002"  # pragma: allowlist secret
 CUSTODY_SECRET = "test-custody-webhook-signing-value-01"  # pragma: allowlist secret
 UNKNOWN_SECRET = "test-nobody-webhook-signing-value-001"  # pragma: allowlist secret
+INCREASE_SECRET = "test-increase-webhook-signing-value-1"  # pragma: allowlist secret
+INCREASE_NEXT_SECRET = "test-increase-webhook-signing-value-2"  # pragma: allowlist secret
 
 TOPIC = "webhook.received"
 
@@ -30,17 +33,19 @@ def with_secrets(
     *,
     bank: tuple[str, ...] = (BANK_SECRET,),
     custody: tuple[str, ...] = (CUSTODY_SECRET,),
+    increase: tuple[str, ...] = (INCREASE_SECRET,),
 ) -> Settings:
     return settings.model_copy(
         update={
             "bank_rail_webhook_secrets": [SecretStr(secret) for secret in bank],
             "custody_webhook_secrets": [SecretStr(secret) for secret in custody],
+            "increase_webhook_secrets": [SecretStr(secret) for secret in increase],
         }
     )
 
 
 def without_secrets(settings: Settings) -> Settings:
-    return with_secrets(settings, bank=(), custody=())
+    return with_secrets(settings, bank=(), custody=(), increase=())
 
 
 def unix(moment: datetime | None = None) -> int:
@@ -53,6 +58,51 @@ def sign(secret: str, body: bytes, timestamp: int | str | None = None) -> str:
     t = unix() if timestamp is None else timestamp
     digest = hmac.new(secret.encode(), f"{t}.".encode() + body, hashlib.sha256).hexdigest()
     return f"t={t},v1={digest}"
+
+
+def standard_signature(secret: str, webhook_id: str, timestamp: int | str, body: bytes) -> str:
+    """One ``webhook-signature`` entry as Increase's webhooks guide describes it: HMAC-SHA256,
+    keyed with the shared secret, over ``<webhook-id>.<webhook-timestamp>.<raw body>``, in
+    base64 after ``v1,``."""
+    signed = f"{webhook_id}.{timestamp}.".encode() + body
+    digest = hmac.new(secret.encode(), signed, hashlib.sha256).digest()
+    return "v1," + base64.b64encode(digest).decode()
+
+
+def standard_headers(
+    body: bytes,
+    *,
+    webhook_id: str = "event_123abc",
+    secrets: tuple[str, ...] = (INCREASE_SECRET,),
+    timestamp: int | None = None,
+) -> dict[str, str]:
+    """The three headers an Increase delivery carries, signed with each of ``secrets``."""
+    t = unix() if timestamp is None else timestamp
+    return {
+        "webhook-id": webhook_id,
+        "webhook-timestamp": str(t),
+        "webhook-signature": " ".join(
+            standard_signature(secret, webhook_id, t, body) for secret in secrets
+        ),
+    }
+
+
+def increase_event(
+    event_id: str = "event_123abc",
+    category: str = "inbound_ach_transfer.created",
+    object_type: str = "inbound_ach_transfer",
+    object_id: str = "inbound_ach_transfer_tdrwqr3fq9gnnq49odev",
+) -> bytes:
+    """An Increase Event, as its webhooks guide shows one."""
+    document = {
+        "id": event_id,
+        "created_at": "2026-01-15T12:00:00Z",
+        "category": category,
+        "associated_object_type": object_type,
+        "associated_object_id": object_id,
+        "type": "event",
+    }
+    return json.dumps(document, separators=(",", ":")).encode()
 
 
 def envelope(

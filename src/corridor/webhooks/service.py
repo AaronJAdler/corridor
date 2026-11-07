@@ -8,9 +8,9 @@ See section 7.3 of the architecture.
 
 import json
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
-from typing import Annotated, Any, Final, cast
+from typing import Annotated, Any, Final, Literal, cast
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import RowMapping, Table, select, update
@@ -24,7 +24,7 @@ from corridor.platform.db import Database
 from corridor.platform.ids import new_id
 from corridor.platform.logging import get_logger
 from corridor.platform.metrics import WEBHOOK_EVENTS_PROCESSED
-from corridor.webhooks import signature
+from corridor.webhooks import signature, standard
 from corridor.webhooks.errors import (
     EventNotFound,
     InvalidSignature,
@@ -106,55 +106,78 @@ def _secrets_for(settings: Settings, provider: Provider) -> list[bytes]:
     configured = {
         Provider.SIMBANK: settings.bank_rail_webhook_secrets,
         Provider.SIMCUSTODY: settings.custody_webhook_secrets,
+        Provider.INCREASE: settings.increase_webhook_secrets,
     }[provider]
     return [secret.get_secret_value().encode() for secret in configured]
 
 
-# Providers whose deliveries are named, and stored once believed, but whose signing scheme this
-# version does not verify. Corridor's own scheme is not theirs, so a delivery that passed it
-# would prove nothing about who sent it: every delivery is refused until the scheme is written.
-_UNVERIFIED: Final = frozenset({Provider.INCREASE})
+# The simulators sign by the provider contract's scheme, with one header. Increase signs by
+# the Standard Webhooks scheme, with three. A delivery is judged by its provider's scheme
+# alone: one signed by the other would prove nothing about who sent it.
+_CONTRACT_HEADERS: Final = (signature.HEADER,)
+_STANDARD: Final = frozenset({Provider.INCREASE})
+
+
+def signature_headers(provider: Provider) -> tuple[str, ...]:
+    """The request headers a delivery from ``provider`` is verified by, lower-case."""
+    return standard.HEADERS if provider in _STANDARD else _CONTRACT_HEADERS
 
 
 def verify_delivery(
-    settings: Settings, provider: Provider, signature_headers: Sequence[str], body: bytes
+    settings: Settings,
+    provider: Provider,
+    headers: Mapping[str, Sequence[str]],
+    body: bytes,
 ) -> None:
     """Refuse a delivery that does not prove it came from ``provider``.
 
-    ``signature_headers`` is every ``X-Signature`` header of the request and ``body`` is
-    the request body exactly as it arrived. The reason for a refusal goes to the log and
-    nowhere else.
+    ``headers`` holds every value of each of ``signature_headers(provider)`` the request
+    carried, and ``body`` is the request body exactly as it arrived. The reason for a
+    refusal goes to the log and nowhere else.
     """
-    if provider in _UNVERIFIED:
-        log.warning("webhook.signature_scheme_unsupported", provider=provider.value)
-        raise InvalidSignature
-    refusal = signature.check(
-        secrets=_secrets_for(settings, provider),
-        headers=signature_headers,
-        body=body,
-        now=utcnow(),
-        tolerance_seconds=settings.webhook_tolerance_seconds,
-    )
+    secrets = _secrets_for(settings, provider)
+    now = utcnow()
+    tolerance = settings.webhook_tolerance_seconds
+    if provider in _STANDARD:
+        refusal = standard.check(
+            secrets=secrets, headers=headers, body=body, now=now, tolerance_seconds=tolerance
+        )
+    else:
+        refusal = signature.check(
+            secrets=secrets,
+            headers=headers.get(signature.HEADER, ()),
+            body=body,
+            now=now,
+            tolerance_seconds=tolerance,
+        )
     if refusal is not None:
         log.warning("webhook.signature_refused", provider=provider.value, reason=refusal.value)
         raise InvalidSignature
 
 
 def validate_secrets(settings: Settings) -> None:
-    """Refuse a configuration in which the two providers share a webhook secret.
+    """Refuse a configuration in which two providers share a webhook secret.
 
     The provider's name is not among the bytes that are signed. With a shared secret, a
-    delivery one provider signed would verify on the other provider's path, and an event
+    delivery one provider signed could verify on another provider's path, and an event
     could be replayed as though the other had sent it.
     """
-    bank = {secret.get_secret_value() for secret in settings.bank_rail_webhook_secrets}
-    custody = {secret.get_secret_value() for secret in settings.custody_webhook_secrets}
-    if bank & custody:
-        # Which secret is shared is not said: an error message is not a place for one.
-        raise ValueError(
-            "bank_rail_webhook_secrets and custody_webhook_secrets share a secret; "
-            "each provider needs secrets of its own"
-        )
+    named = {
+        "bank_rail_webhook_secrets": settings.bank_rail_webhook_secrets,
+        "custody_webhook_secrets": settings.custody_webhook_secrets,
+        "increase_webhook_secrets": settings.increase_webhook_secrets,
+    }
+    held = {
+        name: {secret.get_secret_value() for secret in secrets} for name, secrets in named.items()
+    }
+    names = sorted(held)
+    for index, first in enumerate(names):
+        for second in names[index + 1 :]:
+            if held[first] & held[second]:
+                # Which secret is shared is not said: an error message is not a place for one.
+                raise ValueError(
+                    f"{first} and {second} share a secret; each provider needs secrets of its own"
+                )
 
 
 # --- the envelope ----------------------------------------------------------------------------
@@ -187,14 +210,48 @@ def _contains_nul(value: object) -> bool:
     return False
 
 
-def parse_envelope(body: bytes) -> Envelope:
+class _IncreaseEventModel(BaseModel):
+    """An Increase Event, which is what its webhooks carry: the event's id and category, and
+    the object it is about. What happened is read from the object, later, in the worker.
+
+    Strict, and a field this version does not name is ignored: Increase documents that it
+    adds to its objects, and the body is stored as it came whatever is read of it here.
+    """
+
+    model_config = ConfigDict(extra="ignore", frozen=True, strict=True)
+
+    id: Annotated[str, Field(pattern=_IDENTIFIER, max_length=_MAX_EVENT_ID_LENGTH)]
+    category: Annotated[str, Field(pattern=_IDENTIFIER, max_length=_MAX_TYPE_LENGTH)]
+    associated_object_type: Annotated[str, Field(pattern=_IDENTIFIER, max_length=_MAX_TYPE_LENGTH)]
+    associated_object_id: Annotated[
+        str, Field(pattern=_IDENTIFIER, max_length=_MAX_EVENT_ID_LENGTH)
+    ]
+    created_at: AwareDatetime
+    type: Literal["event"]
+
+
+def parse_envelope(
+    body: bytes,
+    provider: Provider | None = None,
+    headers: Mapping[str, Sequence[str]] | None = None,
+) -> Envelope:
     """Read a verified body as an event, or refuse it. Call this only after ``verify_delivery``.
+
+    The simulators send the provider contract's envelope, whose ``type`` is the event's type.
+    Increase sends an Event, whose ``category`` is: that is what the event is stored and
+    routed under. An Increase event's id must be the ``webhook-id`` it was signed under,
+    which ``headers`` carries.
 
     What is kept is the document as it was sent, not the validated model written out
     again, so that the stored event is the provider's own.
     """
     try:
-        model = _EnvelopeModel.model_validate_json(body)
+        if provider in _STANDARD:
+            increase = _IncreaseEventModel.model_validate_json(body)
+            event_id, event_type = increase.id, increase.category
+        else:
+            model = _EnvelopeModel.model_validate_json(body)
+            event_id, event_type = model.id, model.type
         payload = json.loads(body, parse_constant=_refuse_constant)
     except ValidationError, ValueError, RecursionError:
         # Without the cause: a validation error repeats the input it refused.
@@ -203,7 +260,13 @@ def parse_envelope(body: bytes) -> Envelope:
     # mistake and not a failure of ours that the provider would retry six times.
     if not isinstance(payload, dict) or _contains_nul(payload):
         raise MalformedEvent(_MALFORMED)
-    return Envelope(event_id=model.id, type=model.type, payload=payload)
+    if provider in _STANDARD:
+        # The id in the headers is the one the signature covers. A body that names another
+        # event is not the event that was signed for, whatever else it says.
+        signed_for = (headers or {}).get(standard.ID_HEADER, ())
+        if list(signed_for) != [event_id]:
+            raise MalformedEvent(_MALFORMED)
+    return Envelope(event_id=event_id, type=event_type, payload=payload)
 
 
 # --- recording -------------------------------------------------------------------------------

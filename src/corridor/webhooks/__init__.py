@@ -23,6 +23,7 @@ from corridor.webhooks.service import (
     provider_named,
     record,
     redact_payloads,
+    signature_headers,
     validate_secrets,
     verify_delivery,
 )
@@ -59,6 +60,7 @@ __all__ = [
     "provider_named",
     "record",
     "redact_payloads",
+    "signature_headers",
     "validate_secrets",
     "verify_delivery",
 ]

@@ -31,10 +31,13 @@ from tests.webhooks.helpers import (
     BANK_NEXT_SECRET,
     BANK_SECRET,
     CUSTODY_SECRET,
+    INCREASE_SECRET,
     UNKNOWN_SECRET,
     enqueued,
     envelope,
+    increase_event,
     sign,
+    standard_headers,
     stored_events,
     unix,
     with_secrets,
@@ -392,33 +395,134 @@ async def test_a_provider_with_no_secret_configured_accepts_nothing(
     assert await stored_events(db) == []
 
 
-async def test_a_delivery_named_for_a_provider_whose_scheme_is_not_implemented_is_refused(
-    settings: Settings, db: Database
-) -> None:
-    """``increase`` is a provider Corridor knows by name and cannot yet verify. Whatever the
-    delivery carries, signed with a secret that is configured or not, nothing of it is
-    believed or kept."""
-    body = envelope("evt_1")
+INCREASE = "/v1/webhooks/increase"
 
-    async with serving(with_secrets(settings)) as http:
-        answers = [
-            await deliver(http, body, sign(secret, body), path="/v1/webhooks/increase")
-            for secret in (BANK_SECRET, CUSTODY_SECRET)
-        ]
-        standard = await deliver(
-            http,
+
+async def test_an_increase_delivery_signed_by_its_scheme_is_stored_under_its_category(
+    client: httpx.AsyncClient, db: Database
+) -> None:
+    body = increase_event("event_123abc", "ach_transfer.updated", "ach_transfer", "ach_transfer_1")
+
+    response = await deliver(client, body, None, path=INCREASE, headers=standard_headers(body))
+
+    assert (response.status_code, response.json()) == (200, {"received": True})
+    (stored,) = await stored_events(db)
+    assert (stored["provider"], stored["event_id"], stored["type"]) == (
+        "increase",
+        "event_123abc",
+        "ach_transfer.updated",
+    )
+    # The Event as Increase sent it: it names the object, and says nothing of what it holds.
+    assert stored["payload"] == json.loads(body)
+    assert await enqueued(db) == [stored["id"]]
+
+
+async def test_an_increase_event_delivered_twice_is_stored_once(
+    client: httpx.AsyncClient, db: Database
+) -> None:
+    body = increase_event("event_twice")
+
+    for _ in range(2):
+        response = await deliver(
+            client,
             body,
             None,
-            path="/v1/webhooks/increase",
-            headers={
-                "webhook-id": "evt_1",
-                "webhook-timestamp": str(unix()),
-                "webhook-signature": "v1,AAAA",
-            },
+            path=INCREASE,
+            headers=standard_headers(body, webhook_id="event_twice"),
         )
+        assert response.status_code == 200
 
-    for response in (*answers, standard):
+    assert len(await stored_events(db)) == 1
+    assert len(await enqueued(db)) == 1
+
+
+async def test_an_increase_delivery_is_judged_by_increases_scheme_alone(
+    client: httpx.AsyncClient, db: Database
+) -> None:
+    """Signed with the simulator's scheme, or by Increase's scheme with another provider's
+    secret, or not at all: none of it is believed or kept."""
+    body = increase_event()
+
+    answers = [
+        await deliver(client, body, sign(INCREASE_SECRET, body), path=INCREASE),
+        await deliver(client, body, sign(BANK_SECRET, body), path=INCREASE),
+        await deliver(
+            client,
+            body,
+            None,
+            path=INCREASE,
+            headers=standard_headers(body, secrets=(BANK_SECRET,)),
+        ),
+        await deliver(client, body, None, path=INCREASE),
+    ]
+
+    for response in answers:
         assert (response.status_code, response.json()) == (401, REFUSED)
+    assert await stored_events(db) == []
+
+
+async def test_a_delivery_signed_by_increases_scheme_is_not_believed_on_the_simulators_path(
+    client: httpx.AsyncClient, db: Database
+) -> None:
+    body = envelope("evt_1")
+
+    for secret in (INCREASE_SECRET, BANK_SECRET):
+        headers = standard_headers(body, webhook_id="evt_1", secrets=(secret,))
+        response = await deliver(client, body, None, path=BANK, headers=headers)
+        assert (response.status_code, response.json()) == (401, REFUSED)
+    assert await stored_events(db) == []
+
+
+async def test_no_increase_secret_configured_refuses_every_increase_delivery(
+    settings: Settings, db: Database
+) -> None:
+    body = increase_event()
+
+    async with serving(with_secrets(settings, increase=())) as http:
+        response = await deliver(http, body, None, path=INCREASE, headers=standard_headers(body))
+
+    assert (response.status_code, response.json()) == (401, REFUSED)
+    assert await stored_events(db) == []
+
+
+async def test_an_increase_body_that_names_another_event_than_it_was_signed_for_is_malformed(
+    client: httpx.AsyncClient, db: Database
+) -> None:
+    """The id in the headers is the one under the signature. The body is signed too, but an
+    event stored under an id the delivery was not signed for would be deduplicated against
+    the wrong event."""
+    body = increase_event("event_in_the_body")
+
+    response = await deliver(
+        client, body, None, path=INCREASE, headers=standard_headers(body, webhook_id="event_signed")
+    )
+
+    assert (response.status_code, response.json()["code"]) == (422, "malformed_event")
+    assert await stored_events(db) == []
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        # The simulator's envelope is not an Increase Event.
+        {"id": "event_1", "type": "payout.completed", "created_at": "2026-01-15T12:00:00Z", "data": {}},
+        {"id": "event_1", "category": "ach_transfer.updated", "created_at": "2026-01-15T12:00:00Z",
+         "associated_object_type": "ach_transfer", "associated_object_id": "ach_transfer_1",
+         "type": "not_an_event"},
+        {"id": "event_1", "category": "ach_transfer.updated", "created_at": "2026-01-15T12:00:00Z",
+         "associated_object_type": "ach_transfer", "type": "event"},
+    ],
+)  # fmt: skip
+async def test_a_signed_increase_body_that_is_not_an_event_is_malformed(
+    client: httpx.AsyncClient, db: Database, document: dict[str, Any]
+) -> None:
+    body = json.dumps(document).encode()
+
+    response = await deliver(
+        client, body, None, path=INCREASE, headers=standard_headers(body, webhook_id="event_1")
+    )
+
+    assert (response.status_code, response.json()["code"]) == (422, "malformed_event")
     assert await stored_events(db) == []
 
 

@@ -14,6 +14,9 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Final
 
+# The header the signature arrives in, lower-case as a request's headers are looked up.
+HEADER: Final = "x-signature"
+
 _TIMESTAMP: Final = re.compile(r"[0-9]{1,12}", re.ASCII)
 _DIGEST: Final = re.compile(r"[0-9a-f]{64}", re.ASCII)
 

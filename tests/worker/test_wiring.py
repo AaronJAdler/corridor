@@ -124,10 +124,22 @@ async def test_each_provider_event_is_handed_to_its_payment_function_with_the_ev
     assert calls == [(function, db, {"deposit_id": "dep_1", "amount": "1.00"}, told)]
 
 
+# Increase's events name an object, and are read through the bank rail (see
+# tests/worker/test_increase_events.py). These are the categories that can move money.
+INCREASE_ROUTES = {
+    ("increase", "ach_transfer.created"),
+    ("increase", "ach_transfer.updated"),
+    ("increase", "inbound_ach_transfer.created"),
+    ("increase", "inbound_ach_transfer.updated"),
+}
+
+
 def test_no_other_provider_event_has_a_handler() -> None:
     registry = build_webhook_registry()
     routed = {(provider, event_type) for provider, event_type, _function in ROUTES}
+    routed |= INCREASE_ROUTES
     types = {event_type for _provider, event_type, _function in ROUTES} | {"payout.created"}
+    types |= {event_type for _provider, event_type in INCREASE_ROUTES} | {"transaction.created"}
 
     handled = {
         (provider.value, event_type)

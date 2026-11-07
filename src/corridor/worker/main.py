@@ -196,7 +196,7 @@ def build_registry(
     ``settings`` is not read by any handler yet; it is taken so that the first one that
     needs configuration does not change what every caller passes.
     """
-    webhook_registry = build_webhook_registry()
+    webhook_registry = build_webhook_registry(bank)
 
     async def webhook_received(event: OutboxEvent) -> None:
         await webhooks.process(db, uuid.UUID(event.payload["webhook_event_id"]), webhook_registry)
