@@ -21,6 +21,7 @@ from corridor.providers.http import (
     statement,
     statement_params,
 )
+from corridor.providers.names import SIM_BANK
 from corridor.providers.types import Beneficiary, Payout, ProviderStatement, VirtualAccount
 
 
@@ -78,7 +79,7 @@ def _payout(document: _PayoutDocument) -> Payout:
 class SimBank:
     """Implements ``BankRail``."""
 
-    name: Final = "simbank"
+    name: Final = SIM_BANK
 
     def __init__(self, settings: Settings, *, client: httpx.AsyncClient | None = None) -> None:
         self._http = ProviderClient(

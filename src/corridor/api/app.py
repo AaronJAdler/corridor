@@ -16,7 +16,7 @@ from corridor.platform.config import Settings, load_settings
 from corridor.platform.db import Database, create_engine
 from corridor.platform.logging import configure_logging
 from corridor.platform.redis import RedisStore, create_redis
-from corridor.providers import SimBank, SimCustody, SimRates
+from corridor.providers import build_bank_rail, build_custodian, build_rate_source
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -36,10 +36,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # other's path. That is refused here, before a single delivery can be accepted.
         webhooks.validate_secrets(resolved)
         # A provider with an address and no key refuses to be built, as a missing signing
-        # key does. One with no address is left out, and the API runs without it.
-        bank = SimBank(resolved) if resolved.bank_rail_url else None
-        custody = SimCustody(resolved) if resolved.custody_url else None
-        rates = SimRates(resolved) if resolved.fx_rates_url else None
+        # key does. One with no address is left out, and the API runs without it. Which
+        # adapter stands behind each port is the factory's business, not this module's.
+        bank = build_bank_rail(resolved)
+        custody = build_custodian(resolved)
+        rates = build_rate_source(resolved)
         db = Database(create_engine(resolved, application_name="corridor-api"))
         redis = RedisStore(create_redis(resolved), resolved.redis_key_prefix)
         app.state.container = Container(

@@ -14,12 +14,12 @@ from corridor import identity
 from corridor.identity import Principal, Scope
 from corridor.payments.errors import AccountNotActive, ProviderUnavailable
 from corridor.payments.models import DepositInstructionRow
-from corridor.payments.types import BANK_PROVIDER, DepositInstruction, FlowKind
+from corridor.payments.types import DepositInstruction, FlowKind
 from corridor.platform.clock import utcnow
 from corridor.platform.db import Database
 from corridor.platform.logging import get_logger
 from corridor.platform.money import get_asset
-from corridor.providers import BankRail, Custodian, ProviderError
+from corridor.providers import BankRail, Custodian, ProviderError, is_bank_rail
 
 log = get_logger(__name__)
 
@@ -156,7 +156,7 @@ async def _find(
 
 def _instruction(row: RowMapping) -> DepositInstruction:
     # The bank issues accounts and the custodian addresses; there is no third provider.
-    kind: FlowKind = "bank" if row["provider"] == BANK_PROVIDER else "chain"
+    kind: FlowKind = "bank" if is_bank_rail(row["provider"]) else "chain"
     return DepositInstruction(
         user_id=row["user_id"],
         asset=row["asset_code"],

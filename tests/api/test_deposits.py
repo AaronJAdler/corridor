@@ -168,7 +168,9 @@ async def deposit(
     instructions = await api.get(INSTRUCTIONS, params={"asset": "USD"}, headers=user.headers)
     account = sim.app.state.sim.bank._virtual_account_of[user.id, "USD"]
     assert instructions.status_code == 200, instructions.text
-    await payments.apply_bank_deposit_received(db, await sim.bank_deposit(account, amount))
+    await payments.apply_bank_deposit_received(
+        db, await sim.bank_deposit(account, amount), provider="simbank"
+    )
     listed = await api.get(DEPOSITS, params={"limit": 1}, headers=user.headers)
     return str(listed.json()["items"][0]["id"])
 

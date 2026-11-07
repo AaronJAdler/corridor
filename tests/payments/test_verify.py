@@ -45,7 +45,7 @@ async def findings(db: Database, **options: Any) -> list[ledger.Finding]:
 async def in_suspense(db: Database, sim: Sim, amount: str = "40.00") -> dict[str, Any]:
     """A bank deposit to an account nobody was given, booked to suspense."""
     data = await sim.bank_deposit("va_nobody", amount)
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
     return data
 
 

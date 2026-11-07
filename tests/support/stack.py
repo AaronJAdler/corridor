@@ -549,8 +549,9 @@ def _registry(
 
 
 def _dying_after(apply: Callable[..., Awaitable[None]], crashes: Crashes) -> Any:
-    async def applied(db: Database, data: Mapping[str, Any]) -> None:
-        await apply(db, data)
+    async def applied(db: Database, data: Mapping[str, Any], **provider: Any) -> None:
+        # Whatever the route adds, the provider among it, goes on to the real function.
+        await apply(db, data, **provider)
         crashes.at("webhook.after_apply")
 
     return applied

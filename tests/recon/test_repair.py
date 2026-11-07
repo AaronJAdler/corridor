@@ -421,7 +421,7 @@ async def test_a_recall_on_a_custodians_statement_is_not_given_to_the_bank_retur
     something the bank's return can be made of, and is left for a person."""
     given: list[Any] = []
 
-    async def record(_db: Any, data: Any) -> None:
+    async def record(_db: Any, data: Any, **_provider: Any) -> None:
         given.append(data)
 
     monkeypatch.setattr(payments, "apply_bank_deposit_returned", record)

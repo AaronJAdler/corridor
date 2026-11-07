@@ -418,7 +418,9 @@ async def test_a_withdrawal_is_seen_through_to_completion(
     )
 
     await sim.advance(30)
-    await payments.apply_payout_completed(db, await sim.last_event("payout.completed"))
+    await payments.apply_payout_completed(
+        db, await sim.last_event("payout.completed"), provider="simbank"
+    )
 
     done = (await api.get(one, headers=maria.headers)).json()
     assert (done["status"], done["amount"], done["failure_reason"]) == ("completed", "100.00", None)

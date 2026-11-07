@@ -24,7 +24,7 @@ from corridor import payments
 from corridor.platform.db import Database
 from corridor.platform.logging import get_logger
 from corridor.platform.money import format_amount
-from corridor.providers import ProviderTransaction
+from corridor.providers import ProviderTransaction, is_bank_rail
 from corridor.recon import breaks
 from corridor.recon.types import Break, BreakKind, Finding, Sent
 
@@ -122,7 +122,7 @@ async def _apply_recall(
     restricted, and the deposit is recorded as returned. Only a bank takes a deposit
     back; a recall read on any other statement is left for a person.
     """
-    if provider != payments.BANK_PROVIDER:
+    if not is_bank_rail(provider):
         return
     await payments.apply_bank_deposit_returned(
         db,
@@ -132,6 +132,7 @@ async def _apply_recall(
             "amount": format_amount(line.amount, line.asset_code),
             "reason": STATEMENT_REASON,
         },
+        provider=provider,
     )
 
 
@@ -139,7 +140,7 @@ async def _apply_result(db: Database, provider: str, sent: Sent) -> None:
     """Hand a provider's payout to the function its webhook would have reached."""
     amount = format_amount(sent.amount, sent.asset)
     said = {"reference": sent.reference, "asset": sent.asset, "amount": amount}
-    if provider == payments.BANK_PROVIDER:
+    if is_bank_rail(provider):
         if sent.status == "completed":
             await payments.apply_payout_completed(
                 db,
@@ -149,11 +150,13 @@ async def _apply_result(db: Database, provider: str, sent: Sent) -> None:
                     "fee": format_amount(sent.fee, sent.asset),
                     "settled_at": sent.settled_at.isoformat() if sent.settled_at else "",
                 },
+                provider=provider,
             )
         elif sent.status == "failed":
             await payments.apply_payout_failed(
                 db,
                 {**said, "payout_id": sent.id, "failure_reason": sent.failure_reason or "failed"},
+                provider=provider,
             )
         return
     if sent.status == "completed":

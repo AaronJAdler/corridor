@@ -408,7 +408,9 @@ async def a_person(
     )
     assert instructions.status_code == 200, instructions.text
     account = simulator.app.state.sim.bank._virtual_account_of[user.id, "USD"]
-    await payments.apply_bank_deposit_received(db, await simulator.bank_deposit(account, funds))
+    await payments.apply_bank_deposit_received(
+        db, await simulator.bank_deposit(account, funds), provider="simbank"
+    )
     deposits = await api.get("/v1/deposits", headers=user.headers)
 
     transfer = await created(

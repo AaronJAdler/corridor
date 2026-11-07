@@ -157,7 +157,9 @@ async def test_the_sweeper_does_nothing_to_a_withdrawal_that_is_settled(
     withdrawal = await held_bank_withdrawal(db, charging, bank, maria)
     await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
     await advance(sim, clock, SWEEP_AFTER)
-    await payments.apply_payout_completed(db, await sim.last_event("payout.completed"))
+    await payments.apply_payout_completed(
+        db, await sim.last_event("payout.completed"), provider="simbank"
+    )
     before = await withdrawal_row(db, withdrawal.id)
 
     assert await payments.sweep_payouts(db, bank, custody, charging) == 0
@@ -185,7 +187,9 @@ async def test_sweeping_twice_settles_once(
 
     assert await payments.sweep_payouts(db, bank, custody, charging) == 1
     assert await payments.sweep_payouts(db, bank, custody, charging) == 0
-    await payments.apply_payout_completed(db, await sim.last_event("payout.completed"))
+    await payments.apply_payout_completed(
+        db, await sim.last_event("payout.completed"), provider="simbank"
+    )
 
     assert await settlement(db) == 399_75
     assert await count(db, "journal_entries") == 3

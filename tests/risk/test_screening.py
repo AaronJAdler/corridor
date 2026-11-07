@@ -385,7 +385,7 @@ async def test_a_bank_deposit_from_a_listed_sender_goes_to_suspense_for_an_opera
     data = await bank_deposit(db, sim, bank, custody, maria)
     await listed(db, "name", data["sender_name"], outcome)
 
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     # The money did arrive, and it is nobody's until an operator has looked.
     assert await available(db, maria) == 0
@@ -413,8 +413,8 @@ async def test_a_bank_deposit_from_a_listed_sender_delivered_twice_is_suspended_
     data = await bank_deposit(db, sim, bank, custody, maria)
     await listed(db, "name", data["sender_name"])
 
-    await payments.apply_bank_deposit_received(db, data)
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     assert await suspense(db) == 250_00
     assert len(await reviews(db)) == 1
@@ -430,7 +430,7 @@ async def test_a_bank_deposit_from_a_sender_who_is_not_listed_is_credited(
     data = await bank_deposit(db, sim, bank, custody, maria)
     await listed(db, "name", "Someone Else")
 
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     assert await available(db, maria) == 250_00
     assert await suspense(db) == 0

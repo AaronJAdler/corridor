@@ -22,7 +22,7 @@ from corridor.platform.config import Settings
 from corridor.platform.db import Database, create_engine
 from corridor.platform.logging import configure_logging, get_logger
 from corridor.platform.metrics import OUTBOX_DEAD, OUTBOX_OLDEST_PENDING_SECONDS, OUTBOX_PENDING
-from corridor.providers import BankRail, Custodian, SimBank, SimCustody
+from corridor.providers import BankRail, Custodian, build_bank_rail, build_custodian
 from corridor.worker.jobs import build_jobs
 from corridor.worker.scheduler import Job, Scheduler
 from corridor.worker.webhook_routes import build_webhook_registry
@@ -227,8 +227,8 @@ def run(settings: Settings) -> None:
 async def _serve(settings: Settings) -> None:
     # As in the API: a provider with an address and no key refuses to be built, and one
     # with no address is left out.
-    bank = SimBank(settings) if settings.bank_rail_url else None
-    custody = SimCustody(settings) if settings.custody_url else None
+    bank = build_bank_rail(settings)
+    custody = build_custodian(settings)
     db = Database(create_engine(settings, application_name="corridor-worker"))
     worker = Worker(
         db,

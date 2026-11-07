@@ -34,7 +34,6 @@ from corridor.payments.errors import (
 from corridor.payments.events import ProviderEvent, amount_of, parse, reason_code
 from corridor.payments.models import DepositRow
 from corridor.payments.types import (
-    BANK_PROVIDER,
     CUSTODY_PROVIDER,
     Deposit,
     FlowKind,
@@ -53,6 +52,7 @@ from corridor.platform.pagination import (
     decode_cursor,
     encode_cursor,
 )
+from corridor.providers import flow_kind, require_bank_rail
 
 log = get_logger(__name__)
 
@@ -115,8 +115,14 @@ class _ChainDepositFailed(ProviderEvent):
     reason: str
 
 
-async def apply_bank_deposit_received(db: Database, data: Mapping[str, Any]) -> None:
-    """A bank deposit has arrived: record it and credit it, once.
+async def apply_bank_deposit_received(
+    db: Database, data: Mapping[str, Any], *, provider: str
+) -> None:
+    """A bank deposit has arrived through ``provider``: record it and credit it, once.
+
+    ``provider`` is the bank rail that said so: the name on the path the event came in on.
+    The row, the ledger account that holds the money and the audit record carry it, and two
+    bank rails that give a deposit the same id have two deposits.
 
     The row is inserted before anything is posted, and an event whose row already exists
     credits nothing. A concurrent copy of the event waits on that insert until the first
@@ -126,11 +132,12 @@ async def apply_bank_deposit_received(db: Database, data: Mapping[str, Any]) -> 
     deposit id with another asset or another amount is not a repeat of the first, and is
     refused aloud instead of being taken for one.
     """
+    require_bank_rail(provider)
     event = parse(_BankDepositReceived, data)
     amount = _amount(event.amount, event.asset, "bank")
 
     async def work(session: AsyncSession) -> None:
-        user_id = await _attribute(session, BANK_PROVIDER, event.virtual_account_id, event.asset)
+        user_id = await _attribute(session, provider, event.virtual_account_id, event.asset)
         await _lock_owner(session, user_id)
         screened = await risk.screen_party(session, kind="name", value=event.sender_name)
         deposit = await _insert(
@@ -138,14 +145,14 @@ async def apply_bank_deposit_received(db: Database, data: Mapping[str, Any]) -> 
             user_id=user_id,
             asset=event.asset,
             amount=amount,
-            provider=BANK_PROVIDER,
+            provider=provider,
             provider_ref=event.deposit_id,
             kind="bank",
             status="pending",
             tx_hash=None,
         )
         if deposit is None:
-            check_same(await _lock(session, BANK_PROVIDER, event.deposit_id), event.asset, amount)
+            check_same(await _lock(session, provider, event.deposit_id), event.asset, amount)
             return
         await _credit_screened(session, deposit, user_id, screened)
 
@@ -264,12 +271,12 @@ async def apply_statement_deposit(
     suspense when it arrived at nobody's. That nothing was screened is written to the
     audit record of the credit, as ``screened: false``, for whoever reviews it later.
     """
-    kind: FlowKind
+    kind = flow_kind(provider)
     party: risk.PartyKind
-    if provider == BANK_PROVIDER:
-        kind, party = "bank", "name"
-    elif provider == CUSTODY_PROVIDER:
-        kind, party = "chain", "address"
+    if kind == "bank":
+        party = "name"
+    elif kind == "chain":
+        party = "address"
     else:
         raise ValueError(f"no deposits arrive through {provider!r}")
     if not provider_ref:
@@ -519,7 +526,7 @@ async def find_deposit(
 
 
 async def record_returned_unseen(
-    session: AsyncSession, provider_ref: str, asset: str, amount: int
+    session: AsyncSession, provider: str, provider_ref: str, asset: str, amount: int
 ) -> RowMapping | None:
     """Record a bank deposit that was returned before it was ever received, as returned.
 
@@ -533,7 +540,7 @@ async def record_returned_unseen(
         user_id=None,
         asset=asset,
         amount=amount,
-        provider=BANK_PROVIDER,
+        provider=provider,
         provider_ref=provider_ref,
         kind="bank",
         status="returned",

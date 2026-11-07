@@ -392,6 +392,36 @@ async def test_a_provider_with_no_secret_configured_accepts_nothing(
     assert await stored_events(db) == []
 
 
+async def test_a_delivery_named_for_a_provider_whose_scheme_is_not_implemented_is_refused(
+    settings: Settings, db: Database
+) -> None:
+    """``increase`` is a provider Corridor knows by name and cannot yet verify. Whatever the
+    delivery carries, signed with a secret that is configured or not, nothing of it is
+    believed or kept."""
+    body = envelope("evt_1")
+
+    async with serving(with_secrets(settings)) as http:
+        answers = [
+            await deliver(http, body, sign(secret, body), path="/v1/webhooks/increase")
+            for secret in (BANK_SECRET, CUSTODY_SECRET)
+        ]
+        standard = await deliver(
+            http,
+            body,
+            None,
+            path="/v1/webhooks/increase",
+            headers={
+                "webhook-id": "evt_1",
+                "webhook-timestamp": str(unix()),
+                "webhook-signature": "v1,AAAA",
+            },
+        )
+
+    for response in (*answers, standard):
+        assert (response.status_code, response.json()) == (401, REFUSED)
+    assert await stored_events(db) == []
+
+
 async def test_during_a_rotation_both_secrets_are_accepted(
     settings: Settings, db: Database
 ) -> None:

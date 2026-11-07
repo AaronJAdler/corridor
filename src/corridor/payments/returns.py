@@ -23,9 +23,10 @@ from corridor.payments import deposits, withdrawals
 from corridor.payments.errors import DepositNotReceived
 from corridor.payments.events import ProviderEvent, parse, reason_code
 from corridor.payments.transfers import MONEY_OUT_LOCK
-from corridor.payments.types import BANK_PROVIDER, SuspenseSettlement
+from corridor.payments.types import SuspenseSettlement
 from corridor.platform.db import Database, advisory_xact_lock, lock_key
 from corridor.platform.logging import get_logger
+from corridor.providers import is_bank_rail, require_bank_rail
 
 log = get_logger(__name__)
 
@@ -44,8 +45,10 @@ class _BankDepositReturned(ProviderEvent):
     reason: str
 
 
-async def apply_bank_deposit_returned(db: Database, data: Mapping[str, Any]) -> None:
-    """The sending bank recalled a deposit: reverse it, once.
+async def apply_bank_deposit_returned(
+    db: Database, data: Mapping[str, Any], *, provider: str
+) -> None:
+    """The sending bank recalled a deposit that came through ``provider``: reverse it, once.
 
     An entry point. The locks are taken in the order every money path takes them: the
     user's money-out lock, so that nothing else is spending the balance this is about to
@@ -55,6 +58,7 @@ async def apply_bank_deposit_returned(db: Database, data: Mapping[str, Any]) -> 
     A return can arrive before its deposit. There is then nothing to reverse, and the
     deposit is recorded as returned already, so that it credits nothing when it arrives.
     """
+    require_bank_rail(provider)
     event = parse(_BankDepositReturned, data)
     amount = deposits.bank_amount(event.amount, event.asset)
     reason = reason_code(event.reason)
@@ -63,10 +67,10 @@ async def apply_bank_deposit_returned(db: Database, data: Mapping[str, Any]) -> 
         # Read without a lock first, only to learn whose money-out lock comes before the
         # row lock. A deposit's user changes once at most, when an operator releases it
         # from suspense, and that is looked for again below, under the row's lock.
-        seen = await deposits.find_deposit(session, BANK_PROVIDER, event.deposit_id)
+        seen = await deposits.find_deposit(session, provider, event.deposit_id)
         if seen is None:
             unseen = await deposits.record_returned_unseen(
-                session, event.deposit_id, event.asset, amount
+                session, provider, event.deposit_id, event.asset, amount
             )
             if unseen is None:
                 # Received by a transaction that committed between the read and the
@@ -77,7 +81,7 @@ async def apply_bank_deposit_returned(db: Database, data: Mapping[str, Any]) -> 
             log.warning("deposit.returned_before_received", deposit_id=str(unseen["id"]))
             await audit.record(
                 session,
-                actor=audit.Actor.provider(BANK_PROVIDER),
+                actor=audit.Actor.provider(provider),
                 action="deposit.returned",
                 principal_id=None,
                 resource_type="deposit",
@@ -93,7 +97,7 @@ async def apply_bank_deposit_returned(db: Database, data: Mapping[str, Any]) -> 
             return
         if seen["user_id"] is not None:
             await advisory_xact_lock(session, [lock_key(MONEY_OUT_LOCK, seen["user_id"])])
-        deposit = await deposits.lock_deposit(session, BANK_PROVIDER, event.deposit_id)
+        deposit = await deposits.lock_deposit(session, provider, event.deposit_id)
         if deposit is None:
             raise RuntimeError(f"deposit {seen['id']} was recorded and is gone")
         deposits.check_same(deposit, event.asset, amount)
@@ -120,7 +124,7 @@ async def apply_bank_deposit_returned(db: Database, data: Mapping[str, Any]) -> 
         await deposits.set_status(session, deposit["id"], "returned")
         await audit.record(
             session,
-            actor=audit.Actor.provider(BANK_PROVIDER),
+            actor=audit.Actor.provider(provider),
             action="deposit.returned",
             principal_id=deposit["user_id"],
             resource_type="deposit",
@@ -184,11 +188,13 @@ async def apply_statement_return(
     when it does arrive, exactly as when a return overtakes its deposit. A deposit that is
     recorded after all is left to its own events, and the answer says so.
     """
-    if provider != BANK_PROVIDER:
+    if not is_bank_rail(provider):
         raise ValueError(f"no deposits are returned through {provider!r}")
 
     async def work(session: AsyncSession) -> Literal["recorded", "known"]:
-        unseen = await deposits.record_returned_unseen(session, provider_ref, asset, amount)
+        unseen = await deposits.record_returned_unseen(
+            session, provider, provider_ref, asset, amount
+        )
         if unseen is None:
             return "known"
         await audit.record(

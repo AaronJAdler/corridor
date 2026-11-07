@@ -13,13 +13,17 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from corridor.platform.db import Base
+from corridor.webhooks.types import Provider
 
 
 class WebhookEventRow(Base):
     __tablename__ = "webhook_events"
     __table_args__ = (
         UniqueConstraint("provider", "event_id"),
-        CheckConstraint("provider IN ('simbank', 'simcustody')", name="provider"),
+        CheckConstraint(
+            "provider IN (" + ", ".join(f"'{provider.value}'" for provider in Provider) + ")",
+            name="provider",
+        ),
         CheckConstraint("event_id <> ''", name="event_id"),
         CheckConstraint("type <> ''", name="type"),
         CheckConstraint("outcome IN ('processed', 'ignored')", name="outcome"),

@@ -664,6 +664,9 @@ async def test_the_providers_are_read_with_no_transaction_open(
 
         def __getattr__(self, name: str) -> Any:
             call = getattr(self._inner, name)
+            if not callable(call):
+                # The provider's name, for one: the run asks it whose statement it is reading.
+                return call
 
             async def watched(*arguments: Any, **named: Any) -> Any:
                 found = await rows(

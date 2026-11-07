@@ -276,7 +276,8 @@ class WorkerDied(Exception):
 class _NeverAsked:
     """A provider that is never reached: the call that would ask it ends the worker."""
 
-    name = "nobody"
+    def __init__(self, name: str) -> None:
+        self.name = name
 
     async def create_payout(self, **_arguments: Any) -> NoReturn:
         raise WorkerDied
@@ -288,9 +289,11 @@ class _NeverAsked:
 async def leave_submitting(db: Database, withdrawal_id: uuid.UUID) -> None:
     """Leave a held withdrawal as a worker does that dies after marking it as being sent
     and before asking the provider: ``submitting``, with nothing at the provider."""
-    nobody: Any = _NeverAsked()
+    # Each is the provider a withdrawal of its kind goes to, so that it is the one asked.
+    bank: Any = _NeverAsked("simbank")
+    custody: Any = _NeverAsked("simcustody")
     try:
-        await payments.submit_withdrawal(db, nobody, nobody, withdrawal_id)
+        await payments.submit_withdrawal(db, bank, custody, withdrawal_id)
     except WorkerDied:
         return
     raise AssertionError(f"withdrawal {withdrawal_id} was not held, so nothing was asked")

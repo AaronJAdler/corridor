@@ -45,6 +45,15 @@ DEFAULT_WITHDRAWAL_MIN_FEE: Final[Mapping[str, str]] = {
     "USDC": "0.15",
 }
 
+# The one address the Increase sandbox adapter may call. Compared exactly: a different
+# scheme, case, port, path, trailing slash, user-info or sub-domain is a different address.
+# The key's prefix is not used to tell the environments apart, because Increase's
+# documentation does not say that it marks one.
+INCREASE_SANDBOX_URL: Final = "https://sandbox.increase.com"
+
+# What can stand behind the bank rail port: the simulator, or the Increase sandbox.
+BankRailProvider = Literal["sim", "increase_sandbox"]
+
 # Which process the settings are for. The API is the one that takes requests; the worker
 # runs the outbox and the scheduled jobs; a tool is a command run from a shell, such as
 # `corridor verify-ledger`.
@@ -191,6 +200,19 @@ class Settings(BaseSettings):
     fx_rates_api_key: SecretStr | None = None
     provider_timeout_seconds: float = Field(default=5.0, gt=0)
 
+    # Which implementation stands behind each provider port. "sim" is the simulator in this
+    # repository, and is the default everywhere. A sandbox adapter talks to a real
+    # provider's test environment, where no real money moves. Custody and rates have no
+    # sandbox adapter, so "sim" is all they accept.
+    bank_rail_provider: BankRailProvider = "sim"
+    custody_provider: Literal["sim"] = "sim"
+    fx_rates_provider: Literal["sim"] = "sim"
+
+    # Increase, for bank_rail_provider = "increase_sandbox". The address is a setting only
+    # so that a wrong one is refused by name: it must be exactly INCREASE_SANDBOX_URL.
+    increase_base_url: str = INCREASE_SANDBOX_URL
+    increase_api_key: SecretStr | None = None
+
     # The secrets that sign each provider's webhooks. A list, so that a secret can be
     # rotated: the new one is added before the provider starts using it.
     # An empty or a short secret would verify a forged webhook as readily as a real one,
@@ -289,6 +311,32 @@ class Settings(BaseSettings):
                 + ", ".join(free)
                 + " while withdrawal_fee_bps is 0"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _sandbox_mode_is_safe(self) -> Self:
+        """Refuse, in every environment, a sandbox mode that could reach anything else.
+
+        The process does not start with the Increase sandbox selected unless the address is
+        exactly the sandbox's, a key is present, and the environment is not production.
+        Each message names settings and never repeats a value.
+        """
+        if self.bank_rail_provider != "increase_sandbox":
+            return self
+        problems: list[str] = []
+        if self.increase_base_url != INCREASE_SANDBOX_URL:
+            problems.append(
+                "increase_base_url must be exactly the Increase sandbox address"
+                " when bank_rail_provider is increase_sandbox"
+            )
+        if self.increase_api_key is None:
+            problems.append(
+                "increase_api_key must be set when bank_rail_provider is increase_sandbox"
+            )
+        if self.environment == "production":
+            problems.append("bank_rail_provider must be sim when environment is production")
+        if problems:
+            raise ValueError("not a safe sandbox configuration: " + "; ".join(problems))
         return self
 
     @model_validator(mode="after")

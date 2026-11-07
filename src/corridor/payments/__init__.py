@@ -68,7 +68,6 @@ from corridor.payments.returns import (
 from corridor.payments.sweeper import sweep_payouts
 from corridor.payments.transfers import create_transfer, get_transfer, list_transfers
 from corridor.payments.types import (
-    BANK_PROVIDER,
     CUSTODY_PROVIDER,
     Beneficiary,
     Deposit,
@@ -92,7 +91,6 @@ from corridor.payments.withdrawals import (
 )
 
 __all__ = [
-    "BANK_PROVIDER",
     "CUSTODY_PROVIDER",
     "MAX_MEMO_LENGTH",
     "AccountNotActive",

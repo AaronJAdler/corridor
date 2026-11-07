@@ -258,7 +258,7 @@ async def test_the_bank_taking_back_a_released_deposit_takes_it_from_the_user_it
     deposit = await suspended(db)
     await approve(db, bruno, await ask_release(db, ana, deposit, maria))
 
-    await payments.apply_bank_deposit_returned(db, recalled(deposit))
+    await payments.apply_bank_deposit_returned(db, recalled(deposit), provider="simbank")
 
     assert (await available(db, maria), await suspense(db), await settlement(db)) == (0, 0, 0)
     *_, reversal = await deposit_entries(db, deposit)
@@ -276,7 +276,7 @@ async def test_the_bank_taking_back_a_released_deposit_that_was_spent_books_what
     await approve(db, bruno, await ask_release(db, ana, deposit, maria))
     await send(db, settings, maria, joao, 50_00)
 
-    await payments.apply_bank_deposit_returned(db, recalled(deposit))
+    await payments.apply_bank_deposit_returned(db, recalled(deposit), provider="simbank")
 
     assert (await available(db, maria), await suspense(db), await settlement(db)) == (0, 0, 0)
     assert await balance_of(db, AccountKind.USER_RECEIVABLE, owner=maria) == 50_00
@@ -290,7 +290,7 @@ async def test_the_bank_taking_back_a_deposit_an_adjustment_returned_takes_nothi
     deposit = await suspended(db)
     await approve(db, bruno, await ask_return(db, ana, deposit))
 
-    await payments.apply_bank_deposit_returned(db, recalled(deposit))
+    await payments.apply_bank_deposit_returned(db, recalled(deposit), provider="simbank")
 
     assert (await suspense(db), await settlement(db)) == (0, 0)
     assert len(await deposit_entries(db, deposit)) == 2
@@ -301,7 +301,7 @@ async def test_a_deposit_the_bank_took_back_can_no_longer_be_released_or_returne
 ) -> None:
     deposit = await suspended(db)
     release, back = await ask_release(db, ana, deposit, maria), await ask_return(db, ana, deposit)
-    await payments.apply_bank_deposit_returned(db, recalled(deposit))
+    await payments.apply_bank_deposit_returned(db, recalled(deposit), provider="simbank")
 
     for pending in (release, back):
         with pytest.raises(DepositNotInSuspense):

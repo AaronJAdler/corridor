@@ -6,6 +6,7 @@ here because the worker is the only module above both.
 """
 
 from collections.abc import Awaitable, Callable, Mapping
+from functools import partial
 from typing import Any
 
 from corridor import payments
@@ -19,11 +20,15 @@ Apply = Callable[[Database, Mapping[str, Any]], Awaitable[None]]
 def build_webhook_registry() -> WebhookRegistry:
     """The handler of every provider event this version acts on. An event of any other type
     is stored and ignored."""
+    # The bank handlers are told which bank rail spoke: the name on the path it delivered to.
+    # A rail whose events these are routes its own, once its adapter reads them.
+    bank = Provider.SIMBANK
+    named = bank.value
     routes: tuple[tuple[Provider, str, Apply], ...] = (
-        (Provider.SIMBANK, "deposit.received", payments.apply_bank_deposit_received),
-        (Provider.SIMBANK, "deposit.returned", payments.apply_bank_deposit_returned),
-        (Provider.SIMBANK, "payout.completed", payments.apply_payout_completed),
-        (Provider.SIMBANK, "payout.failed", payments.apply_payout_failed),
+        (bank, "deposit.received", partial(payments.apply_bank_deposit_received, provider=named)),
+        (bank, "deposit.returned", partial(payments.apply_bank_deposit_returned, provider=named)),
+        (bank, "payout.completed", partial(payments.apply_payout_completed, provider=named)),
+        (bank, "payout.failed", partial(payments.apply_payout_failed, provider=named)),
         (Provider.SIMCUSTODY, "deposit.detected", payments.apply_chain_deposit_detected),
         (Provider.SIMCUSTODY, "deposit.confirmed", payments.apply_chain_deposit_confirmed),
         (Provider.SIMCUSTODY, "deposit.failed", payments.apply_chain_deposit_failed),

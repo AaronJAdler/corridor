@@ -15,6 +15,7 @@ from corridor.providers.http import (
     require_echo,
     segment,
 )
+from corridor.providers.names import SIM_RATES
 from corridor.providers.types import Rate
 
 
@@ -30,7 +31,7 @@ class _RateDocument(Document):
 class SimRates:
     """Implements ``RateSource``."""
 
-    name: Final = "simfx"
+    name: Final = SIM_RATES
 
     def __init__(self, settings: Settings, *, client: httpx.AsyncClient | None = None) -> None:
         self._http = ProviderClient(

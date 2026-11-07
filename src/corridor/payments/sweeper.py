@@ -146,6 +146,7 @@ async def _sweep(
             db,
             withdrawal_id=withdrawal.id,
             kind=withdrawal.kind,
+            provider=withdrawal.provider,
             asset=found.asset_code,
             amount=found.amount,
             provider_ref=found.id,
@@ -157,6 +158,7 @@ async def _sweep(
             db,
             withdrawal_id=withdrawal.id,
             kind=withdrawal.kind,
+            provider=withdrawal.provider,
             asset=found.asset_code,
             amount=found.amount,
             provider_ref=found.id,
@@ -172,11 +174,9 @@ async def _find(
 ) -> tuple[Payout, ...] | tuple[CustodyWithdrawal, ...]:
     """What the withdrawal's provider holds under its reference."""
     if withdrawal.kind == "bank":
-        if bank is None:
-            raise handlers.not_configured("bank")
+        bank = handlers.require_bank(bank, withdrawal.provider)
         return await bank.find_payouts(str(withdrawal.id))
-    if custody is None:
-        raise handlers.not_configured("chain")
+    custody = handlers.require_custodian(custody, withdrawal.provider)
     return await custody.find_withdrawals(str(withdrawal.id))
 
 
@@ -185,9 +185,7 @@ async def _get(
 ) -> Payout | CustodyWithdrawal:
     """The payout the withdrawal was recorded as, read from its provider."""
     if withdrawal.kind == "bank":
-        if bank is None:
-            raise handlers.not_configured("bank")
+        bank = handlers.require_bank(bank, withdrawal.provider)
         return await bank.get_payout(provider_ref)
-    if custody is None:
-        raise handlers.not_configured("chain")
+    custody = handlers.require_custodian(custody, withdrawal.provider)
     return await custody.get_withdrawal(provider_ref)

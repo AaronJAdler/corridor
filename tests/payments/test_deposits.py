@@ -73,7 +73,7 @@ async def test_a_bank_deposit_is_credited_to_the_user_whose_account_it_arrived_a
 ) -> None:
     data = await received(db, sim, bank, custody, maria)
 
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     assert await available(db, maria) == 250_00
     assert await settlement(db) == 250_00
@@ -94,7 +94,7 @@ async def test_a_credited_deposit_is_announced_and_audited(
 ) -> None:
     data = await received(db, sim, bank, custody, maria)
 
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     (row,) = await deposit_rows(db)
     (event,) = await rows(db, "SELECT topic, payload FROM outbox_events")
@@ -117,7 +117,7 @@ async def test_a_bank_deposit_applied_five_times_is_credited_once(
     data = await received(db, sim, bank, custody, maria)
 
     for _ in range(5):
-        await payments.apply_bank_deposit_received(db, data)
+        await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     assert await available(db, maria) == 250_00
     assert await settlement(db) == 250_00
@@ -131,7 +131,9 @@ async def test_a_bank_deposit_applied_twenty_times_at_once_is_credited_once(
 ) -> None:
     data = await received(db, sim, bank, custody, maria)
 
-    await asyncio.gather(*(payments.apply_bank_deposit_received(db, data) for _ in range(20)))
+    await asyncio.gather(
+        *(payments.apply_bank_deposit_received(db, data, provider="simbank") for _ in range(20))
+    )
 
     assert await available(db, maria) == 250_00
     assert await count(db, "deposits") == 1
@@ -145,8 +147,8 @@ async def test_two_deposits_to_one_account_are_two_credits(
     first = await received(db, sim, bank, custody, maria, "10.00")
     second = await received(db, sim, bank, custody, maria, "5.50")
 
-    await payments.apply_bank_deposit_received(db, first)
-    await payments.apply_bank_deposit_received(db, second)
+    await payments.apply_bank_deposit_received(db, first, provider="simbank")
+    await payments.apply_bank_deposit_received(db, second, provider="simbank")
 
     assert await available(db, maria) == 15_50
     assert await count(db, "deposits") == 2
@@ -157,7 +159,7 @@ async def test_a_deposit_to_an_account_nobody_was_given_goes_to_suspense(
 ) -> None:
     data = await sim.bank_deposit("va_nobody", "40.00")
 
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     assert await suspense(db) == 40_00
     assert await settlement(db) == 40_00
@@ -175,7 +177,7 @@ async def test_a_deposit_in_another_asset_than_its_account_goes_to_suspense(
 ) -> None:
     data = {**await received(db, sim, bank, custody, maria), "asset": "MXN"}
 
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     assert await suspense(db, "MXN") == 250_00
     assert (await available(db, maria, "USD"), await available(db, maria, "MXN")) == (0, 0)
@@ -188,7 +190,7 @@ async def test_the_customer_reference_in_the_payload_does_not_decide_who_is_cred
 ) -> None:
     data = {**await received(db, sim, bank, custody, maria), "customer_reference": str(joao.id)}
 
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     assert (await available(db, maria), await available(db, joao)) == (250_00, 0)
 
@@ -198,7 +200,7 @@ async def test_a_customer_reference_does_not_attribute_a_deposit_to_an_unknown_a
 ) -> None:
     data = {**await sim.bank_deposit("va_nobody", "40.00"), "customer_reference": str(maria.id)}
 
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     assert await available(db, maria) == 0
     assert await suspense(db) == 40_00
@@ -210,7 +212,7 @@ async def test_a_custody_address_id_does_not_attribute_a_bank_deposit(
     address = await instruction_for(db, maria, "USDC", bank, custody)
     data = await sim.bank_deposit(address.provider_ref, "40.00")
 
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     assert await available(db, maria) == 0
     assert await suspense(db) == 40_00
@@ -230,7 +232,7 @@ async def test_an_account_of_the_same_name_at_another_provider_attributes_nothin
         )
     data = await sim.bank_deposit("va_same", "40.00")
 
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     assert await available(db, joao) == 0
     assert await suspense(db) == 40_00
@@ -243,7 +245,7 @@ async def test_a_restricted_user_can_still_receive_a_deposit(
         await identity.restrict_user(session, maria.id, "under review")
     data = await received(db, sim, bank, custody, maria)
 
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     assert await available(db, maria) == 250_00
     assert await user_status(db, maria) == "restricted"
@@ -275,7 +277,7 @@ async def test_a_bank_deposit_that_is_not_what_the_contract_says_is_refused(
     data = {**await received(db, sim, bank, custody, maria), **change}
 
     with pytest.raises(MalformedProviderEvent):
-        await payments.apply_bank_deposit_received(db, data)
+        await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     assert await count(db, "deposits") == 0
     assert await count(db, "journal_entries") == 0
@@ -288,7 +290,7 @@ async def test_a_bank_deposit_with_a_field_missing_is_refused_without_repeating_
     del data["amount"]
 
     with pytest.raises(MalformedProviderEvent) as refusal:
-        await payments.apply_bank_deposit_received(db, data)
+        await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     assert "amount" in str(refusal.value)
     assert data["deposit_id"] not in str(refusal.value)
@@ -556,7 +558,7 @@ async def test_two_providers_that_give_their_deposits_the_same_id_are_both_credi
     # Each provider numbers its own deposits, and nothing keeps their numbers apart.
     on_chain = {**await confirmed(sim), "deposit_id": at_bank["deposit_id"]}
 
-    await payments.apply_bank_deposit_received(db, at_bank)
+    await payments.apply_bank_deposit_received(db, at_bank, provider="simbank")
     await payments.apply_chain_deposit_confirmed(db, on_chain)
 
     assert await available(db, maria) == 250_00
@@ -577,7 +579,9 @@ async def test_two_providers_that_give_their_deposits_the_same_id_are_both_credi
 async def test_a_user_reads_their_own_deposit_and_nobody_elses(
     db: Database, sim: Sim, bank: SimBank, custody: SimCustody, maria: User, joao: User
 ) -> None:
-    await payments.apply_bank_deposit_received(db, await received(db, sim, bank, custody, maria))
+    await payments.apply_bank_deposit_received(
+        db, await received(db, sim, bank, custody, maria), provider="simbank"
+    )
     (row,) = await deposit_rows(db)
 
     async with db.transaction() as session:
@@ -601,10 +605,14 @@ async def test_deposits_are_listed_newest_first_a_page_at_a_time(
 ) -> None:
     for amount in ("1.00", "2.00", "3.00"):
         await payments.apply_bank_deposit_received(
-            db, await received(db, sim, bank, custody, maria, amount)
+            db, await received(db, sim, bank, custody, maria, amount), provider="simbank"
         )
-    await payments.apply_bank_deposit_received(db, await received(db, sim, bank, custody, joao))
-    await payments.apply_bank_deposit_received(db, await sim.bank_deposit("va_nobody", "9.00"))
+    await payments.apply_bank_deposit_received(
+        db, await received(db, sim, bank, custody, joao), provider="simbank"
+    )
+    await payments.apply_bank_deposit_received(
+        db, await sim.bank_deposit("va_nobody", "9.00"), provider="simbank"
+    )
 
     async with db.transaction() as session:
         first = await payments.list_deposits(session, acting_as(maria), limit=2)
@@ -641,10 +649,10 @@ async def test_a_repeated_bank_deposit_with_another_amount_or_asset_is_refused(
     change: dict[str, Any],
 ) -> None:
     data = await received(db, sim, bank, custody, maria)
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     with pytest.raises(ProviderEventMismatch):
-        await payments.apply_bank_deposit_received(db, {**data, **change})
+        await payments.apply_bank_deposit_received(db, {**data, **change}, provider="simbank")
 
     assert await available(db, maria) == 250_00
     assert await count(db, "deposits") == 1
@@ -693,7 +701,7 @@ async def test_a_bank_deposit_for_a_closed_account_goes_to_suspense_with_a_revie
     data = await received(db, sim, bank, custody, maria)
     await close(db, maria)
 
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     # The money did arrive, so it is booked: to nobody, for an operator to send back.
     assert (await available(db, maria), await suspense(db), await settlement(db)) == (
@@ -753,7 +761,7 @@ async def test_a_deposit_from_a_denied_sender_to_a_closed_account_keeps_the_scre
         await risk.add_to_denylist(session, kind="name", value=data["sender_name"], outcome="deny")
     await close(db, maria)
 
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     assert (await review_of(db))["outcome"] == "deny"
 
@@ -765,7 +773,7 @@ async def test_a_restricted_account_still_receives_its_deposits(
     async with db.transaction() as session:
         await identity.restrict_user(session, maria.id, "under review")
 
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     assert (await available(db, maria), await suspense(db)) == (250_00, 0)
 
@@ -794,7 +802,7 @@ async def test_a_deposit_waits_for_its_owners_money_out_lock(
         await advisory_xact_lock(holder, [lock_key("money_out", maria.id)])
         with pytest.raises(DBAPIError) as failure:
             if arrives == "bank":
-                await payments.apply_bank_deposit_received(impatient_db, data)
+                await payments.apply_bank_deposit_received(impatient_db, data, provider="simbank")
             elif arrives == "chain":
                 await payments.apply_chain_deposit_confirmed(impatient_db, data)
             else:

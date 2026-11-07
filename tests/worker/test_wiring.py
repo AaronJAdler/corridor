@@ -16,7 +16,7 @@ from corridor.outbox import Dispatcher
 from corridor.platform.clock import ManualClock
 from corridor.platform.config import Settings
 from corridor.platform.db import Database
-from corridor.providers import SimBank, SimCustody
+from corridor.providers import SimBank, SimCustody, factory
 from corridor.webhooks import Envelope, Provider, WebhookEvent
 from corridor.worker import Scheduler, build_jobs, build_registry
 from corridor.worker import main as worker_main
@@ -102,11 +102,11 @@ async def outbox_rows(db: Database) -> list[dict[str, Any]]:
 async def test_each_provider_event_is_handed_to_its_payment_function_with_the_events_data(
     db: Database, monkeypatch: pytest.MonkeyPatch, provider: str, event_type: str, function: str
 ) -> None:
-    calls: list[tuple[str, Database, Mapping[str, Any]]] = []
+    calls: list[tuple[str, Database, Mapping[str, Any], Mapping[str, Any]]] = []
 
     def recording(name: str) -> Any:
-        async def apply(given: Database, data: Mapping[str, Any]) -> None:
-            calls.append((name, given, data))
+        async def apply(given: Database, data: Mapping[str, Any], **told: Any) -> None:
+            calls.append((name, given, data, told))
 
         return apply
 
@@ -118,7 +118,10 @@ async def test_each_provider_event_is_handed_to_its_payment_function_with_the_ev
     assert handler is not None
     await handler(db, event)
 
-    assert calls == [(function, db, {"deposit_id": "dep_1", "amount": "1.00"})]
+    # A bank rail's handlers are told which rail spoke, by the name on the path it came in on.
+    # The one custodian's are not told anything.
+    told = {"provider": provider} if provider == "simbank" else {}
+    assert calls == [(function, db, {"deposit_id": "dep_1", "amount": "1.00"}, told)]
 
 
 def test_no_other_provider_event_has_a_handler() -> None:
@@ -335,8 +338,9 @@ def served(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
         def request_stop(self) -> None:
             pass
 
-    monkeypatch.setattr(worker_main, "SimBank", Bank)
-    monkeypatch.setattr(worker_main, "SimCustody", Custody)
+    # The worker no longer names an adapter: it asks the factory, which is what builds them.
+    monkeypatch.setattr(factory, "SimBank", Bank)
+    monkeypatch.setattr(factory, "SimCustody", Custody)
     monkeypatch.setattr(worker_main, "build_registry", registry)
     monkeypatch.setattr(worker_main, "build_jobs", jobs)
     monkeypatch.setattr(worker_main, "Worker", StoppedWorker)

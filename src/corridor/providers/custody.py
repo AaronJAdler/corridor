@@ -24,6 +24,7 @@ from corridor.providers.http import (
     statement,
     statement_params,
 )
+from corridor.providers.names import SIM_CUSTODY
 from corridor.providers.types import DepositAddress, ProviderStatement, Withdrawal
 
 
@@ -74,7 +75,7 @@ def _withdrawal(document: _WithdrawalDocument) -> Withdrawal:
 class SimCustody:
     """Implements ``Custodian``."""
 
-    name: Final = "simcustody"
+    name: Final = SIM_CUSTODY
 
     def __init__(self, settings: Settings, *, client: httpx.AsyncClient | None = None) -> None:
         self._http = ProviderClient(

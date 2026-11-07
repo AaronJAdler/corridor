@@ -24,7 +24,7 @@ from corridor.ledger import AccountKind, EntryDraft, PostingDraft, credit, debit
 from corridor.payments import beneficiaries, withdrawals
 from corridor.payments.errors import MalformedProviderEvent, ProviderEventMismatch
 from corridor.payments.events import ProviderEvent, amount_of, parse, reason_code
-from corridor.payments.types import BANK_PROVIDER, CUSTODY_PROVIDER, FlowKind, Withdrawal
+from corridor.payments.types import CUSTODY_PROVIDER, FlowKind, Withdrawal
 from corridor.platform.clock import utcnow
 from corridor.platform.db import Database
 from corridor.platform.logging import get_logger
@@ -35,6 +35,7 @@ from corridor.providers import (
     ProviderMisconfigured,
     ProviderOutcomeUnknown,
     ProviderRejected,
+    require_bank_rail,
 )
 from corridor.providers import Withdrawal as CustodyWithdrawal
 
@@ -59,7 +60,6 @@ _PROVIDER_ACCOUNT: Final[Mapping[str, AccountKind]] = {
     "bank": AccountKind.BANK_SETTLEMENT,
     "chain": AccountKind.CUSTODY_OMNIBUS,
 }
-_PROVIDER_OF: Final[Mapping[str, str]] = {"bank": BANK_PROVIDER, "chain": CUSTODY_PROVIDER}
 
 
 class _PayoutCompleted(ProviderEvent):
@@ -162,9 +162,11 @@ async def submit_withdrawal(
                 # It stays held and this event is done: clearing the review writes
                 # another, and rejecting it gives the funds back.
                 return None
-            if (bank if row["kind"] == "bank" else custody) is None:
-                # Before the mark: the withdrawal stays held, and its user can still cancel.
-                raise not_configured(row["kind"])
+            # Before the mark: the withdrawal stays held, and its user can still cancel.
+            if row["kind"] == "bank":
+                require_bank(bank, row["provider"])
+            else:
+                require_custodian(custody, row["provider"])
             withdrawal = await withdrawals.advance(session, withdrawal_id, status="submitting")
         elif row["status"] == "submitting":
             withdrawal = withdrawals.as_withdrawal(row)
@@ -184,9 +186,8 @@ async def submit_withdrawal(
     try:
         # No transaction is open here. The amount alone goes out: the fee stays.
         if withdrawal.kind == "bank":
-            if bank is None:
-                # Held by a process that had a bank and retried by one that has none.
-                raise not_configured("bank")
+            # Held by a process that had a bank and retried by one that has another or none.
+            bank = require_bank(bank, withdrawal.provider)
             if token is None:
                 raise LookupError(f"withdrawal {withdrawal_id} has no beneficiary to pay")
             provider_ref = (
@@ -199,8 +200,7 @@ async def submit_withdrawal(
                 )
             ).id
         else:
-            if custody is None:
-                raise not_configured("chain")
+            custody = require_custodian(custody, withdrawal.provider)
             if withdrawal.to_address is None:
                 raise LookupError(f"withdrawal {withdrawal_id} has no address to send to")
             provider_ref = (
@@ -246,29 +246,32 @@ async def _sent_before(
     reference = str(withdrawal.id)
     found: tuple[Payout, ...] | tuple[CustodyWithdrawal, ...]
     if withdrawal.kind == "bank":
-        if bank is None:
-            raise not_configured("bank")
+        bank = require_bank(bank, withdrawal.provider)
         found = await bank.find_payouts(reference)
     else:
-        if custody is None:
-            raise not_configured("chain")
+        custody = require_custodian(custody, withdrawal.provider)
         found = await custody.find_withdrawals(reference)
     if len(found) > 1:
         raise ProviderOutcomeUnknown(
             "several payouts under one reference",
-            provider=_PROVIDER_OF[withdrawal.kind],
+            provider=withdrawal.provider,
             operation="find_payouts" if withdrawal.kind == "bank" else "find_withdrawals",
         )
     return found[0].id if found else None
 
 
-async def apply_payout_completed(db: Database, data: Mapping[str, Any]) -> None:
-    """The bank paid a withdrawal out: settle it, once."""
+async def apply_payout_completed(db: Database, data: Mapping[str, Any], *, provider: str) -> None:
+    """The bank rail ``provider`` paid a withdrawal out: settle it, once.
+
+    Only a withdrawal that went out by ``provider`` is settled by its word.
+    """
+    require_bank_rail(provider)
     event = parse(_PayoutCompleted, data)
     await settle(
         db,
         withdrawal_id=_reference(event.reference),
         kind="bank",
+        provider=provider,
         asset=event.asset,
         amount=amount_of(event.amount, event.asset),
         provider_ref=event.payout_id,
@@ -283,6 +286,7 @@ async def apply_withdrawal_completed(db: Database, data: Mapping[str, Any]) -> N
         db,
         withdrawal_id=_reference(event.reference),
         kind="chain",
+        provider=CUSTODY_PROVIDER,
         asset=event.asset,
         amount=amount_of(event.amount, event.asset),
         provider_ref=event.withdrawal_id,
@@ -290,13 +294,18 @@ async def apply_withdrawal_completed(db: Database, data: Mapping[str, Any]) -> N
     )
 
 
-async def apply_payout_failed(db: Database, data: Mapping[str, Any]) -> None:
-    """The bank could not pay a withdrawal out: give the funds back, once."""
+async def apply_payout_failed(db: Database, data: Mapping[str, Any], *, provider: str) -> None:
+    """The bank rail ``provider`` could not pay a withdrawal out: give the funds back, once.
+
+    Only a withdrawal that went out by ``provider`` is released by its word.
+    """
+    require_bank_rail(provider)
     event = parse(_PayoutFailed, data)
     await fail(
         db,
         withdrawal_id=_reference(event.reference),
         kind="bank",
+        provider=provider,
         asset=event.asset,
         amount=amount_of(event.amount, event.asset),
         provider_ref=event.payout_id,
@@ -311,6 +320,7 @@ async def apply_withdrawal_failed(db: Database, data: Mapping[str, Any]) -> None
         db,
         withdrawal_id=_reference(event.reference),
         kind="chain",
+        provider=CUSTODY_PROVIDER,
         asset=event.asset,
         amount=amount_of(event.amount, event.asset),
         provider_ref=event.withdrawal_id,
@@ -323,6 +333,7 @@ async def settle(
     *,
     withdrawal_id: uuid.UUID,
     kind: FlowKind,
+    provider: str,
     asset: str,
     amount: int,
     provider_ref: str,
@@ -335,7 +346,9 @@ async def settle(
     """
 
     async def work(session: AsyncSession) -> None:
-        row = await _lock_and_check(session, withdrawal_id, kind, asset, amount, provider_ref)
+        row = await _lock_and_check(
+            session, withdrawal_id, kind, provider, asset, amount, provider_ref
+        )
         if row["status"] not in _RESERVED:
             if row["status"] != "completed":
                 # Paid out by the provider after the funds went back to the user. Nothing
@@ -397,6 +410,7 @@ async def fail(
     *,
     withdrawal_id: uuid.UUID,
     kind: FlowKind,
+    provider: str,
     asset: str,
     amount: int,
     provider_ref: str,
@@ -408,7 +422,9 @@ async def fail(
     reason = reason_code(reason)
 
     async def work(session: AsyncSession) -> None:
-        row = await _lock_and_check(session, withdrawal_id, kind, asset, amount, provider_ref)
+        row = await _lock_and_check(
+            session, withdrawal_id, kind, provider, asset, amount, provider_ref
+        )
         if row["status"] not in _RESERVED:
             if row["status"] == "completed":
                 log.error("withdrawal.failed_after_settlement", withdrawal_id=str(withdrawal_id))
@@ -543,12 +559,47 @@ async def _reject(session: AsyncSession, withdrawal_id: uuid.UUID, code: str) ->
     )
 
 
-def not_configured(kind: FlowKind) -> ProviderMisconfigured:
-    """What is raised when a withdrawal needs a provider this process was not given."""
+def not_configured(kind: FlowKind, provider: str) -> ProviderMisconfigured:
+    """What is raised when a withdrawal needs a provider this process was not given.
+
+    ``provider`` is the one the withdrawal's row names, which is the one that is missing.
+    """
     return ProviderMisconfigured(
         "no bank rail is configured" if kind == "bank" else "no custodian is configured",
-        provider=_PROVIDER_OF[kind],
+        provider=provider,
         operation="create_payout" if kind == "bank" else "create_withdrawal",
+    )
+
+
+def require_bank(bank: BankRail | None, provider: str) -> BankRail:
+    """The bank rail a withdrawal's provider may be asked, or a refusal to ask any.
+
+    A withdrawal goes only to the provider its row names. A process that was given none, or
+    was given another (the bank rail setting changed while one was in flight), is not asked
+    to stand in: the funds stay reserved, as they do when a provider cannot be reached, and
+    the withdrawal waits for a process that has its provider.
+    """
+    if bank is None:
+        raise not_configured("bank", provider)
+    if bank.name != provider:
+        raise _another_provider(provider, "create_payout")
+    return bank
+
+
+def require_custodian(custody: Custodian | None, provider: str) -> Custodian:
+    """The custodian a withdrawal's provider may be asked, on the same terms as the bank."""
+    if custody is None:
+        raise not_configured("chain", provider)
+    if custody.name != provider:
+        raise _another_provider(provider, "create_withdrawal")
+    return custody
+
+
+def _another_provider(provider: str, operation: str) -> ProviderMisconfigured:
+    return ProviderMisconfigured(
+        "this process's provider is not the one the withdrawal went by",
+        provider=provider,
+        operation=operation,
     )
 
 
@@ -563,6 +614,7 @@ async def _lock_and_check(
     session: AsyncSession,
     withdrawal_id: uuid.UUID,
     kind: FlowKind,
+    provider: str,
     asset: str,
     amount: int,
     provider_ref: str,
@@ -571,8 +623,8 @@ async def _lock_and_check(
     about that withdrawal: another provider, another asset, another amount or another
     payout. Money is never settled or released on a mismatch."""
     row = await _lock(session, withdrawal_id)
-    if (row["kind"], row["provider"]) != (kind, _PROVIDER_OF[kind]):
-        raise ProviderEventMismatch(f"withdrawal {withdrawal_id} did not go out by {kind}")
+    if (row["kind"], row["provider"]) != (kind, provider):
+        raise ProviderEventMismatch(f"withdrawal {withdrawal_id} did not go out by {provider}")
     if (row["asset_code"], row["amount"]) != (asset, amount):
         raise ProviderEventMismatch(
             f"withdrawal {withdrawal_id}: the provider's asset or amount is not the recorded one"

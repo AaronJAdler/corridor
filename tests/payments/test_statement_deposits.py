@@ -154,7 +154,7 @@ async def test_a_statement_deposit_whose_event_arrived_first_changes_nothing(
 ) -> None:
     instruction = await instruction_for(db, maria, "USD", bank, custody)
     data = await sim.bank_deposit(instruction.provider_ref, "250.00")
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     await payments.apply_statement_deposit(
         db,
@@ -165,7 +165,7 @@ async def test_a_statement_deposit_whose_event_arrived_first_changes_nothing(
         amount=250_00,
     )
     # And the event after the statement, the other way about.
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     assert await available(db, maria) == 250_00
     assert len(await entries(db, "deposit", f"simbank:{data['deposit_id']}")) == 1
@@ -269,6 +269,7 @@ async def test_a_deposit_returned_before_it_was_seen_is_not_credited_from_the_st
     await payments.apply_bank_deposit_returned(
         db,
         {"deposit_id": "dep_statement_1", "asset": "USD", "amount": "250.00", "reason": "recalled"},
+        provider="simbank",
     )
 
     await payments.apply_statement_deposit(db, **line)
@@ -335,6 +336,7 @@ async def test_a_deposit_recorded_as_returned_from_a_statement_is_never_credited
             "sender_name": SENDER,
             "reference": "INV-2041",
         },
+        provider="simbank",
     )
 
     assert (await available(db, maria), await settlement(db)) == (0, 0)

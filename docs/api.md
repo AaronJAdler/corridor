@@ -2847,8 +2847,10 @@ HTTP 200
 
 ### `POST /v1/webhooks/{provider}`
 
-Where a provider reports what happened to a deposit or a payout. `provider` is `simbank` or
-`simcustody`; any other name is `404`. The contract for the events themselves is in
+Where a provider reports what happened to a deposit or a payout. `provider` is `simbank`,
+`simcustody` or `increase`; any other name is `404`. Until the Increase signature scheme is
+implemented, every delivery to `increase` is refused with `401`, whatever it carries, and
+nothing is stored. The contract for the events themselves is in
 [provider-api.md](provider-api.md).
 
 The endpoint takes no bearer credential. A delivery is authenticated by its signature:

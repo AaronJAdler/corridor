@@ -110,6 +110,12 @@ def _secrets_for(settings: Settings, provider: Provider) -> list[bytes]:
     return [secret.get_secret_value().encode() for secret in configured]
 
 
+# Providers whose deliveries are named, and stored once believed, but whose signing scheme this
+# version does not verify. Corridor's own scheme is not theirs, so a delivery that passed it
+# would prove nothing about who sent it: every delivery is refused until the scheme is written.
+_UNVERIFIED: Final = frozenset({Provider.INCREASE})
+
+
 def verify_delivery(
     settings: Settings, provider: Provider, signature_headers: Sequence[str], body: bytes
 ) -> None:
@@ -119,6 +125,9 @@ def verify_delivery(
     the request body exactly as it arrived. The reason for a refusal goes to the log and
     nowhere else.
     """
+    if provider in _UNVERIFIED:
+        log.warning("webhook.signature_scheme_unsupported", provider=provider.value)
+        raise InvalidSignature
     refusal = signature.check(
         secrets=_secrets_for(settings, provider),
         headers=signature_headers,

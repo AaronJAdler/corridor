@@ -81,7 +81,9 @@ async def test_a_withdrawal_that_is_paid_out_keeps_its_usage(
     await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
     await advance(sim, clock, 30)
 
-    await payments.apply_payout_completed(db, await sim.last_event("payout.completed"))
+    await payments.apply_payout_completed(
+        db, await sim.last_event("payout.completed"), provider="simbank"
+    )
 
     assert not await released(db, withdrawal)
     with pytest.raises(LimitExceeded):
@@ -104,7 +106,9 @@ async def test_a_withdrawal_the_provider_could_not_pay_out_gives_its_usage_back(
     await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
     await advance(sim, clock, 30)
 
-    await payments.apply_payout_failed(db, await sim.last_event("payout.failed"))
+    await payments.apply_payout_failed(
+        db, await sim.last_event("payout.failed"), provider="simbank"
+    )
 
     assert await released(db, withdrawal)
     await send(db, settings, maria, joao, 500_00)

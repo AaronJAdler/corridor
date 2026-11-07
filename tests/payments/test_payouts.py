@@ -325,7 +325,7 @@ async def test_a_completed_payout_settles_with_both_fees(
     withdrawal = await submitted_bank(db, charging, bank, custody, maria)
     data = await payout_completed(sim, clock)
 
-    await payments.apply_payout_completed(db, data)
+    await payments.apply_payout_completed(db, data, provider="simbank")
 
     # 500.00 came in. 100.00 went to the beneficiary and 0.25 to the bank; Corridor kept 1.50.
     assert (await available(db, maria), await held(db, maria)) == (398_50, 0)
@@ -362,7 +362,9 @@ async def test_a_completed_payout_without_a_corridor_fee_has_no_revenue_posting(
     free = settings.model_copy(update={"withdrawal_min_fee": {}})
     withdrawal = await submitted_bank(db, free, bank, custody, maria)
 
-    await payments.apply_payout_completed(db, await payout_completed(sim, clock))
+    await payments.apply_payout_completed(
+        db, await payout_completed(sim, clock), provider="simbank"
+    )
 
     _hold, settle = await entries(db, "withdrawal", str(withdrawal.id))
     assert settle["postings"] == [
@@ -385,7 +387,7 @@ async def test_a_payout_the_provider_charged_nothing_for_has_no_expense_posting(
     withdrawal = await submitted_bank(db, charging, bank, custody, maria)
     data = {**await payout_completed(sim, clock), "fee": "0.00"}
 
-    await payments.apply_payout_completed(db, data)
+    await payments.apply_payout_completed(db, data, provider="simbank")
 
     _hold, settle = await entries(db, "withdrawal", str(withdrawal.id))
     assert settle["postings"] == [
@@ -435,7 +437,7 @@ class OvertakenBank:
         payout = await self._inner.create_payout(**arguments)
         await advance(self._sim, self._clock, 30)
         await payments.apply_payout_completed(
-            self._db, await self._sim.last_event("payout.completed")
+            self._db, await self._sim.last_event("payout.completed"), provider="simbank"
         )
         return payout
 
@@ -481,9 +483,11 @@ async def test_a_completion_applied_many_times_settles_once(
     await submitted_bank(db, charging, bank, custody, maria)
     data = await payout_completed(sim, clock)
 
-    await asyncio.gather(*(payments.apply_payout_completed(db, data) for _ in range(20)))
+    await asyncio.gather(
+        *(payments.apply_payout_completed(db, data, provider="simbank") for _ in range(20))
+    )
     for _ in range(3):
-        await payments.apply_payout_completed(db, data)
+        await payments.apply_payout_completed(db, data, provider="simbank")
 
     assert await settlement(db) == 399_75
     assert await revenue_and_expense(db) == (1_50, 25)
@@ -508,7 +512,7 @@ async def test_a_failed_payout_releases_the_funds(
     await advance(sim, clock, 30)
     data = await sim.last_event("payout.failed")
 
-    await payments.apply_payout_failed(db, data)
+    await payments.apply_payout_failed(db, data, provider="simbank")
 
     row = await withdrawal_row(db, withdrawal.id)
     assert (row["status"], row["failure_reason"]) == ("failed", "account_closed")
@@ -549,6 +553,7 @@ async def test_a_failure_that_arrives_before_the_submission_is_recorded_still_re
             "amount": "100.00",
             "failure_reason": "account_closed",
         },
+        provider="simbank",
     )
     await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
 
@@ -576,10 +581,10 @@ async def test_repeated_and_reordered_events_change_nothing_after_the_first(
         "failure_reason": "account_closed",
     }
 
-    await payments.apply_payout_completed(db, completed)
-    await payments.apply_payout_failed(db, failed)
-    await payments.apply_payout_failed(db, failed)
-    await payments.apply_payout_completed(db, completed)
+    await payments.apply_payout_completed(db, completed, provider="simbank")
+    await payments.apply_payout_failed(db, failed, provider="simbank")
+    await payments.apply_payout_failed(db, failed, provider="simbank")
+    await payments.apply_payout_completed(db, completed, provider="simbank")
     await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
 
     assert await status_of(db, withdrawal) == "completed"
@@ -611,8 +616,10 @@ async def test_a_completion_after_a_failure_does_not_settle_what_was_released(
         "settled_at": "2026-01-15T12:00:30Z",
     }
 
-    await asyncio.gather(*(payments.apply_payout_failed(db, failed) for _ in range(20)))
-    await payments.apply_payout_completed(db, completed)
+    await asyncio.gather(
+        *(payments.apply_payout_failed(db, failed, provider="simbank") for _ in range(20))
+    )
+    await payments.apply_payout_completed(db, completed, provider="simbank")
 
     assert await status_of(db, withdrawal) == "failed"
     assert (await available(db, maria), await held(db, maria)) == (500_00, 0)
@@ -637,6 +644,7 @@ async def test_a_completion_for_a_canceled_withdrawal_moves_nothing(
             "fee": "0.25",
             "settled_at": "2026-01-15T12:00:30Z",
         },
+        provider="simbank",
     )
 
     assert await status_of(db, withdrawal) == "canceled"
@@ -668,7 +676,7 @@ async def test_a_completion_that_disagrees_with_the_withdrawal_is_refused_and_no
     data = {**await payout_completed(sim, clock), **change}
 
     with pytest.raises(ProviderEventMismatch):
-        await payments.apply_payout_completed(db, data)
+        await payments.apply_payout_completed(db, data, provider="simbank")
     failed = {
         "payout_id": data["payout_id"],
         "reference": data["reference"],
@@ -677,7 +685,7 @@ async def test_a_completion_that_disagrees_with_the_withdrawal_is_refused_and_no
         "failure_reason": "account_closed",
     }
     with pytest.raises(ProviderEventMismatch):
-        await payments.apply_payout_failed(db, failed)
+        await payments.apply_payout_failed(db, failed, provider="simbank")
 
     assert await status_of(db, withdrawal) == "submitted"
     assert (await available(db, maria), await held(db, maria)) == (398_50, 101_50)
@@ -729,10 +737,12 @@ async def test_an_event_for_a_reference_that_is_not_a_withdrawal_is_refused(
     data = await payout_completed(sim, clock)
 
     with pytest.raises(ProviderEventMismatch):
-        await payments.apply_payout_completed(db, {**data, "reference": str(uuid.uuid4())})
+        await payments.apply_payout_completed(
+            db, {**data, "reference": str(uuid.uuid4())}, provider="simbank"
+        )
     for change in ({"reference": "INV-2041"}, {"amount": 100}, {"fee": None}, {"payout_id": ""}):
         with pytest.raises(MalformedProviderEvent):
-            await payments.apply_payout_completed(db, {**data, **change})
+            await payments.apply_payout_completed(db, {**data, **change}, provider="simbank")
 
     assert await status_of(db, withdrawal) == "submitted"
     assert await held(db, maria) == 101_50
@@ -901,7 +911,7 @@ async def test_a_failure_reason_is_kept_only_if_it_is_a_plain_code(
     await advance(sim, clock, 30)
     failed = {**await sim.last_event("payout.failed"), "failure_reason": said}
 
-    await payments.apply_payout_failed(db, failed)
+    await payments.apply_payout_failed(db, failed, provider="simbank")
 
     row = await withdrawal_row(db, withdrawal.id)
     assert (row["status"], row["failure_reason"]) == ("failed", kept)

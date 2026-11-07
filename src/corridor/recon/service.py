@@ -67,10 +67,6 @@ _DEPOSIT_RETURN: Final = "deposit_return"
 _PAID: Final[Mapping[FlowKind, str]] = {"bank": "payout", "chain": "withdrawal"}
 _FEES: Final = frozenset({"payout_fee", "network_fee"})
 
-_PROVIDER: Final[Mapping[FlowKind, str]] = {
-    "bank": payments.BANK_PROVIDER,
-    "chain": payments.CUSTODY_PROVIDER,
-}
 # Where the ledger keeps what is at each kind of provider, and what such a provider moves.
 _SETTLEMENT: Final[Mapping[FlowKind, AccountKind]] = {
     "bank": AccountKind.BANK_SETTLEMENT,
@@ -135,13 +131,20 @@ async def run(
     # No transaction is open while the providers are read.
     if bank is not None:
         view, read = await _read(
-            "bank", _bank_statement(bank), _bank_lookup(bank), in_flight, window_start, window_end
+            "bank",
+            bank.name,
+            _bank_statement(bank),
+            _bank_lookup(bank),
+            in_flight,
+            window_start,
+            window_end,
         )
         views.append(view)
         complete = complete and read
     if custody is not None:
         view, read = await _read(
             "chain",
+            custody.name,
             _custody_statement(custody),
             _custody_lookup(custody),
             in_flight,
@@ -222,6 +225,7 @@ async def catch_up_start(
 
 async def _read(
     kind: FlowKind,
+    provider: str,
     statement_of: _Statement,
     lookup: _Lookup,
     in_flight: list[Withdrawal],
@@ -230,7 +234,6 @@ async def _read(
 ) -> tuple[_View, bool]:
     """One provider's statements and what it holds for the withdrawals in flight, and
     whether all of it could be read."""
-    provider = _PROVIDER[kind]
     complete = True
 
     statements: dict[str, ProviderStatement] = {}

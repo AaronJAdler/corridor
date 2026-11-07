@@ -72,7 +72,7 @@ async def test_a_restricted_user_can_receive_a_deposit(
     data = await sim.bank_deposit(instruction.provider_ref, "250.00")
     await restrict(db, maria)
 
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
 
     assert await available(db, maria) == 250_00
 

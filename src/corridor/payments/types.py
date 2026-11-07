@@ -6,15 +6,15 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Final, Literal
 
+from corridor.providers import SIM_CUSTODY
+from corridor.providers import FlowKind as FlowKind
+
 TransferStatus = Literal["completed"]
 
-# The providers money comes in and goes out through, by the names their ledger accounts,
-# their webhooks and their rows carry.
-BANK_PROVIDER: Final = "simbank"
-CUSTODY_PROVIDER: Final = "simcustody"
-
-# How money arrives or leaves: over a bank rail, or on a chain.
-FlowKind = Literal["bank", "chain"]
+# The one custodian. A bank rail has no constant here: its name is its adapter's, the path
+# its webhooks arrive on, or the row that records it, and ``corridor.providers.names`` says
+# what kind of money a name moves. Only one custodian exists, so only it is named.
+CUSTODY_PROVIDER: Final = SIM_CUSTODY
 
 DepositStatus = Literal["pending", "completed", "suspense", "failed", "returned"]
 # ``submitting`` is the state between deciding to ask the provider and knowing its answer:

@@ -7,16 +7,25 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any, Final
 
+from corridor.providers import INCREASE as INCREASE_NAME
+from corridor.providers import SIM_BANK, SIM_CUSTODY
+
 # The longest body a delivery may have. The largest event in the provider contract is a
 # few hundred bytes; the cap bounds what an unauthenticated request can make the API read.
 MAX_BODY_BYTES: Final = 64 * 1024
 
 
 class Provider(StrEnum):
-    """The providers that deliver webhooks, by the name in the delivery path."""
+    """The providers that deliver webhooks, by the name in the delivery path.
 
-    SIMBANK = "simbank"
-    SIMCUSTODY = "simcustody"
+    The values are the providers' names (``corridor.providers.names``), which is also what
+    their rows carry. A value added here must be allowed by the webhook table's check
+    constraint, which a test compares with this class.
+    """
+
+    SIMBANK = SIM_BANK
+    SIMCUSTODY = SIM_CUSTODY
+    INCREASE = INCREASE_NAME
 
 
 class EventOutcome(StrEnum):

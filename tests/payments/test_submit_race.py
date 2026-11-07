@@ -330,6 +330,7 @@ async def test_a_refusal_does_not_reopen_a_withdrawal_the_provider_failed_meanwh
                 "amount": "100.00",
                 "failure_reason": "account_closed",
             },
+            provider="simbank",
         )
         raise ProviderRejected(
             "invalid_amount", "refused", 422, provider="simbank", operation="create_payout"
@@ -494,6 +495,7 @@ async def test_a_failure_that_arrives_while_the_withdrawal_is_submitting_release
             "amount": "100.00",
             "failure_reason": "account_closed",
         },
+        provider="simbank",
     )
     await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
 
@@ -518,7 +520,9 @@ async def test_a_completion_that_arrives_while_the_withdrawal_is_submitting_sett
         await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
     await advance(sim, clock, 30)
 
-    await payments.apply_payout_completed(db, await sim.last_event("payout.completed"))
+    await payments.apply_payout_completed(
+        db, await sim.last_event("payout.completed"), provider="simbank"
+    )
     await payments.submit_withdrawal(db, bank, custody, withdrawal.id)
 
     assert (await withdrawal_row(db, withdrawal.id))["status"] == "completed"

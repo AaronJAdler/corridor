@@ -24,3 +24,4 @@ their alternatives.
 | [0016](0016-simulators-as-separate-package.md) | Simulated providers in a separate package, behind a written contract |
 | [0017](0017-hand-written-migrations.md) | Hand-written migrations, with triggers and least-privilege grants |
 | [0018](0018-access-tokens-checked-per-request.md) | ES256 access tokens, checked against the database on every request |
+| [0019](0019-provider-mode-and-sandbox-guard.md) | A setting per provider chooses simulator or sandbox, the sandbox address is checked exactly, and CI stays on the simulator |

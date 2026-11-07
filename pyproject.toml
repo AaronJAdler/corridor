@@ -283,6 +283,17 @@ protected_modules = ["corridor.agents.models"]
 allowed_importers = ["corridor.agents"]
 
 [[tool.importlinter.contracts]]
+name = "Provider adapters are private to the providers package"
+type = "protected"
+protected_modules = [
+    "corridor.providers.bank_rail",
+    "corridor.providers.custody",
+    "corridor.providers.fx_rates",
+    "corridor.providers.http",
+]
+allowed_importers = ["corridor.providers"]
+
+[[tool.importlinter.contracts]]
 name = "The simulator never imports production code"
 type = "forbidden"
 source_modules = ["corridor_sim"]

@@ -61,6 +61,7 @@ async def suspended(db: Database, amount: str = "75.00") -> dict[str, Any]:
             "sender_name": "Somebody Else",
             "reference": "INV-1",
         },
+        provider="simbank",
     )
     return await deposit_row(db, reference)
 

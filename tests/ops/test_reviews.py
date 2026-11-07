@@ -81,7 +81,7 @@ async def deposit_under_review(
     instruction = await instruction_for(db, user, "USD", bank, custody)
     data = await sim.bank_deposit(instruction.provider_ref, "250.00")
     await listed(db, "name", data["sender_name"])
-    await payments.apply_bank_deposit_received(db, data)
+    await payments.apply_bank_deposit_received(db, data, provider="simbank")
     (row,) = await rows(db, "SELECT * FROM deposits")
     assert row["status"] == "suspense"
     return row, (await review_of(db, row["id"]))["id"]
@@ -289,6 +289,7 @@ async def test_a_deposit_that_arrived_at_nobodys_account_cannot_be_cleared(
             "sender_name": SENDER,
             "reference": "",
         },
+        provider="simbank",
     )
     (row,) = await rows(db, "SELECT * FROM deposits")
     review = await review_of(db, row["id"])
@@ -313,7 +314,7 @@ async def test_a_deposit_the_bank_took_back_cannot_be_cleared_and_its_review_sta
 ) -> None:
     row, review_id = await deposit_under_review(db, sim, bank, custody, maria)
     await payments.apply_bank_deposit_returned(
-        db, await sim.return_bank_deposit(row["provider_ref"])
+        db, await sim.return_bank_deposit(row["provider_ref"]), provider="simbank"
     )
 
     with pytest.raises(DepositNotInSuspense) as refusal:
@@ -557,11 +558,11 @@ async def test_a_return_that_read_the_deposit_before_it_was_released_is_delivere
     with monkeypatch.context() as patch:
         patch.setattr(deposits_module, "find_deposit", read_before_the_release)
         with pytest.raises(payments.DepositNotReceived):
-            await payments.apply_bank_deposit_returned(db, returned)
+            await payments.apply_bank_deposit_returned(db, returned, provider="simbank")
 
     assert (await available(db, maria), await suspense(db)) == (250_00, 0)
     # Delivered again, it reads the deposit as it now is and takes the money back.
-    await payments.apply_bank_deposit_returned(db, returned)
+    await payments.apply_bank_deposit_returned(db, returned, provider="simbank")
     assert (await available(db, maria), await suspense(db)) == (0, 0)
     (stored,) = await rows(db, "SELECT status FROM deposits")
     assert stored["status"] == "returned"
