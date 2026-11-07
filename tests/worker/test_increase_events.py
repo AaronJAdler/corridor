@@ -19,16 +19,20 @@ from pydantic import SecretStr
 from corridor import payments, webhooks
 from corridor.identity import User
 from corridor.ledger import AccountKind
+from corridor.platform.clock import ManualClock
 from corridor.platform.config import INCREASE_SANDBOX_URL, Settings
 from corridor.platform.db import Database
 from corridor.providers import (
     INCREASE,
     BankEvent,
     IncreaseBank,
+    ListedEvent,
     ProviderMisconfigured,
     SimBank,
 )
 from corridor.webhooks import Envelope, Provider, WebhookEvent
+from corridor.worker import build_jobs
+from corridor.worker.bank_events import BANK_EVENT_POLL_JOB, BankEventPoller
 from corridor.worker.webhook_routes import build_webhook_registry, require_event_source
 from tests.payments.support import (
     add_person,
@@ -56,6 +60,9 @@ class FakeIncrease:
     def __init__(self) -> None:
         self.transfers: dict[str, dict[str, Any]] = {}
         self.inbound: dict[str, dict[str, Any]] = {}
+        # What GET /events lists, oldest first, whatever it is asked.
+        self.events: list[dict[str, Any]] = []
+        self.listings: list[httpx.Request] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         path, method = request.url.path, request.method
@@ -75,6 +82,9 @@ class FakeIncrease:
             for transfer in self.transfers.values():
                 if transfer["id"] == wanted:
                     return httpx.Response(200, json=transfer)
+        if (method, path) == ("GET", "/events"):
+            self.listings.append(request)
+            return httpx.Response(200, json={"data": self.events, "next_cursor": None})
         if method == "GET" and path.startswith("/inbound_ach_transfers/"):
             found = self.inbound.get(path.rsplit("/", 1)[1])
             if found is not None:
@@ -382,6 +392,9 @@ class _ReadsAnything:
     async def resolve_event(self, **_: str) -> tuple[BankEvent, ...]:
         return (BankEvent("deposit.received", {}),)
 
+    async def list_events(self, **_: object) -> tuple[ListedEvent, ...]:
+        return ()
+
 
 @pytest.mark.parametrize("given", [None, _NamedIncreaseWithoutEvents(), _ReadsAnything()])
 def test_only_the_senders_own_adapter_is_asked_what_its_event_means(given: object) -> None:
@@ -417,6 +430,9 @@ async def test_each_resolved_event_reaches_its_payment_function_told_it_was_incr
                 BankEvent("deposit.returned", {"deposit_id": "b"}),
             )
 
+        async def list_events(self, **_: object) -> tuple[ListedEvent, ...]:
+            return ()
+
     handler = build_webhook_registry(Reader()).handler_for(  # type: ignore[arg-type]
         Provider.INCREASE, "ach_transfer.updated"
     )
@@ -437,3 +453,108 @@ async def test_each_resolved_event_reaches_its_payment_function_told_it_was_incr
         ("apply_payout_failed", {"payout_id": "a"}, {"provider": INCREASE}),
         ("apply_bank_deposit_returned", {"deposit_id": "b"}, {"provider": INCREASE}),
     ]
+
+
+# --- listing events instead of receiving them ----------------------------------------------
+
+
+def listed_event(
+    identifier: str, category: str, object_type: str, object_id: str, created_at: str = CREATED
+) -> dict[str, Any]:
+    return {
+        "id": identifier,
+        "created_at": created_at,
+        "category": category,
+        "associated_object_type": object_type,
+        "associated_object_id": object_id,
+        "type": "event",
+    }
+
+
+async def test_a_deposit_reaches_a_worker_that_lists_events_and_receives_no_webhook(
+    db: Database,
+    settings: Settings,
+    fake: FakeIncrease,
+    increase: IncreaseBank,
+    custody: Any,
+    maria: User,
+    clock: ManualClock,
+) -> None:
+    await instruction_for(db, maria, "USD", increase, custody)
+    fake.credit(250_00)
+    fake.events.append(
+        listed_event("event_1", "inbound_ach_transfer.created", "inbound_ach_transfer", INBOUND)
+    )
+
+    await BankEventPoller(increase)(db)
+    await drain(db, settings, bank=increase, custody=custody)
+
+    assert await available(db, maria) == 250_00
+    (stored,) = await rows(db, "SELECT provider, event_id, type FROM webhook_events")
+    assert stored == {
+        "provider": INCREASE,
+        "event_id": "event_1",
+        "type": "inbound_ach_transfer.created",
+    }
+
+
+async def test_an_event_listed_again_or_also_delivered_is_stored_and_applied_once(
+    db: Database,
+    settings: Settings,
+    fake: FakeIncrease,
+    increase: IncreaseBank,
+    custody: Any,
+    maria: User,
+    clock: ManualClock,
+) -> None:
+    await instruction_for(db, maria, "USD", increase, custody)
+    fake.credit(250_00)
+    fake.events.append(
+        listed_event("event_1", "inbound_ach_transfer.created", "inbound_ach_transfer", INBOUND)
+    )
+    poller = BankEventPoller(increase)
+
+    await poller(db)
+    await poller(db)
+    async with db.transaction() as session:
+        # The same event, delivered by webhook as well.
+        await webhooks.record(
+            session,
+            Provider.INCREASE,
+            Envelope("event_1", "inbound_ach_transfer.created", fake.events[0]),
+        )
+    await drain(db, settings, bank=increase, custody=custody)
+
+    assert len(await rows(db, "SELECT id FROM webhook_events")) == 1
+    assert len(await rows(db, "SELECT id FROM deposits")) == 1
+    assert await available(db, maria) == 250_00
+
+
+async def test_the_listing_starts_a_day_back_then_follows_the_newest_event_with_an_overlap(
+    db: Database, fake: FakeIncrease, increase: IncreaseBank, clock: ManualClock
+) -> None:
+    poller = BankEventPoller(increase)
+
+    await poller(db)
+    fake.events.append(
+        listed_event(
+            "event_1", "ach_transfer.updated", "ach_transfer", TRANSFER, "2026-01-15T11:58:00Z"
+        )
+    )
+    await poller(db)
+    await poller(db)
+
+    starts = [listing.url.params["created_at.on_or_after"] for listing in fake.listings]
+    assert starts == [
+        "2026-01-14T12:00:00Z",  # a day before the clock
+        "2026-01-14T12:00:00Z",  # nothing was listed: from where it was
+        "2026-01-15T11:53:00Z",  # five minutes before the newest event
+    ]
+
+
+async def test_only_a_bank_rail_whose_events_are_read_from_its_api_has_a_listing_job(
+    settings: Settings, increase: IncreaseBank, bank: SimBank
+) -> None:
+    assert BANK_EVENT_POLL_JOB in {job.name for job in build_jobs(settings, bank=increase)}
+    assert BANK_EVENT_POLL_JOB not in {job.name for job in build_jobs(settings, bank=bank)}
+    assert BANK_EVENT_POLL_JOB not in {job.name for job in build_jobs(settings)}

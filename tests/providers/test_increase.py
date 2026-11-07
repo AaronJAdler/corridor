@@ -28,6 +28,7 @@ from corridor.providers import (
     ProviderRejected,
 )
 from corridor.providers.increase import (
+    MAX_EVENT_PAGES,
     MAX_STATEMENT_PAGES,
     STATEMENT_DESCRIPTOR,
     idempotency_key_for,
@@ -232,9 +233,91 @@ def test_the_adapter_itself_refuses_any_address_but_the_sandbox(address: str) ->
     assert "not the Increase sandbox address" in str(failure.value)
 
 
-def test_the_adapter_refuses_to_be_built_without_an_account() -> None:
-    with pytest.raises(ProviderMisconfigured):
-        IncreaseBank(settings(increase_account_id=None))
+def account(identifier: str = ACCOUNT, *, status: str = "open") -> dict[str, Any]:
+    return {
+        "id": identifier,
+        "name": "Synthetic",
+        "status": status,
+        "currency": "USD",
+        "bank": "first_internet_bank",
+        "created_at": CREATED,
+        "type": "account",
+    }
+
+
+async def test_without_an_account_id_the_one_open_account_is_found_once_and_used(
+    increase: FakeIncrease,
+) -> None:
+    increase.on("GET", "/accounts", ok({"data": [account()], "next_cursor": None}))
+    increase.on("GET", f"/ach_transfers/{TRANSFER}", ok(ach_transfer()))
+
+    async with adapter(increase, increase_account_id=None) as bank:
+        await bank.get_payout(TRANSFER)
+        await bank.get_payout(TRANSFER)
+
+    looked_up, *rest = increase.requests
+    assert looked_up.url.path == "/accounts"
+    assert looked_up.url.params["status.in"] == "open"
+    assert [request.url.path for request in rest] == [f"/ach_transfers/{TRANSFER}"] * 2
+
+
+async def test_an_account_found_is_the_one_payouts_are_sent_from(increase: FakeIncrease) -> None:
+    increase.on("GET", "/accounts", ok({"data": [account()], "next_cursor": None}))
+    increase.on("POST", "/ach_transfers", ok(ach_transfer()))
+
+    async with adapter(increase, increase_account_id=None) as bank:
+        await bank.create_payout(
+            beneficiary_id=EXTERNAL_ACCOUNT,
+            asset_code="USD",
+            amount=100_00,
+            reference=REFERENCE,
+            idempotency_key=REFERENCE,
+        )
+
+    assert increase.body()["account_id"] == ACCOUNT
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        {"data": [], "next_cursor": None},
+        {"data": [account(), account(OTHER_ACCOUNT)], "next_cursor": None},
+        {"data": [account()], "next_cursor": "more"},
+        # Asked for open accounts, answered a closed one: it is not the one either.
+        {"data": [account(status="closed")], "next_cursor": None},
+    ],
+)
+async def test_a_key_that_reaches_no_account_or_several_sends_nothing_until_one_is_named(
+    increase: FakeIncrease, page: dict[str, Any]
+) -> None:
+    increase.on("GET", "/accounts", ok(page))
+
+    async with adapter(increase, increase_account_id=None) as bank:
+        with pytest.raises(ProviderMisconfigured) as failure:
+            await bank.create_payout(
+                beneficiary_id=EXTERNAL_ACCOUNT,
+                asset_code="USD",
+                amount=100_00,
+                reference=REFERENCE,
+                idempotency_key=REFERENCE,
+            )
+
+    assert "CORRIDOR_INCREASE_ACCOUNT_ID" in str(failure.value)
+    assert [request.method for request in increase.requests] == ["GET"]
+
+
+async def test_a_lookup_that_cannot_be_answered_is_unknown_and_sends_nothing(
+    increase: FakeIncrease,
+) -> None:
+    increase.on("GET", "/accounts", error(500, "internal_server_error"))
+
+    async with adapter(increase, increase_account_id=None) as bank:
+        with pytest.raises(ProviderOutcomeUnknown):
+            await bank.create_virtual_account(
+                customer_reference=CUSTOMER, asset_code="USD", idempotency_key="k"
+            )
+
+    assert [request.method for request in increase.requests] == ["GET"]
 
 
 async def test_it_is_a_bank_rail_whose_events_are_read_from_their_objects(
@@ -1095,3 +1178,92 @@ async def test_an_object_that_cannot_be_read_is_raised_for_the_event_to_be_tried
 
     with pytest.raises(ProviderOutcomeUnknown):
         await resolve(increase, "ach_transfer.updated", "ach_transfer", TRANSFER)
+
+
+# --- listing events ------------------------------------------------------------------------
+
+
+def event(
+    identifier: str,
+    category: str = "inbound_ach_transfer.created",
+    created_at: str = CREATED,
+    object_id: str = INBOUND,
+) -> dict[str, Any]:
+    return {
+        "id": identifier,
+        "created_at": created_at,
+        "category": category,
+        "associated_object_type": category.rsplit(".", 1)[0],
+        "associated_object_id": object_id,
+        "type": "event",
+    }
+
+
+async def test_events_are_listed_by_category_oldest_first_from_a_moment(
+    increase: FakeIncrease,
+) -> None:
+    increase.on("GET", "/events", ok({"data": [event("event_1")], "next_cursor": None}))
+
+    async with adapter(increase) as bank:
+        (listed,) = await bank.list_events(since=START)
+
+    params = increase.requests[0].url.params
+    assert params["category.in"] == (
+        "ach_transfer.created,ach_transfer.updated,"
+        "inbound_ach_transfer.created,inbound_ach_transfer.updated"
+    )
+    assert params["created_at.on_or_after"] == "2026-01-15T00:00:00Z"
+    assert (params["order_by.field"], params["order_by.direction"]) == ("created_at", "ascending")
+    # As a webhook would have carried it, so the two are stored the same.
+    assert listed.payload == event("event_1")
+    assert (listed.id, listed.category) == ("event_1", "inbound_ach_transfer.created")
+    assert listed.created_at == datetime(2026, 1, 15, 12, 0, tzinfo=UTC)
+
+
+async def test_a_listed_event_of_a_category_that_was_not_asked_for_is_passed_over(
+    increase: FakeIncrease,
+) -> None:
+    page = {
+        "data": [event("event_1", "transaction.created"), event("event_2")],
+        "next_cursor": None,
+    }
+    increase.on("GET", "/events", ok(page))
+
+    async with adapter(increase) as bank:
+        listed = await bank.list_events(since=START)
+
+    assert [one.id for one in listed] == ["event_2"]
+
+
+async def test_events_are_read_page_by_page_and_no_further_than_the_bound(
+    increase: FakeIncrease,
+) -> None:
+    pages = [
+        ok({"data": [event(f"event_{n}")], "next_cursor": f"page_{n + 1}"})
+        for n in range(MAX_EVENT_PAGES + 2)
+    ]
+    increase.on("GET", "/events", *pages)
+
+    async with adapter(increase) as bank:
+        listed = await bank.list_events(since=START)
+
+    assert len(listed) == MAX_EVENT_PAGES
+    assert len(increase.requests) == MAX_EVENT_PAGES
+    assert "cursor" not in increase.requests[0].url.params
+    assert increase.requests[1].url.params["cursor"] == "page_1"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{"type": "not_an_event"}, {"id": "event 1"}, {"created_at": "yesterday"}, {"id": ""}],
+)
+async def test_a_listed_event_that_cannot_be_believed_makes_the_listing_unknown(
+    increase: FakeIncrease, changes: dict[str, object]
+) -> None:
+    increase.on(
+        "GET", "/events", ok({"data": [{**event("event_1"), **changes}], "next_cursor": None})
+    )
+
+    async with adapter(increase) as bank:
+        with pytest.raises(ProviderOutcomeUnknown):
+            await bank.list_events(since=START)

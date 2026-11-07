@@ -34,12 +34,19 @@ from corridor.providers.names import (
     is_bank_rail,
     require_bank_rail,
 )
-from corridor.providers.ports import BankEventSource, BankRail, Custodian, RateSource
+from corridor.providers.ports import (
+    BankEventSource,
+    BankRail,
+    Custodian,
+    RateSource,
+    event_source,
+)
 from corridor.providers.types import (
     BankEvent,
     BankEventType,
     Beneficiary,
     DepositAddress,
+    ListedEvent,
     Payout,
     PayoutStatus,
     ProviderStatement,
@@ -68,6 +75,7 @@ __all__ = [
     "DepositAddress",
     "FlowKind",
     "IncreaseBank",
+    "ListedEvent",
     "Payout",
     "PayoutStatus",
     "ProviderError",
@@ -88,6 +96,7 @@ __all__ = [
     "build_bank_rail",
     "build_custodian",
     "build_rate_source",
+    "event_source",
     "flow_kind",
     "is_bank_rail",
     "is_valid_address",

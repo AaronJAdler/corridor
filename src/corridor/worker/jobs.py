@@ -14,7 +14,12 @@ from corridor.platform.metrics import (
     LEDGER_VERIFIER_LAST_RUN,
     RECON_OPEN_BREAKS,
 )
-from corridor.providers import BankRail, Custodian
+from corridor.providers import BankRail, Custodian, event_source
+from corridor.worker.bank_events import (
+    BANK_EVENT_POLL_INTERVAL_SECONDS,
+    BANK_EVENT_POLL_JOB,
+    BankEventPoller,
+)
 from corridor.worker.purge import purge_idempotency_keys
 from corridor.worker.scheduler import Job
 
@@ -52,7 +57,8 @@ def build_jobs(
 ) -> list[Job]:
     """Every job that exists today. The payout sweep is among them only when there is a
     provider to ask: a worker with none has no payouts to read. Reconciliation is among
-    them when it is asked for and there is a provider to compare with."""
+    them when it is asked for and there is a provider to compare with. Listing the bank
+    rail's events is among them when the bank rail's events are read from its API."""
     retention = timedelta(days=settings.outbox_retention_days)
 
     async def purge_finished(db: Database) -> None:
@@ -157,6 +163,13 @@ def build_jobs(
         Job(WEBHOOK_REDACTION_JOB, PURGE_INTERVAL_SECONDS, redact_webhook_payloads),
         Job(LEDGER_VERIFY_JOB, LEDGER_VERIFY_INTERVAL_SECONDS, verify_ledger),
     ]
+    events = event_source(bank)
+    if events is not None:
+        # A bank rail whose events say only what changed can also be asked for them, which
+        # is how they reach a Corridor that its webhooks cannot.
+        jobs.append(
+            Job(BANK_EVENT_POLL_JOB, BANK_EVENT_POLL_INTERVAL_SECONDS, BankEventPoller(events))
+        )
     if bank is not None or custody is not None:
         jobs.append(Job("payments.sweep_payouts", PAYOUT_SWEEP_INTERVAL_SECONDS, sweep_payouts))
         if reconcile:

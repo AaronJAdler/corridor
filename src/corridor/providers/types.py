@@ -138,3 +138,17 @@ class BankEvent:
 
     type: BankEventType
     data: Mapping[str, Any] = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class ListedEvent:
+    """One of a provider's events, as its API lists it rather than as a webhook delivers it.
+
+    ``payload`` is the event as the provider's webhook would carry it, so a listed event and
+    a delivered one are stored the same and deduplicated against each other by ``id``.
+    """
+
+    id: str
+    category: str
+    created_at: datetime
+    payload: Mapping[str, Any]

@@ -213,7 +213,8 @@ class Settings(BaseSettings):
     increase_base_url: str = INCREASE_SANDBOX_URL
     increase_api_key: SecretStr | None = None
     # The Increase account that holds Corridor's money: account numbers are opened on it and
-    # ACH transfers are sent from it. An identifier, not a secret.
+    # ACH transfers are sent from it. An identifier, not a secret. Unset, the adapter uses
+    # the one open account the key reaches, and refuses to guess between several.
     increase_account_id: Annotated[str, Field(pattern=r"^[A-Za-z0-9_]{1,200}$")] | None = None
 
     # The secrets that sign each provider's webhooks. A list, so that a secret can be
@@ -339,10 +340,6 @@ class Settings(BaseSettings):
         if self.increase_api_key is None:
             problems.append(
                 "increase_api_key must be set when bank_rail_provider is increase_sandbox"
-            )
-        if self.increase_account_id is None:
-            problems.append(
-                "increase_account_id must be set when bank_rail_provider is increase_sandbox"
             )
         if self.environment == "production":
             problems.append("bank_rail_provider must be sim when environment is production")

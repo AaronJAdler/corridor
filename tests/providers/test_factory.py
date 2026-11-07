@@ -107,7 +107,7 @@ async def test_the_sandbox_mode_builds_the_increase_adapter_and_never_the_simula
         await bank.aclose()
 
 
-def test_the_sandbox_mode_without_an_account_does_not_start() -> None:
+async def test_the_sandbox_mode_without_an_account_id_builds_and_finds_it_on_first_use() -> None:
     settings = Settings.model_construct(
         bank_rail_provider="increase_sandbox",
         increase_base_url=INCREASE_SANDBOX_URL,
@@ -116,7 +116,7 @@ def test_the_sandbox_mode_without_an_account_does_not_start() -> None:
         provider_timeout_seconds=5.0,
     )
 
-    with pytest.raises(ProviderMisconfigured) as failure:
-        build_bank_rail(settings)
+    bank = build_bank_rail(settings)
 
-    assert "no Increase account" in str(failure.value)
+    assert isinstance(bank, IncreaseBank)
+    await bank.aclose()

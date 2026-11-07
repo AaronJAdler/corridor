@@ -21,6 +21,7 @@ from corridor.providers.types import (
     BankEvent,
     Beneficiary,
     DepositAddress,
+    ListedEvent,
     Payout,
     ProviderStatement,
     Rate,
@@ -92,6 +93,22 @@ class BankEventSource(Protocol):
         """What an event of ``category`` about one object means, in the contract's bank
         events. Empty when it means nothing Corridor acts on yet."""
         ...
+
+    async def list_events(self, *, since: datetime) -> tuple[ListedEvent, ...]:
+        """The events Corridor acts on, created at or after ``since``, oldest first.
+
+        At most a bounded number: a caller that wants the rest asks again from the newest it
+        was given. Reading them from the API is how events reach a Corridor that no webhook
+        can reach, and they are stored as the delivered ones are, so having both does no
+        harm.
+        """
+        ...
+
+
+def event_source(bank: object) -> BankEventSource | None:
+    """``bank`` as a ``BankEventSource``, if it is one. Taking ``object`` lets the check be
+    made of a ``BankRail``: the type checker cannot see that one class may be both."""
+    return bank if isinstance(bank, BankEventSource) else None
 
 
 class Custodian(Protocol):

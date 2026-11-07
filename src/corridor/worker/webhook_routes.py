@@ -22,6 +22,7 @@ from corridor.providers import (
     BankEventType,
     BankRail,
     ProviderMisconfigured,
+    event_source,
 )
 from corridor.webhooks import Provider, WebhookEvent, WebhookHandler, WebhookRegistry
 
@@ -91,13 +92,14 @@ def require_event_source(bank: BankRail | None, provider: str) -> BankEventSourc
     Only an adapter of the provider that sent the event is asked about it: another rail's
     reading of an object id it never issued would be no reading at all.
     """
-    if bank is None or bank.name != provider or not isinstance(bank, BankEventSource):
+    source = event_source(bank)
+    if source is None or source.name != provider:
         raise ProviderMisconfigured(
             "this worker's bank rail cannot read the provider's events",
             provider=provider,
             operation="resolve_event",
         )
-    return bank
+    return source
 
 
 def _reading_the_object(

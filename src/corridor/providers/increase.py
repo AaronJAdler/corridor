@@ -14,6 +14,7 @@ believed is an unknown outcome, never a refusal. Its errors are RFC 9457 documen
 ``type``, and only the types that say the request was refused are read as refusals.
 """
 
+import asyncio
 import hashlib
 from collections.abc import Mapping
 from datetime import datetime
@@ -45,6 +46,7 @@ from corridor.providers.names import INCREASE
 from corridor.providers.types import (
     BankEvent,
     Beneficiary,
+    ListedEvent,
     Payout,
     PayoutStatus,
     ProviderStatement,
@@ -53,6 +55,10 @@ from corridor.providers.types import (
 )
 
 log = get_logger(__name__)
+
+_WHICH_ACCOUNT: Final = (
+    "the key reaches {count} open USD accounts; set CORRIDOR_INCREASE_ACCOUNT_ID to the one to use"
+)
 
 # ACH moves US dollars and nothing else: Increase gives an ACH transfer's currency as USD.
 USD: Final = "USD"
@@ -78,6 +84,8 @@ INBOUND_ACH_TRANSFER_EVENTS: Final = frozenset(
     {"inbound_ach_transfer.created", "inbound_ach_transfer.updated"}
 )
 EVENT_CATEGORIES: Final = ACH_TRANSFER_EVENTS | INBOUND_ACH_TRANSFER_EVENTS
+# How many pages of events one listing reads. The caller asks again for the rest.
+MAX_EVENT_PAGES: Final = 10
 
 # Increase's error types, as the ADR reads them. A type that says the request was refused
 # is a refusal, under a code a caller can branch on. One that says Corridor's credentials or
@@ -267,6 +275,35 @@ class _TransactionsDocument(Document):
     next_cursor: str | None
 
 
+_EVENT_IDENTIFIER: Final = r"^[A-Za-z0-9_.-]{1,255}$"
+
+
+class _EventDocument(Document):
+    id: str = Field(pattern=_EVENT_IDENTIFIER)
+    category: str = Field(pattern=_EVENT_IDENTIFIER)
+    associated_object_type: str = Field(pattern=_EVENT_IDENTIFIER)
+    associated_object_id: str = Field(pattern=_EVENT_IDENTIFIER)
+    created_at: AwareDatetime
+    type: Literal["event"]
+
+
+class _EventsDocument(Document):
+    data: list[_EventDocument]
+    next_cursor: str | None
+
+
+class _AccountDocument(Document):
+    id: str = Field(min_length=1, pattern=r"^[A-Za-z0-9_]{1,200}$")
+    type: Literal["account"]
+    status: Literal["open", "closed"]
+    currency: str
+
+
+class _AccountsDocument(Document):
+    data: list[_AccountDocument]
+    next_cursor: str | None
+
+
 class _BalanceDocument(Document):
     type: Literal["balance_lookup"]
     account_id: str
@@ -357,9 +394,10 @@ class IncreaseBank:
         # builds: whatever made this settings object, this adapter calls only the sandbox.
         if settings.increase_base_url != INCREASE_SANDBOX_URL:
             raise self._misconfigured("increase_base_url is not the Increase sandbox address")
-        if not settings.increase_account_id:
-            raise self._misconfigured("no Increase account is configured")
-        self._account_id = settings.increase_account_id
+        # The account money moves from. Set, it is used as it is; unset, it is the one open
+        # account the key reaches, found on first use (``_ready``).
+        self._account_id = settings.increase_account_id or ""
+        self._finding = asyncio.Lock()
         self._http = ProviderClient(
             provider=self.name,
             base_url=settings.increase_base_url,
@@ -385,6 +423,7 @@ class IncreaseBank:
         operation = "create_virtual_account"
         if asset_code != USD:
             raise self._unsupported(operation)
+        await self._ready()
 
         def convert(document: _AccountNumberDocument) -> VirtualAccount:
             require_echo("account_id", self._account_id, document.account_id)
@@ -492,6 +531,7 @@ class IncreaseBank:
             raise self._unsupported(operation)
         # Refuses anything but a positive int. A dollar's minor unit is Increase's cent.
         major_units(amount, USD)
+        await self._ready()
 
         def convert(document: _ACHTransferDocument) -> Payout:
             require_echo("account_id", self._account_id, document.account_id)
@@ -517,6 +557,8 @@ class IncreaseBank:
         )
 
     async def get_payout(self, payout_id: str) -> Payout:
+        await self._ready()
+
         def convert(document: _ACHTransferDocument) -> Payout:
             require_echo("id", payout_id, document.id)
             require_echo("account_id", self._account_id, document.account_id)
@@ -529,6 +571,7 @@ class IncreaseBank:
     async def find_payouts(self, reference: str) -> tuple[Payout, ...]:
         """The transfers under the key the reference is. Increase documents that a used key
         lists exactly one; more than a page is not believed."""
+        await self._ready()
 
         def convert(document: _ACHTransfersDocument) -> tuple[Payout, ...]:
             if document.next_cursor is not None:
@@ -561,6 +604,7 @@ class IncreaseBank:
             raise ValueError("a statement window ends after it starts")
         if asset_code != USD:
             return ProviderStatement(asset_code, in_utc(start), in_utc(end), (), 0)
+        await self._ready()
         transactions = await self._transactions(start, end)
         references = await self._references(transactions)
         balance = await self._http.get(
@@ -589,6 +633,8 @@ class IncreaseBank:
         state, so an event that is repeated, late or out of order comes to the same thing as
         the latest one, and the payment functions, which are idempotent, do nothing twice.
         """
+        if category in EVENT_CATEGORIES:
+            await self._ready()
         if category in ACH_TRANSFER_EVENTS:
             self._require_type(object_type, "ach_transfer")
 
@@ -616,7 +662,75 @@ class IncreaseBank:
             )
         return ()
 
+    async def list_events(self, *, since: datetime) -> tuple[ListedEvent, ...]:
+        """The events of the categories this adapter reads, oldest first, from ``since``.
+
+        Increase keeps its events listable for 30 days. A category that was not asked for is
+        passed over, whatever the listing says.
+        """
+        params = {
+            "category.in": ",".join(sorted(EVENT_CATEGORIES)),
+            "created_at.on_or_after": timestamp(since),
+            "order_by.field": "created_at",
+            "order_by.direction": "ascending",
+            "limit": str(PAGE_LIMIT),
+        }
+        found: list[ListedEvent] = []
+        cursor: str | None = None
+        for _page in range(MAX_EVENT_PAGES):
+            page = await self._http.get(
+                "list_events",
+                "/events",
+                _EventsDocument,
+                lambda document: document,
+                params=params if cursor is None else {**params, "cursor": cursor},
+            )
+            found.extend(
+                _listed(event) for event in page.data if event.category in EVENT_CATEGORIES
+            )
+            cursor = page.next_cursor
+            if cursor is None:
+                break
+        return tuple(found)
+
     # --- helpers ---------------------------------------------------------------------------
+
+    async def _ready(self) -> None:
+        """Find the account, once, if the settings did not name it.
+
+        Only an account that is unmistakably the one is used: a key that reaches no open
+        account, or more than one, is a configuration that has to say which, and nothing is
+        sent until it does.
+        """
+        if self._account_id:
+            return
+        async with self._finding:
+            # Another call may have found it while this one waited for the lock.
+            await self._find_account()
+
+    async def _find_account(self) -> None:
+        if not self._account_id:
+
+            def the_one(document: _AccountsDocument) -> str:
+                if document.next_cursor is not None:
+                    raise self._misconfigured(_WHICH_ACCOUNT.format(count="more than a page of"))
+                open_accounts = [
+                    account
+                    for account in document.data
+                    if account.status == "open" and account.currency == USD
+                ]
+                if len(open_accounts) != 1:
+                    raise self._misconfigured(_WHICH_ACCOUNT.format(count=len(open_accounts)))
+                return open_accounts[0].id
+
+            self._account_id = await self._http.get(
+                "find_account",
+                "/accounts",
+                _AccountsDocument,
+                the_one,
+                params={"status.in": "open", "limit": str(PAGE_LIMIT)},
+            )
+            log.info("increase.account_found")
 
     def _own[D: _ACHTransferDocument | _InboundACHTransferDocument](
         self, document: D, object_id: str
@@ -702,6 +816,24 @@ class IncreaseBank:
 
     def _misconfigured(self, detail: str) -> ProviderMisconfigured:
         return ProviderMisconfigured(detail, provider=self.name, operation="build")
+
+
+def _listed(event: _EventDocument) -> ListedEvent:
+    """A listed event, with the payload a webhook would have carried for it."""
+    created_at = in_utc(event.created_at)
+    return ListedEvent(
+        id=event.id,
+        category=event.category,
+        created_at=created_at,
+        payload={
+            "id": event.id,
+            "created_at": timestamp(created_at),
+            "category": event.category,
+            "associated_object_type": event.associated_object_type,
+            "associated_object_id": event.associated_object_id,
+            "type": "event",
+        },
+    )
 
 
 def _payout_events(transfer: _ACHTransferDocument) -> tuple[BankEvent, ...]:

@@ -112,11 +112,8 @@ def test_the_sandbox_mode_needs_a_key() -> None:
     assert "increase_api_key" in str(failure.value)
 
 
-def test_the_sandbox_mode_needs_the_account_it_moves_money_from() -> None:
-    with pytest.raises(ValidationError) as failure:
-        sandbox(increase_account_id=None)
-
-    assert "increase_account_id" in str(failure.value)
+def test_the_sandbox_mode_loads_without_an_account_id_for_the_adapter_to_find() -> None:
+    assert sandbox(increase_account_id=None).increase_account_id is None
 
 
 @pytest.mark.parametrize("account", ["", "account in71", "account/../x", "a" * 201])
