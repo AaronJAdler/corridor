@@ -20,6 +20,8 @@ FAKE_KEY = "placeholder-increase-key-" + "0" * 16  # pragma: allowlist secret
 # Made up, and shaped like the prefix people assume marks an environment.
 SANDBOXY_KEY = "sandbox_" + "0" * 24  # pragma: allowlist secret
 PRODUCTIONY_KEY = "production_" + "0" * 24  # pragma: allowlist secret
+# Shaped like the example account id in Increase's documentation. Not an account of anyone's.
+ACCOUNT_ID = "account_in71c4amph0vgo2qllky"
 
 
 def sandbox(**overrides: object) -> Settings:
@@ -27,6 +29,7 @@ def sandbox(**overrides: object) -> Settings:
         **REQUIRED,
         "bank_rail_provider": "increase_sandbox",
         "increase_api_key": FAKE_KEY,
+        "increase_account_id": ACCOUNT_ID,
         **overrides,
     }
     return Settings(_env_file=None, **values)  # type: ignore[arg-type]
@@ -40,6 +43,7 @@ def _no_ambient_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
         "CORRIDOR_BANK_RAIL_PROVIDER",
         "CORRIDOR_INCREASE_BASE_URL",
         "CORRIDOR_INCREASE_API_KEY",
+        "CORRIDOR_INCREASE_ACCOUNT_ID",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -108,6 +112,28 @@ def test_the_sandbox_mode_needs_a_key() -> None:
     assert "increase_api_key" in str(failure.value)
 
 
+def test_the_sandbox_mode_needs_the_account_it_moves_money_from() -> None:
+    with pytest.raises(ValidationError) as failure:
+        sandbox(increase_account_id=None)
+
+    assert "increase_account_id" in str(failure.value)
+
+
+@pytest.mark.parametrize("account", ["", "account in71", "account/../x", "a" * 201])
+def test_an_account_id_that_is_not_a_plain_identifier_is_refused(account: str) -> None:
+    with pytest.raises(ValidationError) as failure:
+        sandbox(increase_account_id=account)
+
+    assert "increase_account_id" in str(failure.value)
+
+
+def test_the_increase_webhook_secrets_are_read_as_secrets_of_their_own() -> None:
+    settings = sandbox(increase_webhook_secrets=["increase-webhook-signing-value-of-32+"])
+
+    assert all(isinstance(secret, SecretStr) for secret in settings.increase_webhook_secrets)
+    assert "signing-value" not in repr(settings)
+
+
 def test_the_sandbox_mode_is_refused_in_production() -> None:
     with pytest.raises(ValidationError) as failure:
         sandbox(environment="production")
@@ -154,6 +180,7 @@ def test_a_process_of_every_kind_refuses_to_start_with_another_address(
     monkeypatch.setenv("CORRIDOR_REDIS_URL", REQUIRED["redis_url"])
     monkeypatch.setenv("CORRIDOR_BANK_RAIL_PROVIDER", "increase_sandbox")
     monkeypatch.setenv("CORRIDOR_INCREASE_API_KEY", FAKE_KEY)
+    monkeypatch.setenv("CORRIDOR_INCREASE_ACCOUNT_ID", ACCOUNT_ID)
     monkeypatch.setenv("CORRIDOR_INCREASE_BASE_URL", "https://api.increase.com")
 
     with pytest.raises(ValidationError):

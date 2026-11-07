@@ -11,13 +11,14 @@ from pathlib import Path
 import pytest
 
 SOURCE = Path(__file__).resolve().parents[2] / "src" / "corridor"
-ADAPTER_CLASSES = frozenset({"SimBank", "SimCustody", "SimRates"})
+ADAPTER_CLASSES = frozenset({"SimBank", "SimCustody", "SimRates", "IncreaseBank"})
 ADAPTER_MODULES = frozenset(
     {
         "corridor.providers.bank_rail",
         "corridor.providers.custody",
         "corridor.providers.fx_rates",
         "corridor.providers.http",
+        "corridor.providers.increase",
     }
 )
 

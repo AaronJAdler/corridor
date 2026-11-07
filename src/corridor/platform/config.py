@@ -212,6 +212,9 @@ class Settings(BaseSettings):
     # so that a wrong one is refused by name: it must be exactly INCREASE_SANDBOX_URL.
     increase_base_url: str = INCREASE_SANDBOX_URL
     increase_api_key: SecretStr | None = None
+    # The Increase account that holds Corridor's money: account numbers are opened on it and
+    # ACH transfers are sent from it. An identifier, not a secret.
+    increase_account_id: Annotated[str, Field(pattern=r"^[A-Za-z0-9_]{1,200}$")] | None = None
 
     # The secrets that sign each provider's webhooks. A list, so that a secret can be
     # rotated: the new one is added before the provider starts using it.
@@ -219,6 +222,10 @@ class Settings(BaseSettings):
     # so each has a least length. No secrets at all means the provider is not configured.
     bank_rail_webhook_secrets: list[WebhookSecret] = Field(default_factory=list)
     custody_webhook_secrets: list[WebhookSecret] = Field(default_factory=list)
+    # The shared secrets of Corridor's Increase event subscriptions, which sign Increase's
+    # webhooks by the Standard Webhooks scheme. Its own list: Increase signs other bytes
+    # than the simulator does, and no provider's secret may be another's.
+    increase_webhook_secrets: list[WebhookSecret] = Field(default_factory=list)
 
     # What a transfer between users costs the sender: basis points of the amount, rounded
     # down, and never less than the asset's minimum, a decimal string in major units. An
@@ -332,6 +339,10 @@ class Settings(BaseSettings):
         if self.increase_api_key is None:
             problems.append(
                 "increase_api_key must be set when bank_rail_provider is increase_sandbox"
+            )
+        if self.increase_account_id is None:
+            problems.append(
+                "increase_account_id must be set when bank_rail_provider is increase_sandbox"
             )
         if self.environment == "production":
             problems.append("bank_rail_provider must be sim when environment is production")

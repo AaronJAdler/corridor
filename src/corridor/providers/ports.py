@@ -15,9 +15,10 @@ one it is.
 """
 
 from datetime import datetime
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from corridor.providers.types import (
+    BankEvent,
     Beneficiary,
     DepositAddress,
     Payout,
@@ -68,6 +69,29 @@ class BankRail(Protocol):
     async def list_transactions(
         self, *, asset_code: str, start: datetime, end: datetime
     ) -> ProviderStatement: ...
+
+
+@runtime_checkable
+class BankEventSource(Protocol):
+    """A bank rail whose webhooks say only that something changed, and not what.
+
+    Such a provider's event names an object, and what happened is read from the object as
+    the provider holds it now. That is a network call, made by the worker with no
+    transaction open. Reading the present state is also what makes the events safe in any
+    order: an old event read late finds what is true now.
+
+    A bank rail whose webhooks carry the contract's ``data`` does not implement this.
+    """
+
+    @property
+    def name(self) -> str: ...
+
+    async def resolve_event(
+        self, *, category: str, object_type: str, object_id: str
+    ) -> tuple[BankEvent, ...]:
+        """What an event of ``category`` about one object means, in the contract's bank
+        events. Empty when it means nothing Corridor acts on yet."""
+        ...
 
 
 class Custodian(Protocol):

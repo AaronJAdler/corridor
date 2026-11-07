@@ -74,6 +74,36 @@ class _ErrorDocument(Document):
     error: _ErrorDetail
 
 
+@dataclass(frozen=True, slots=True)
+class ErrorReading:
+    """What a ``4xx`` other than ``401`` comes to, as an adapter reads its provider's errors.
+
+    ``rejected`` is a definite refusal, with the code a caller branches on. ``misconfigured``
+    is a fault in Corridor's own configuration. ``unknown`` is anything that does not prove
+    the provider refused: a body that is not the provider's, or an error that says nothing
+    about whether the operation happened.
+    """
+
+    outcome: Literal["rejected", "misconfigured", "unknown"]
+    code: str
+    message: str
+
+
+# How an adapter reads its provider's error bodies: from the status and the body, which are
+# the provider's own words and are never logged.
+ErrorReader = Callable[[int, bytes], ErrorReading]
+
+
+def contract_errors(status: int, content: bytes) -> ErrorReading:
+    """The provider contract's reading: a ``4xx`` with the contract's error body is a refusal.
+    One without it came from something in between, and proves nothing."""
+    try:
+        error = _ErrorDocument.model_validate_json(content).error
+    except ValidationError:
+        return ErrorReading("unknown", "", f"a {status} without the contract's error body")
+    return ErrorReading("rejected", error.code, error.message)
+
+
 class ResponseMismatch(ValueError):
     """A response is well-formed and is not an answer to the request that was sent."""
 
@@ -99,8 +129,10 @@ class ProviderClient:
         api_key: SecretStr | None,
         timeout_seconds: float,
         client: httpx.AsyncClient | None = None,
+        errors: ErrorReader = contract_errors,
     ) -> None:
         self._provider = provider
+        self._errors = errors
         if not base_url:
             raise self._misconfigured("configure", "no address is configured for this provider")
         if api_key is None or not api_key.get_secret_value():
@@ -251,21 +283,19 @@ class ProviderClient:
             raise self._unknown(operation, f"unbelievable response: {error}") from None
 
     def _refusal(self, operation: str, response: _Answer) -> Exception:
-        """A ``4xx`` is a definite refusal only if it is the provider's own. One without the
-        contract's error body came from something in between, and proves nothing."""
-        try:
-            error = _ErrorDocument.model_validate_json(response.content).error
-        except ValidationError:
-            return self._unknown(
-                operation, f"a {response.status_code} without the contract's error body"
+        """A ``4xx`` is a definite refusal only if the adapter's reader says it is."""
+        reading = self._errors(response.status_code, response.content)
+        if reading.outcome == "rejected":
+            return ProviderRejected(
+                reading.code,
+                reading.message,
+                response.status_code,
+                provider=self._provider,
+                operation=operation,
             )
-        return ProviderRejected(
-            error.code,
-            error.message,
-            response.status_code,
-            provider=self._provider,
-            operation=operation,
-        )
+        if reading.outcome == "misconfigured":
+            return self._misconfigured(operation, reading.message)
+        return self._unknown(operation, reading.message)
 
     def _unknown(self, operation: str, detail: str) -> ProviderOutcomeUnknown:
         return ProviderOutcomeUnknown(detail, provider=self._provider, operation=operation)

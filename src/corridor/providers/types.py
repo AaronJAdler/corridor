@@ -4,14 +4,18 @@ Amounts are integer minor units and times are timezone-aware UTC. The decimal st
 the provider contract do not travel past the adapters.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Any, Literal
 
 PayoutStatus = Literal["pending", "completed", "failed"]
 WithdrawalStatus = Literal["pending", "broadcast", "completed", "failed"]
 TransactionDirection = Literal["credit", "debit"]
+# What a bank rail can tell Corridor has happened, in the words of the provider contract's
+# bank webhooks.
+BankEventType = Literal["deposit.received", "deposit.returned", "payout.completed", "payout.failed"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,3 +124,17 @@ class Rate:
     quote: str
     mid: Decimal
     as_of: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class BankEvent:
+    """Something a bank rail says has happened, read from what it holds now.
+
+    ``data`` has the shape the provider contract gives the ``data`` of a bank webhook of
+    this type, amounts as decimal strings in major units, so that the payment functions read
+    one shape whichever bank rail spoke. It may name the sender of a deposit: it is handed
+    to those functions and stored nowhere by the adapter.
+    """
+
+    type: BankEventType
+    data: Mapping[str, Any] = field(repr=False)

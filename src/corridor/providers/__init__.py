@@ -3,7 +3,7 @@ the adapters that implement them.
 
 Other modules use the names exported here and nothing else from this package, and get an
 adapter only from the ``build_*`` functions, which choose one by the ``*_provider`` settings.
-The simulator's adapters are exported for the test suite alone: a module of ``corridor``
+The adapters are exported for the test suite alone: a module of ``corridor``
 outside this package that names one is tied to a single provider, and
 ``tests/providers/test_ports_only.py`` refuses it. A call made through an adapter is a
 network call: never make one while a transaction is open.
@@ -20,6 +20,8 @@ from corridor.providers.errors import (
 )
 from corridor.providers.factory import build_bank_rail, build_custodian, build_rate_source
 from corridor.providers.fx_rates import SimRates
+from corridor.providers.increase import EVENT_CATEGORIES as INCREASE_EVENT_CATEGORIES
+from corridor.providers.increase import IncreaseBank
 from corridor.providers.names import (
     BANK_RAILS,
     CUSTODIANS,
@@ -32,8 +34,10 @@ from corridor.providers.names import (
     is_bank_rail,
     require_bank_rail,
 )
-from corridor.providers.ports import BankRail, Custodian, RateSource
+from corridor.providers.ports import BankEventSource, BankRail, Custodian, RateSource
 from corridor.providers.types import (
+    BankEvent,
+    BankEventType,
     Beneficiary,
     DepositAddress,
     Payout,
@@ -51,14 +55,19 @@ __all__ = [
     "BANK_RAILS",
     "CUSTODIANS",
     "INCREASE",
+    "INCREASE_EVENT_CATEGORIES",
     "SIM_BANK",
     "SIM_CUSTODY",
     "SIM_RATES",
+    "BankEvent",
+    "BankEventSource",
+    "BankEventType",
     "BankRail",
     "Beneficiary",
     "Custodian",
     "DepositAddress",
     "FlowKind",
+    "IncreaseBank",
     "Payout",
     "PayoutStatus",
     "ProviderError",

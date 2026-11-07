@@ -290,6 +290,7 @@ protected_modules = [
     "corridor.providers.custody",
     "corridor.providers.fx_rates",
     "corridor.providers.http",
+    "corridor.providers.increase",
 ]
 allowed_importers = ["corridor.providers"]
 

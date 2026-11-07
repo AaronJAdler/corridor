@@ -5,6 +5,7 @@ from pydantic import SecretStr
 
 from corridor.platform.config import INCREASE_SANDBOX_URL, Settings
 from corridor.providers import (
+    IncreaseBank,
     ProviderMisconfigured,
     SimBank,
     SimCustody,
@@ -85,18 +86,37 @@ def test_the_factory_refuses_another_address_even_when_the_settings_were_not_che
     assert "not the Increase sandbox address" in str(failure.value)
 
 
-def test_the_sandbox_mode_never_falls_back_to_the_simulator() -> None:
-    # Until the adapter exists, choosing the sandbox is an error and not a quiet simulator,
-    # even when the simulator's address is also set.
+async def test_the_sandbox_mode_builds_the_increase_adapter_and_never_the_simulator() -> None:
+    # Even when the simulator's address is also set, choosing the sandbox is choosing it.
     settings = Settings.model_construct(
         bank_rail_provider="increase_sandbox",
         increase_base_url=INCREASE_SANDBOX_URL,
         increase_api_key=KEY,
+        increase_account_id="account_in71c4amph0vgo2qllky",
         bank_rail_url="http://sim.invalid",
         bank_rail_api_key=KEY,
+        provider_timeout_seconds=5.0,
+    )
+
+    bank = build_bank_rail(settings)
+    try:
+        assert isinstance(bank, IncreaseBank)
+        assert bank.name == "increase"
+    finally:
+        assert bank is not None
+        await bank.aclose()
+
+
+def test_the_sandbox_mode_without_an_account_does_not_start() -> None:
+    settings = Settings.model_construct(
+        bank_rail_provider="increase_sandbox",
+        increase_base_url=INCREASE_SANDBOX_URL,
+        increase_api_key=KEY,
+        increase_account_id=None,
+        provider_timeout_seconds=5.0,
     )
 
     with pytest.raises(ProviderMisconfigured) as failure:
         build_bank_rail(settings)
 
-    assert "not implemented yet" in str(failure.value)
+    assert "no Increase account" in str(failure.value)

@@ -11,6 +11,7 @@ from corridor.providers.bank_rail import SimBank
 from corridor.providers.custody import SimCustody
 from corridor.providers.errors import ProviderMisconfigured
 from corridor.providers.fx_rates import SimRates
+from corridor.providers.increase import IncreaseBank
 from corridor.providers.names import INCREASE
 from corridor.providers.ports import BankRail, Custodian, RateSource
 
@@ -23,13 +24,9 @@ def build_bank_rail(settings: Settings) -> BankRail | None:
     """
     if settings.bank_rail_provider == "increase_sandbox":
         _require_increase_sandbox(settings)
-        # The adapter is written in the next stage. Refusing here, by name, is better than
-        # starting a process that quietly has no bank rail or quietly has the simulator.
-        raise ProviderMisconfigured(
-            "the Increase sandbox adapter is not implemented yet",
-            provider=INCREASE,
-            operation="build",
-        )
+        # Never the simulator in its place: a process that asked for the sandbox and cannot
+        # have it does not start.
+        return IncreaseBank(settings)
     return SimBank(settings) if settings.bank_rail_url else None
 
 
