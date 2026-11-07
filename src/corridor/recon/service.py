@@ -256,7 +256,9 @@ async def _read(
     sent: dict[uuid.UUID, Sent] = {}
     gone: set[uuid.UUID] = set()
     for withdrawal in in_flight:
-        if withdrawal.kind != kind:
+        # Only the provider the withdrawal went out by is asked about it. Another bank rail
+        # has never heard of it, and would answer that its payout is gone.
+        if withdrawal.kind != kind or withdrawal.provider != provider:
             continue
         try:
             held = await lookup(withdrawal)

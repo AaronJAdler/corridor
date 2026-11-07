@@ -17,7 +17,7 @@ from corridor import ops, recon, risk, wallets
 from corridor.identity import Principal
 from corridor.ledger import AccountKind
 from corridor.platform.ids import new_id
-from corridor.providers import SimBank, SimCustody
+from corridor.providers import INCREASE, ProviderRejected, ProviderStatement, SimBank, SimCustody
 from tests.payments.support import rows
 from tests.recon.conftest import WINDOW, Reconcile
 from tests.recon.support import (
@@ -878,3 +878,49 @@ async def test_a_deposit_released_from_suspense_long_after_it_arrived_is_no_brea
 
     assert await stack.wallet(user) == (250_00, 0)
     assert result.breaks == ()
+
+
+class _OtherRail:
+    """A bank rail of another provider, with an empty account, that has heard of no payout
+    and records every question it is asked about one."""
+
+    name = INCREASE
+
+    def __init__(self) -> None:
+        self.asked: list[str] = []
+
+    async def aclose(self) -> None:
+        return None
+
+    async def get_payout(self, payout_id: str) -> Any:
+        self.asked.append(payout_id)
+        raise ProviderRejected("object_not_found", "", 404, provider=self.name, operation="get")
+
+    async def find_payouts(self, reference: str) -> tuple[Any, ...]:
+        self.asked.append(reference)
+        return ()
+
+    async def list_transactions(self, *, asset_code: str, start: Any, end: Any) -> Any:
+        return ProviderStatement(asset_code, start, end, (), 0)
+
+
+async def test_a_withdrawal_in_flight_at_one_bank_rail_is_not_asked_about_at_another(
+    stack: Stack,
+) -> None:
+    """The bank rail setting changed while a payout was on its way. The rail this run has
+    never issued it, and would say it is gone: it is neither asked nor believed."""
+    user, _ = await funded(stack)
+    withdrawal_id = await submitted(stack, user)
+    other = _OtherRail()
+
+    result = await recon.run(
+        stack.db,
+        other,  # type: ignore[arg-type]
+        None,
+        window_start=stack.clock.now() - WINDOW,
+        window_end=stack.clock.now(),
+    )
+
+    assert other.asked == []
+    assert "unknown_payout" not in kinds(result.breaks)
+    assert (await stack.withdrawal(withdrawal_id))["status"] == "submitted"
