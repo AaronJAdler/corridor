@@ -184,6 +184,30 @@ adapter raises `ProviderMisconfigured`: the event stays unprocessed and the outb
 a withdrawal waits for a process with its provider. It is never marked ignored. The refusal of
 every `increase` delivery from 0019 is removed.
 
+### Events can be listed instead of received
+
+A run in GitHub Actions has no address Increase could deliver to. Events are kept and listable
+for 30 days, at `GET /events`, filtered by `category.in` and `created_at`, ordered by
+`order_by`, paged by `cursor` ([events](https://increase.com/documentation/api/events); the
+query encoding, dots for nesting and commas for lists, from `_client.py`). When the bank rail
+is a `BankEventSource`, the worker runs `bank.poll_events` every ten seconds: it lists the four
+routed categories, oldest first, from a day back on start and then from five minutes before the
+newest event it has seen, and stores each through `webhooks.record`, under the same provider and
+event id a webhook would use. A listed event and a delivered one are the same row, processed
+once, so both may run at once. A listing is a call made with the API key, so it needs no
+signature; what an event says is checked against its object either way. At most ten pages are
+read per listing; the rest are read next time.
+
+### The account is found from the key
+
+Increase's account-number and ACH-transfer endpoints take an `account_id`, and a key can reach
+more than one account. When `CORRIDOR_INCREASE_ACCOUNT_ID` is unset, the adapter lists
+`GET /accounts?status.in=open` on first use and uses the account if there is exactly one open
+USD account ([accounts](https://increase.com/documentation/api/accounts); `status` and
+`currency` from `types/account.py`). None, several, or more than a page is a fault of
+configuration that names the setting, and nothing is sent until it is set. A lookup that cannot
+be answered is unknown, and nothing is sent either.
+
 ### Reconciliation asks each withdrawal's own rail
 
 A run looked up every bank withdrawal in flight at whatever bank rail the process had. With a
@@ -192,8 +216,8 @@ reported as an unknown payout. A run now asks only the provider a withdrawal wen
 
 ### Settings
 
-`CORRIDOR_INCREASE_ACCOUNT_ID` (the account money moves from and numbers open on; required in
-sandbox mode, a plain identifier) and `CORRIDOR_INCREASE_WEBHOOK_SECRETS` (a JSON list, 32+
+`CORRIDOR_INCREASE_ACCOUNT_ID` (the account money moves from and numbers open on; optional, a
+plain identifier) and `CORRIDOR_INCREASE_WEBHOOK_SECRETS` (a JSON list, 32+
 characters each; Increase allows a `shared_secret` of 1–100). Neither is a key, and neither is
 read in CI.
 
@@ -217,6 +241,12 @@ read in CI.
   originated the entry, which for a consumer push may be a bank or a payroll company, not the
   person. Screening reads what it is given.
 - **Events cost a read each.** One `GET` per event, made by the worker with no transaction open.
+- **The sandbox run.** `scripts/sandbox_e2e.py`, run by hand from the `Sandbox end to end`
+  workflow, which alone holds the key, in the `sandbox` environment: a deposit by a simulated
+  inbound ACH, a withdrawal settled by `POST /simulations/ach_transfers/{id}/settle`, one
+  returned by `.../return`, then the ledger verifier and reconciliation
+  ([sandbox](https://increase.com/documentation/sandbox); paths from
+  `resources/simulations/`). It prints what the sandbox answered for each reading below.
 - **Not yet confirmed by the sandbox:** the signing key's encoding, the shape of each object as
   served, whether a settled transfer's `settlement` is filled in the sandbox without a
   simulation, and whether a sandbox inbound transfer arrives `accepted` or `pending`.

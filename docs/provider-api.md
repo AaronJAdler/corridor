@@ -27,8 +27,20 @@ Nothing in CI calls it.
 | `CORRIDOR_BANK_RAIL_PROVIDER` | `increase_sandbox` |
 | `CORRIDOR_INCREASE_BASE_URL` | exactly `https://sandbox.increase.com`, the default; anything else stops every process from starting |
 | `CORRIDOR_INCREASE_API_KEY` | the sandbox API key. Never in the repository: a GitHub Actions environment secret, or a local `.env` |
-| `CORRIDOR_INCREASE_ACCOUNT_ID` | the Increase account money moves from and account numbers open on |
-| `CORRIDOR_INCREASE_WEBHOOK_SECRETS` | a JSON list of the Event Subscription's shared secrets, each 32+ characters and none shared with another provider |
+| `CORRIDOR_INCREASE_ACCOUNT_ID` | optional: the Increase account money moves from and account numbers open on. Unset, the one open account the key reaches; with none or several, nothing is sent until it is set |
+| `CORRIDOR_INCREASE_WEBHOOK_SECRETS` | optional: a JSON list of the Event Subscription's shared secrets, each 32+ characters and none shared with another provider. Without it, webhooks are refused and events come only by listing |
+
+The worker also lists Increase's events from its API every ten seconds, so a Corridor that no
+webhook can reach still learns of deposits and payouts.
+
+To run a deposit and two withdrawals through the sandbox, start the **Sandbox end to end**
+workflow from the Actions tab. It runs `scripts/sandbox_e2e.py` in the `sandbox` environment,
+which holds `CORRIDOR_INCREASE_API_KEY`; nothing else needs setting. Locally, with PostgreSQL,
+Redis and the test variables as for the suite, and the key in the environment:
+
+```text
+uv run python scripts/sandbox_e2e.py
+```
 
 ## Conventions
 
