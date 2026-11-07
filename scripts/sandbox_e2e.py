@@ -7,8 +7,9 @@ Run by hand, never in CI: by the ``Sandbox end to end`` workflow, which holds th
     CORRIDOR_INCREASE_API_KEY          the sandbox API key. Read from the environment only,
                                        never printed, and handed to the two processes and
                                        to the simulation calls this script makes
-    CORRIDOR_INCREASE_ACCOUNT_ID       optional: without it the adapter uses the one open
-                                       account the key reaches
+    CORRIDOR_INCREASE_ACCOUNT_ID       optional: without it the run uses the one open account
+                                       the key reaches, opens one if there is none, and stops
+                                       if there are several
     CORRIDOR_TEST_POSTGRES_ADMIN_URL   as for the test suite: a scratch database is made
     CORRIDOR_TEST_REDIS_URL            and dropped again
 
@@ -71,6 +72,8 @@ REQUEST_TIMEOUT_SECONDS = 30.0
 RECONCILIATION_INTERVAL_SECONDS = 10
 RECONCILIATION_WINDOW_SECONDS = 1800
 RECONCILIATION_GRACE_SECONDS = 1
+# The name of the account a run opens in a sandbox that has none.
+SANDBOX_ACCOUNT_NAME = "Corridor sandbox"
 # Never contacted: the demo client wants a simulator's address, and this run has none.
 NO_SIMULATOR = "http://127.0.0.1:9"
 
@@ -117,6 +120,26 @@ class Increase:
             raise SandboxError(f"Increase answered {method} {path} with something not an object")
         return body
 
+    def account(self) -> str:
+        """The account this run moves money through.
+
+        A sandbox starts with no account, so a run opens one when there is none. With
+        several, it does not guess: it names them and stops, for the variable to say which.
+        """
+        listed = self.call("GET", "/accounts", params={"status.in": "open", "limit": "100"})["data"]
+        open_usd = [found for found in listed if found.get("currency") == "USD"]
+        if not open_usd:
+            opened = self.call("POST", "/accounts", json={"name": SANDBOX_ACCOUNT_NAME})
+            print(f"  note  the sandbox had no open account; opened {opened['id']}")
+            return str(opened["id"])
+        if len(open_usd) > 1:
+            ids = ", ".join(str(found["id"]) for found in open_usd)
+            raise SandboxError(
+                f"the key reaches {len(open_usd)} open accounts ({ids}); "
+                "set CORRIDOR_INCREASE_ACCOUNT_ID to the one to use"
+            )
+        return str(open_usd[0]["id"])
+
     def account_number_id(self, number: str, since: datetime) -> str:
         listed = self.call(
             "GET",
@@ -152,7 +175,7 @@ def reading(question: str, answer: object) -> None:
 
 
 @contextmanager
-def sandbox_stack(key: str) -> Iterator[tuple[Processes, postgres.TestDatabase]]:
+def sandbox_stack(key: str, account_id: str) -> Iterator[tuple[Processes, postgres.TestDatabase]]:
     """A scratch database, and the environment of an API and a worker on Increase's
     sandbox. Nothing is started here; everything is stopped and dropped on the way out."""
     database = postgres.create_database(postgres.ensure_template())
@@ -162,7 +185,6 @@ def sandbox_stack(key: str) -> Iterator[tuple[Processes, postgres.TestDatabase]]
         for name, value in os.environ.items()
         if not name.startswith("CORRIDOR_") or name.startswith("CORRIDOR_TEST_")
     }
-    account_id = os.environ.get("CORRIDOR_INCREASE_ACCOUNT_ID", "")
     environment = {
         **inherited,
         "CORRIDOR_ENVIRONMENT": "test",
@@ -175,13 +197,11 @@ def sandbox_stack(key: str) -> Iterator[tuple[Processes, postgres.TestDatabase]]
         "CORRIDOR_BANK_RAIL_PROVIDER": "increase_sandbox",
         "CORRIDOR_INCREASE_BASE_URL": INCREASE_SANDBOX_URL,
         "CORRIDOR_INCREASE_API_KEY": key,
+        "CORRIDOR_INCREASE_ACCOUNT_ID": account_id,
         "CORRIDOR_RECONCILIATION_INTERVAL_SECONDS": str(RECONCILIATION_INTERVAL_SECONDS),
         "CORRIDOR_RECONCILIATION_WINDOW_SECONDS": str(RECONCILIATION_WINDOW_SECONDS),
         "CORRIDOR_RECONCILIATION_GRACE_SECONDS": str(RECONCILIATION_GRACE_SECONDS),
     }
-    # An empty variable is not an account: a workflow variable that was never set is one.
-    if account_id:
-        environment["CORRIDOR_INCREASE_ACCOUNT_ID"] = account_id
     processes = Processes(
         base_url=base_url,
         sim_url=NO_SIMULATOR,
@@ -330,7 +350,14 @@ def main() -> int:
         return 2
     increase = Increase(key)
     try:
-        with sandbox_stack(key) as (processes, database):
+        # An empty variable is not an account: a workflow variable never set is one.
+        try:
+            account_id = os.environ.get("CORRIDOR_INCREASE_ACCOUNT_ID", "") or increase.account()
+        except (SandboxError, httpx.HTTPError) as failure:
+            print(f"Sandbox run not started: {failure}")
+            return 1
+        print(f"  note  moving money through {account_id}")
+        with sandbox_stack(key, account_id) as (processes, database):
             try:
                 processes.start_api()
                 processes.start_worker()
