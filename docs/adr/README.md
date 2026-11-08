@@ -26,3 +26,5 @@ their alternatives.
 | [0018](0018-access-tokens-checked-per-request.md) | ES256 access tokens, checked against the database on every request |
 | [0019](0019-provider-mode-and-sandbox-guard.md) | A setting per provider chooses simulator or sandbox, the sandbox address is checked exactly, and CI stays on the simulator |
 | [0020](0020-increase-bank-rail-adapter.md) | The Increase sandbox behind the bank rail port: anything not clearly a refusal is unknown, and webhooks are read from the objects they name |
+| [0021](0021-one-postgresql-major-and-the-upgrade-path.md) | One PostgreSQL major everywhere the stack runs as production runs; the matrix looks ahead; a written upgrade path |
+| [0022](0022-query-plans-as-tests.md) | Query plans are tested on the hot paths, and statements are measured in production with `pg_stat_statements` |

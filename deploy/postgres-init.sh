@@ -20,3 +20,11 @@ CREATE ROLE corridor_owner LOGIN PASSWORD :'owner_password';
 CREATE ROLE corridor_app LOGIN PASSWORD :'app_password';
 CREATE DATABASE corridor OWNER corridor_owner;
 SQL
+
+# pg_stat_statements needs a superuser to create and shared_preload_libraries to load (set
+# in compose.yaml). Reading the view is granted to the application role for the runbook's
+# slow-query procedure; nothing else about the role changes.
+psql --set ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname corridor <<'SQL'
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;
+GRANT pg_read_all_stats TO corridor_app;
+SQL

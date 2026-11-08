@@ -326,8 +326,10 @@ work, duplicates, reorders and drops webhooks, and while the worker is killed at
 it requires exactly one provider payout per withdrawal and one credit per deposit.
 Concurrency tests run 200 debits against a balance that affords 50 and expect exactly 50.
 Property-based tests generate sequences of operations and require the ledger to stay
-balanced. `uv run poe e2e` then proves the installed programs find each other over real
-sockets.
+balanced. Query plans are tests too: `tests/plans` runs each hot path as the code runs it,
+explains the statements it issued, and fails on a sequential scan where an index was built
+for the statement, so a dropped or bypassed index cannot merge. `uv run poe e2e` then
+proves the installed programs find each other over real sockets.
 
 ## Repository layout
 
@@ -335,8 +337,8 @@ sockets.
 src/corridor/        the application: one directory per module, plus cli.py and demo.py
 src/corridor_sim/    the provider simulators, a separate application
 migrations/          hand-written Alembic revisions
-tests/               one directory per module, plus chaos, security, assembly, e2e, harness,
-                     simulators and the shared support code
+tests/               one directory per module, plus chaos, security, assembly, plans, e2e,
+                     harness, simulators and the shared support code
 scripts/             smoke.py, e2e.py, lint_docs.py
 docs/                architecture, API guide, runbook, provider contract, decision records
 infra/               Terraform for AWS
