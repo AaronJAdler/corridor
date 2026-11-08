@@ -29,6 +29,7 @@ Three rules apply to every procedure here:
 - [A restricted user](#a-restricted-user)
 - [Rotating secrets and keys](#rotating-secrets-and-keys)
 - [Restoring from a backup](#restoring-from-a-backup)
+- [Slow queries](#slow-queries)
 
 ## Tools
 
@@ -740,6 +741,49 @@ Change the role's password in PostgreSQL, update the connection URL, restart. Th
 URL is used only by `corridor db migrate`. For the deployed stack, the
 [infrastructure README](../infra/README.md#rotating-a-secret) has the steps for Secrets
 Manager and for the cache's token.
+
+## Slow queries
+
+`pg_stat_statements` is loaded on RDS and in compose and the application role may read it.
+It keeps one row per statement shape with calls, total and mean time, and rows, since the
+last reset. Read it as the application role or the owner:
+
+```sql
+SELECT calls,
+       round(total_exec_time::numeric / 1000, 1) AS total_s,
+       round(mean_exec_time::numeric, 2)         AS mean_ms,
+       rows,
+       left(query, 120)                          AS query
+FROM pg_stat_statements
+WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+ORDER BY total_exec_time DESC
+LIMIT 20;
+```
+
+Total time finds what the database spends its day on; order by `mean_exec_time` instead to
+find the statement that is slow each time it runs. Statements slower than a second are also
+in the PostgreSQL log (`log_min_duration_statement`), with their parameters.
+
+For a statement that should be fast and is not, explain it with the parameters it ran with:
+
+```sql
+EXPLAIN (ANALYZE, BUFFERS) <the statement>;
+```
+
+A `Seq Scan` on `postings`, `audit_events`, `outbox_events` or `idempotency_keys` where
+[architecture.md](architecture.md#hot-paths-and-their-indexes) lists an index is a defect:
+`tests/plans` asserts those plans, so first check whether the index exists
+(`\d <table>` in psql) and whether statistics are current (`SELECT last_analyze,
+last_autoanalyze FROM pg_stat_user_tables WHERE relname = '<table>'`). A table that grew
+quickly may need `ANALYZE <table>` as the owner before autovacuum gets to it.
+
+The view accumulates until `SELECT pg_stat_statements_reset()` (owner or `rds_superuser`);
+reset after a deploy to see the new build's statements on their own.
+
+The extension is created by the master user, once per database:
+`CREATE EXTENSION IF NOT EXISTS pg_stat_statements; GRANT pg_read_all_stats TO corridor_app;`
+(compose does this in `deploy/postgres-init.sh`). A fresh RDS instance needs the parameter
+group's `shared_preload_libraries` applied, which takes a reboot.
 
 ## Restoring from a backup
 

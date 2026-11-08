@@ -1327,8 +1327,14 @@ actor `system` / `cli.users.make_admin`. Without `--yes` it changes nothing.
 
 ### PostgreSQL
 
-- **Version.** 16, the version this build is verified against. Nothing uses syntax newer
-  than 16. The CI workflow defines a matrix over 16, 17 and 18.
+- **Version.** 16, declared once by the RDS instance (`engine_version`); compose and the
+  sandbox scenario run the same, and `tests/assembly/test_postgres_version.py` fails when
+  they drift. Nothing uses syntax newer than 16. The CI workflow defines a matrix over 16,
+  17 and 18 so the next major is rehearsed on every push; the upgrade procedure is
+  [ADR 0021](adr/0021-one-postgresql-major-and-the-upgrade-path.md).
+- **Statement statistics.** `pg_stat_statements` is preloaded in the RDS parameter group and
+  in compose (`shared_preload_libraries`); the application role reads the view through
+  `pg_read_all_stats`. The runbook's [Slow queries](runbook.md#slow-queries) uses it.
 - **Roles.** `corridor_owner` runs migrations. `corridor_app` is the application (section
   13). The application role's name is configuration (`database_app_role`).
 - **Conventions.** `timestamptz` everywhere, UTC session time zone, named constraints so
@@ -1361,6 +1367,26 @@ actor `system` / `cli.users.make_admin`. Without `--yes` it changes nothing.
 | `0017_hardening` | Login failure tables, `tokens_valid_after`, sealed entries, column-level grants, no temporary tables, webhook redaction |
 | `0018_review_c` | The kind of an adjustment and the deposit and user a suspense adjustment names; who asked for a withdrawal; the run that last saw an open break, and column-level grants on breaks |
 | `0019_operators` | Column-level `UPDATE` grants on `users`; the withdrawal states narrowed to the six the code writes; an index for the list of deposits in suspense |
+
+#### Hot paths and their indexes
+
+Each statement below is run on every request, every poll or every purge, and has an index
+built for it. `tests/plans` runs each path as the code runs it, explains the statements it
+issued, and fails when the plan reads the table sequentially or without the named index
+([ADR 0022](adr/0022-query-plans-as-tests.md)).
+
+| Path | Statement | Index | Why that shape |
+|---|---|---|---|
+| Outbox claim (`outbox.claim`) | `UPDATE … FROM (SELECT … WHERE pending and due OR processing and expired ORDER BY id LIMIT n FOR UPDATE SKIP LOCKED)` | `ix_outbox_events_due` (partial, `status = 'pending'`), `ix_outbox_events_claimed` (partial, `status = 'processing'`) | Nearly every row is `done`; the partial indexes hold only the rows a poll can want |
+| Account statement (`ledger.statement`) | `SELECT … FROM postings JOIN journal_entries WHERE account_id = ? ORDER BY seq DESC LIMIT 50` | `ix_postings_account_id_seq` | One account's postings in sequence order, whatever the size of the ledger |
+| Audit log page (`audit.list_events`) | `SELECT … WHERE principal_id = ? ORDER BY id DESC LIMIT 50` | `ix_audit_events_principal_id_occurred_at` | One principal's events without a walk of the log |
+| Idempotency lookup (`api.idempotency.run_idempotent`) | `SELECT … WHERE actor_id = ? AND key = ?` | `pk_idempotency_keys` | A primary-key probe on every idempotent request |
+| Idempotency purge (`worker.purge.purge_idempotency_keys`) | `DELETE … WHERE created_at < ?` | `ix_idempotency_keys_created_at` | Runs hourly against keys kept a day: each run deletes a sliver of the oldest |
+
+The outbox purge (`status = 'done' AND finished_at < ?`) and the webhook redaction
+(`processed_at`, partial on unredacted rows) are not in the table: the first scans a table
+the purge itself keeps small, the second has its partial index and a batch limit, and
+neither runs on a request path.
 
 ### Redis
 
@@ -1582,7 +1608,8 @@ sleeps to let time pass.
 | Concurrency | Behaviour under real contention: 200 debits against one balance; opposing transfers; 50 identical idempotent requests | `tests/ledger/test_concurrency.py`, `tests/api` |
 | Failure injection | Convergence: a worker that dies at each step of a withdrawal; provider errors and timeouts before and after the effect; duplicate, reordered and dropped webhooks | `tests/chaos`, against the simulator in-process |
 | Simulators and adapters | The contract in [provider-api.md](provider-api.md), from both sides | `tests/simulators`, `tests/providers` |
-| Assembly | The app as wired: every route has an auth dependency, the route manifest matches, migrations match models and run down and up | `tests/assembly`, `tests/harness`, `tests/api` |
+| Assembly | The app as wired: every route has an auth dependency, the route manifest matches, migrations match models and run down and up, one PostgreSQL major across compose, RDS and the sandbox job | `tests/assembly`, `tests/harness`, `tests/api` |
+| Plans | The hot paths' statements, captured as the code issues them, use the indexes built for them: no sequential scan of a large table ([hot paths](#hot-paths-and-their-indexes)) | `tests/plans` |
 | Security | Each control in both directions: no credential, wrong scope, another user's resource, database grants | `tests/security`, `tests/agents`, `tests/identity` |
 | End to end | Real processes over real sockets | `tests/e2e`, `uv run poe e2e`, `uv run poe smoke` |
 
@@ -1763,6 +1790,8 @@ context and consequences.
 | D18 | ES256 access tokens checked against the database on every request; rotating refresh tokens | Trusting a token until it expires | [0018](adr/0018-access-tokens-checked-per-request.md) |
 | D19 | A setting per provider chooses simulator or sandbox adapter; the sandbox address is checked exactly; CI stays on the simulator | A sandbox job in CI; inferring the environment from a key's prefix | [0019](adr/0019-provider-mode-and-sandbox-guard.md) |
 | D20 | The Increase sandbox behind the bank rail port: only error types that say the request was refused are refusals; webhooks are verified by Standard Webhooks and read from the objects they name | Reading every `4xx` as a refusal; trusting an event to say what happened | [0020](adr/0020-increase-bank-rail-adapter.md) |
+| D21 | The RDS instance declares the production PostgreSQL major; compose and the sandbox scenario run it; the matrix looks ahead; a written upgrade path | Each place naming its own version | [0021](adr/0021-one-postgresql-major-and-the-upgrade-path.md) |
+| D22 | The hot paths' query plans are tests; `pg_stat_statements` in production | Slow-query logging alone | [0022](adr/0022-query-plans-as-tests.md) |
 
 Smaller decisions, without a record of their own:
 
@@ -1772,7 +1801,6 @@ Smaller decisions, without a record of their own:
 | RFC 9457 errors; keyset pagination | Stable contracts; pagination that stays fast and correct under writes |
 | Python 3.14, uv, Ruff, strict mypy, import-linter, poe | Fast, reproducible, and identical on Windows |
 | ECS Fargate, RDS, ElastiCache, Secrets Manager | Managed primitives that match the workload without a cluster to run |
-| PostgreSQL 16 as the target, newer majors in the CI matrix | It is the version this build was verified against |
 | Tests on real PostgreSQL and Redis, a database per test | The guarantees under test live in the database |
 | Business time from an application clock, passed into SQL as a parameter | Tests move time without sleeping; one time source for every rule with a deadline |
 | The audit log is its own bottom-layer module | `identity` sits below `risk` and still needs its events audited |

@@ -26,7 +26,9 @@ jobs:
     environment: sandbox
     services:
       postgres:
-        image: postgres:18
+        # Production's major (infra/modules/data/main.tf). The unit-test matrix in ci.yml
+        # follows the newer lines; the sandbox scenario runs on what production runs.
+        image: postgres:16
         env:
           # A throwaway server on the runner's own network, holding a scratch database.
           POSTGRES_HOST_AUTH_METHOD: trust

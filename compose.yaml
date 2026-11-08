@@ -46,8 +46,12 @@ x-corridor-environment: &corridor-environment
 
 services:
   postgres:
+    # The same major as production (infra/modules/data/main.tf, engine_version). A test in
+    # tests/assembly fails when the two drift.
     image: postgres:16
     restart: unless-stopped
+    # Loaded the same way the RDS parameter group loads it; the init script creates the extension.
+    command: ["postgres", "-c", "shared_preload_libraries=pg_stat_statements"]
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       CORRIDOR_DB_OWNER_PASSWORD: ${DB_OWNER_PASSWORD:?set DB_OWNER_PASSWORD in .env}

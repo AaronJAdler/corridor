@@ -24,6 +24,16 @@ resource "aws_db_parameter_group" "this" {
     value = "1000"
   }
 
+  # Per-statement timing and call counts, read through the pg_stat_statements view (runbook,
+  # "Slow queries"). A static parameter: it takes effect at the next reboot, which the
+  # maintenance window provides. The extension itself is created by the master user; the
+  # application role may only read the view.
+  parameter {
+    name         = "shared_preload_libraries"
+    value        = "pg_stat_statements"
+    apply_method = "pending-reboot"
+  }
+
   lifecycle {
     create_before_destroy = true
   }
