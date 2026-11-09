@@ -215,6 +215,9 @@ class Settings(BaseSettings):
     # The Increase account that holds Corridor's money: account numbers are opened on it and
     # ACH transfers are sent from it. An identifier, not a secret. Unset, the adapter uses
     # the one open account the key reaches, and refuses to guess between several.
+    # Whether the worker lists Increase's events from its API as well as receiving them by
+    # webhook. Off only to prove that the webhooks alone are enough.
+    increase_event_polling: bool = True
     increase_account_id: Annotated[str, Field(pattern=r"^[A-Za-z0-9_]{1,200}$")] | None = None
 
     # The secrets that sign each provider's webhooks. A list, so that a secret can be

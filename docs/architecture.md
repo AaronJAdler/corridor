@@ -1461,6 +1461,7 @@ Every setting is an environment variable prefixed `CORRIDOR_`, read by
 | `CORRIDOR_FX_RATES_PROVIDER` | `sim` | `sim` |
 | `CORRIDOR_INCREASE_BASE_URL` | `str` (exactly `https://sandbox.increase.com` in sandbox mode) | `https://sandbox.increase.com` |
 | `CORRIDOR_INCREASE_API_KEY` | `SecretStr | None` (required in sandbox mode) | not set |
+| `CORRIDOR_INCREASE_EVENT_POLLING` | `bool`: the worker lists Increase's events as well as receiving them | `true` |
 | `CORRIDOR_INCREASE_ACCOUNT_ID` | `str | None` (letters, digits and `_`; unset, the one open account the key reaches) | not set |
 | `CORRIDOR_BANK_RAIL_WEBHOOK_SECRETS` | `list[SecretStr (32+ characters)]` | `[]` |
 | `CORRIDOR_CUSTODY_WEBHOOK_SECRETS` | `list[SecretStr (32+ characters)]` | `[]` |

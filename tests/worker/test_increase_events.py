@@ -558,3 +558,11 @@ async def test_only_a_bank_rail_whose_events_are_read_from_its_api_has_a_listing
     assert BANK_EVENT_POLL_JOB in {job.name for job in build_jobs(settings, bank=increase)}
     assert BANK_EVENT_POLL_JOB not in {job.name for job in build_jobs(settings, bank=bank)}
     assert BANK_EVENT_POLL_JOB not in {job.name for job in build_jobs(settings)}
+
+
+async def test_with_polling_turned_off_increases_events_come_by_webhook_alone(
+    settings: Settings, increase: IncreaseBank
+) -> None:
+    off = settings.model_copy(update={"increase_event_polling": False})
+
+    assert BANK_EVENT_POLL_JOB not in {job.name for job in build_jobs(off, bank=increase)}

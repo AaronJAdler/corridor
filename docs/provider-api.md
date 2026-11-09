@@ -31,11 +31,15 @@ Nothing in CI calls it.
 | `CORRIDOR_INCREASE_WEBHOOK_SECRETS` | optional: a JSON list of the Event Subscription's shared secrets, each 32+ characters and none shared with another provider. Without it, webhooks are refused and events come only by listing |
 
 The worker also lists Increase's events from its API every ten seconds, so a Corridor that no
-webhook can reach still learns of deposits and payouts.
+webhook can reach still learns of deposits and payouts. `CORRIDOR_INCREASE_EVENT_POLLING=false`
+turns that off, so that webhooks alone are relied on.
 
 To run a deposit and two withdrawals through the sandbox, start the **Sandbox end to end**
 workflow from the Actions tab. It runs `scripts/sandbox_e2e.py` in the `sandbox` environment,
-which holds `CORRIDOR_INCREASE_API_KEY`; nothing else needs setting. Locally, with PostgreSQL,
+which holds `CORRIDOR_INCREASE_API_KEY`; nothing else needs setting. Tick **webhooks** to
+prove the webhooks instead: the run reaches the API through a Cloudflare quick tunnel,
+registers an Event Subscription for it with a secret of its own, turns event listing off, and
+deletes the subscription at the end. Locally, with PostgreSQL,
 Redis and the test variables as for the suite, and the key in the environment:
 
 ```text
