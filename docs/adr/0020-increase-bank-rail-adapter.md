@@ -252,6 +252,12 @@ read in CI.
   read above; a returned transfer reads `returned`. A new sandbox has no account, so the
   sandbox run opens one when the key reaches none. The deposit, the settled and the returned
   withdrawal, the ledger verifier and reconciliation all passed.
+- **The webhook run.** With the workflow's `webhooks` input, the API is reached through a
+  Cloudflare quick tunnel and the run registers an Event Subscription
+  (`POST /event_subscriptions` with `url`, `shared_secret` and `selected_event_categories`,
+  deleted at the end with `status: deleted`; [event subscriptions](https://increase.com/documentation/api/event-subscriptions)).
+  Listing is turned off (`CORRIDOR_INCREASE_EVENT_POLLING=false`), so the scenario finishes
+  only if every event arrives by webhook and verifies.
 - **Not yet confirmed by the sandbox:** the signing key's encoding, the shape of each object as
   served, whether a settled transfer's `settlement` is filled in the sandbox without a
   simulation, and whether a sandbox inbound transfer arrives `accepted` or `pending`.

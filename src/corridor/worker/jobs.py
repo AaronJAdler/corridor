@@ -164,7 +164,7 @@ def build_jobs(
         Job(LEDGER_VERIFY_JOB, LEDGER_VERIFY_INTERVAL_SECONDS, verify_ledger),
     ]
     events = event_source(bank)
-    if events is not None:
+    if events is not None and settings.increase_event_polling:
         # A bank rail whose events say only what changed can also be asked for them, which
         # is how they reach a Corridor that its webhooks cannot.
         jobs.append(
