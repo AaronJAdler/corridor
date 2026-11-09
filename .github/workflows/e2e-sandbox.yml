@@ -25,7 +25,7 @@ env:
   # The quick tunnel for a webhook run, pinned to the checksum Cloudflare publishes with
   # the release.
   CLOUDFLARED_VERSION: "2025.11.1"
-  CLOUDFLARED_SHA256: "991dffd8889ee9f0147b6b48933da9e4407e68ea8c6d984f55fa2d3db4bb431d"
+  CLOUDFLARED_SHA256: "991dffd8889ee9f0147b6b48933da9e4407e68ea8c6d984f55fa2d3db4bb431d"  # pragma: allowlist secret - a public release checksum
 
 jobs:
   sandbox:
