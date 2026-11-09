@@ -5,6 +5,11 @@ name: Sandbox end to end
 # sandbox and moves play money through it (scripts/sandbox_e2e.py). CI never calls it.
 on:
   workflow_dispatch:
+    inputs:
+      webhooks:
+        description: "Prove the webhooks (tunnel the API, register an Event Subscription, turn event listing off)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -17,6 +22,10 @@ concurrency:
 env:
   UV_VERSION: "0.11.32"
   UV_FROZEN: "1"
+  # The quick tunnel for a webhook run, pinned to the checksum Cloudflare publishes with
+  # the release.
+  CLOUDFLARED_VERSION: "2025.11.1"
+  CLOUDFLARED_SHA256: "991dffd8889ee9f0147b6b48933da9e4407e68ea8c6d984f55fa2d3db4bb431d"
 
 jobs:
   sandbox:
@@ -55,6 +64,14 @@ jobs:
           version: ${{ env.UV_VERSION }}
           enable-cache: false
       - run: uv sync --frozen
+      - name: Fetch cloudflared for the tunnel
+        if: inputs.webhooks
+        run: |
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/cloudflared" \
+            "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-amd64"
+          echo "${CLOUDFLARED_SHA256}  $RUNNER_TEMP/cloudflared" | sha256sum --check --strict
+          chmod +x "$RUNNER_TEMP/cloudflared"
+          echo "CORRIDOR_SANDBOX_TUNNEL=$RUNNER_TEMP/cloudflared" >> "$GITHUB_ENV"
       - name: Run the scenario against the Increase sandbox
         # The key reaches this step only, as an environment variable; the script never
         # prints it. The account is optional: without it the adapter uses the one open

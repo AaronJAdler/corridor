@@ -143,7 +143,8 @@ accepted. A signature of an unknown version is passed over, as the scheme asks; 
 that will be used to sign webhooks" ([event subscriptions](https://increase.com/documentation/api/event-subscriptions)),
 and the guide says the signing secret is the HMAC key. Neither says how a string becomes key
 bytes. Increase's SDK passes the secret's UTF-8 bytes to the Standard Webhooks library
-(`resources/events.py`, `unwrap`), and so does Corridor. The sandbox run is what confirms it.
+(`resources/events.py`, `unwrap`), and so does Corridor. The webhook run of 2026-11-08
+confirmed it: ten deliveries verified, none refused.
 
 **A provider's scheme only.** The simulators' deliveries are judged by `X-Signature` alone and
 Increase's by the three headers alone, so a delivery signed one way never verifies on the
@@ -247,6 +248,19 @@ read in CI.
   returned by `.../return`, then the ledger verifier and reconciliation
   ([sandbox](https://increase.com/documentation/sandbox); paths from
   `resources/simulations/`). It prints what the sandbox answered for each reading below.
-- **Not yet confirmed by the sandbox:** the signing key's encoding, the shape of each object as
-  served, whether a settled transfer's `settlement` is filled in the sandbox without a
-  simulation, and whether a sandbox inbound transfer arrives `accepted` or `pending`.
+- **Confirmed by the sandbox run of 2026-11-07:** a simulated inbound ACH credit arrives
+  `accepted`; a settled transfer keeps the status `submitted` with `settlement` filled in, as
+  read above; a returned transfer reads `returned`. A new sandbox has no account, so the
+  sandbox run opens one when the key reaches none. The deposit, the settled and the returned
+  withdrawal, the ledger verifier and reconciliation all passed.
+- **The webhook run.** With the workflow's `webhooks` input, the API is reached through a
+  Cloudflare quick tunnel and the run registers an Event Subscription
+  (`POST /event_subscriptions` with `url`, `shared_secret` and `selected_event_categories`,
+  deleted at the end with `status: deleted`; [event subscriptions](https://increase.com/documentation/api/event-subscriptions)).
+  Listing is turned off (`CORRIDOR_INCREASE_EVENT_POLLING=false`), so the scenario finishes
+  only if every event arrives by webhook and verifies.
+- **Confirmed by the webhook run of 2026-11-08:** the shared secret's UTF-8 bytes are the
+  HMAC key. With listing off, all ten events of the scenario arrived by webhook and verified,
+  none was refused, and the scenario passed.
+- **Not yet confirmed by the sandbox:** whether a settled transfer's `settlement` is filled in
+  without the settle simulation, which in production is the Federal Reserve's doing.

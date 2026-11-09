@@ -7,10 +7,19 @@ Run by hand, never in CI: by the ``Sandbox end to end`` workflow, which holds th
     CORRIDOR_INCREASE_API_KEY          the sandbox API key. Read from the environment only,
                                        never printed, and handed to the two processes and
                                        to the simulation calls this script makes
-    CORRIDOR_INCREASE_ACCOUNT_ID       optional: without it the adapter uses the one open
-                                       account the key reaches
+    CORRIDOR_INCREASE_ACCOUNT_ID       optional: without it the run uses the one open account
+                                       the key reaches, opens one if there is none, and stops
+                                       if there are several
     CORRIDOR_TEST_POSTGRES_ADMIN_URL   as for the test suite: a scratch database is made
     CORRIDOR_TEST_REDIS_URL            and dropped again
+    CORRIDOR_SANDBOX_TUNNEL            optional: the path of a cloudflared binary. With it,
+                                       the run proves Increase's webhooks instead (below)
+
+With CORRIDOR_SANDBOX_TUNNEL, the API is reached through a Cloudflare quick tunnel, which
+needs no account and lasts as long as the run. The run registers an Event Subscription for
+the tunnel's address with a shared secret of its own, turns the worker's listing of events
+off, and runs the same scenario: every event then arrives by webhook, verified by its
+signature, or the scenario does not finish. The subscription is deleted at the end.
 
 No webhook can reach a run like this, so events come in the way such a run gets them: the
 worker lists them from Increase's Events API. The scenario:
@@ -32,10 +41,13 @@ a reading, so that a run settles them.
 """
 
 import asyncio
+import json
 import os
+import re
 import secrets
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -71,6 +83,17 @@ REQUEST_TIMEOUT_SECONDS = 30.0
 RECONCILIATION_INTERVAL_SECONDS = 10
 RECONCILIATION_WINDOW_SECONDS = 1800
 RECONCILIATION_GRACE_SECONDS = 1
+# The categories the worker routes, which the run's Event Subscription asks for.
+ROUTED_CATEGORIES = (
+    "ach_transfer.created",
+    "ach_transfer.updated",
+    "inbound_ach_transfer.created",
+    "inbound_ach_transfer.updated",
+)
+TUNNEL_ADDRESS = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
+TUNNEL_SECONDS = 90.0
+# The name of the account a run opens in a sandbox that has none.
+SANDBOX_ACCOUNT_NAME = "Corridor sandbox"
 # Never contacted: the demo client wants a simulator's address, and this run has none.
 NO_SIMULATOR = "http://127.0.0.1:9"
 
@@ -117,6 +140,44 @@ class Increase:
             raise SandboxError(f"Increase answered {method} {path} with something not an object")
         return body
 
+    def account(self) -> str:
+        """The account this run moves money through.
+
+        A sandbox starts with no account, so a run opens one when there is none. With
+        several, it does not guess: it names them and stops, for the variable to say which.
+        """
+        listed = self.call("GET", "/accounts", params={"status.in": "open", "limit": "100"})["data"]
+        open_usd = [found for found in listed if found.get("currency") == "USD"]
+        if not open_usd:
+            opened = self.call("POST", "/accounts", json={"name": SANDBOX_ACCOUNT_NAME})
+            print(f"  note  the sandbox had no open account; opened {opened['id']}")
+            return str(opened["id"])
+        if len(open_usd) > 1:
+            ids = ", ".join(str(found["id"]) for found in open_usd)
+            raise SandboxError(
+                f"the key reaches {len(open_usd)} open accounts ({ids}); "
+                "set CORRIDOR_INCREASE_ACCOUNT_ID to the one to use"
+            )
+        return str(open_usd[0]["id"])
+
+    def subscribe(self, url: str, shared_secret: str) -> str:
+        """An Event Subscription for this run's webhook address, signed with its secret."""
+        created = self.call(
+            "POST",
+            "/event_subscriptions",
+            json={
+                "url": url,
+                "shared_secret": shared_secret,
+                "selected_event_categories": [
+                    {"event_category": category} for category in ROUTED_CATEGORIES
+                ],
+            },
+        )
+        return str(created["id"])
+
+    def unsubscribe(self, subscription_id: str) -> None:
+        self.call("PATCH", f"/event_subscriptions/{subscription_id}", json={"status": "deleted"})
+
     def account_number_id(self, number: str, since: datetime) -> str:
         listed = self.call(
             "GET",
@@ -152,7 +213,9 @@ def reading(question: str, answer: object) -> None:
 
 
 @contextmanager
-def sandbox_stack(key: str) -> Iterator[tuple[Processes, postgres.TestDatabase]]:
+def sandbox_stack(
+    key: str, account_id: str, webhook_secret: str | None = None
+) -> Iterator[tuple[Processes, postgres.TestDatabase]]:
     """A scratch database, and the environment of an API and a worker on Increase's
     sandbox. Nothing is started here; everything is stopped and dropped on the way out."""
     database = postgres.create_database(postgres.ensure_template())
@@ -162,7 +225,6 @@ def sandbox_stack(key: str) -> Iterator[tuple[Processes, postgres.TestDatabase]]
         for name, value in os.environ.items()
         if not name.startswith("CORRIDOR_") or name.startswith("CORRIDOR_TEST_")
     }
-    account_id = os.environ.get("CORRIDOR_INCREASE_ACCOUNT_ID", "")
     environment = {
         **inherited,
         "CORRIDOR_ENVIRONMENT": "test",
@@ -175,13 +237,15 @@ def sandbox_stack(key: str) -> Iterator[tuple[Processes, postgres.TestDatabase]]
         "CORRIDOR_BANK_RAIL_PROVIDER": "increase_sandbox",
         "CORRIDOR_INCREASE_BASE_URL": INCREASE_SANDBOX_URL,
         "CORRIDOR_INCREASE_API_KEY": key,
+        "CORRIDOR_INCREASE_ACCOUNT_ID": account_id,
         "CORRIDOR_RECONCILIATION_INTERVAL_SECONDS": str(RECONCILIATION_INTERVAL_SECONDS),
         "CORRIDOR_RECONCILIATION_WINDOW_SECONDS": str(RECONCILIATION_WINDOW_SECONDS),
         "CORRIDOR_RECONCILIATION_GRACE_SECONDS": str(RECONCILIATION_GRACE_SECONDS),
     }
-    # An empty variable is not an account: a workflow variable that was never set is one.
-    if account_id:
-        environment["CORRIDOR_INCREASE_ACCOUNT_ID"] = account_id
+    if webhook_secret is not None:
+        # Every event by webhook, and none by listing: the run proves the webhooks alone.
+        environment["CORRIDOR_INCREASE_WEBHOOK_SECRETS"] = json.dumps([webhook_secret])
+        environment["CORRIDOR_INCREASE_EVENT_POLLING"] = "false"
     processes = Processes(
         base_url=base_url,
         sim_url=NO_SIMULATOR,
@@ -194,6 +258,52 @@ def sandbox_stack(key: str) -> Iterator[tuple[Processes, postgres.TestDatabase]]
         processes.stop()
         processes.close()
         postgres.drop_database(database)
+
+
+@contextmanager
+def tunnel(binary: str, base_url: str) -> Iterator[str]:
+    """A Cloudflare quick tunnel to the API, and its public address while it lasts."""
+    process = subprocess.Popen(
+        [binary, "tunnel", "--no-autoupdate", "--url", base_url],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    found: list[str] = []
+    announced = threading.Event()
+
+    def read() -> None:
+        # cloudflared announces the address it was given on its standard error.
+        for line in process.stderr or ():
+            match = TUNNEL_ADDRESS.search(line)
+            if match and not found:
+                found.append(match.group(0))
+                announced.set()
+
+    threading.Thread(target=read, daemon=True).start()
+    try:
+        if not announced.wait(TUNNEL_SECONDS):
+            raise SandboxError("cloudflared did not announce a tunnel address")
+        public = found[0]
+        # The name takes a moment to resolve once the tunnel is announced.
+        wait_for(
+            "the tunnel to reach the API",
+            lambda: True if _answers(f"{public}/readyz") else None,
+        )
+        yield public
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+
+def _answers(url: str) -> bool:
+    try:
+        return httpx.get(url, timeout=10).status_code == 200
+    except httpx.HTTPError:
+        return False
 
 
 def deposit(stack: Stack, increase: Increase, person: Person, started: datetime) -> str:
@@ -258,6 +368,18 @@ def returned_withdrawal(stack: Stack, increase: Increase, person: Person, benefi
     return str(transfer["id"])
 
 
+async def delivered(owner_url: str) -> int:
+    engine = create_async_engine(owner_url, poolclass=NullPool)
+    try:
+        async with engine.connect() as connection:
+            found = await connection.execute(
+                text("SELECT count(*) FROM webhook_events WHERE provider = 'increase'")
+            )
+            return int(found.scalar_one())
+    finally:
+        await engine.dispose()
+
+
 async def open_breaks(owner_url: str) -> list[dict[str, Any]]:
     engine = create_async_engine(owner_url, poolclass=NullPool)
     try:
@@ -320,6 +442,27 @@ def scenario(processes: Processes, database: postgres.TestDatabase, increase: In
     print(verified.stdout.strip() or verified.stderr.strip())
     check(verified.returncode == 0, "corridor verify-ledger exits 0")
     reconciled(database, {inbound_id, paid, returned})
+    if processes.corridor_environment.get("CORRIDOR_INCREASE_EVENT_POLLING") == "false":
+        count = asyncio.run(delivered(database.owner_url))
+        reading("Increase webhooks received and verified, with listing off", count)
+        check(count > 0, "every event came by webhook, verified by its signature")
+
+
+def run_by_webhook(
+    processes: Processes,
+    database: postgres.TestDatabase,
+    increase: Increase,
+    binary: str,
+    webhook_secret: str,
+) -> None:
+    with tunnel(binary, processes.base_url) as public:
+        print(f"  note  the API is reachable at {public} for this run")
+        subscription = increase.subscribe(f"{public}/v1/webhooks/increase", webhook_secret)
+        try:
+            processes.start_worker()
+            scenario(processes, database, increase)
+        finally:
+            increase.unsubscribe(subscription)
 
 
 def main() -> int:
@@ -330,11 +473,24 @@ def main() -> int:
         return 2
     increase = Increase(key)
     try:
-        with sandbox_stack(key) as (processes, database):
+        # An empty variable is not an account: a workflow variable never set is one.
+        try:
+            account_id = os.environ.get("CORRIDOR_INCREASE_ACCOUNT_ID", "") or increase.account()
+        except (SandboxError, httpx.HTTPError) as failure:
+            print(f"Sandbox run not started: {failure}")
+            return 1
+        print(f"  note  moving money through {account_id}")
+        tunnel_binary = os.environ.get("CORRIDOR_SANDBOX_TUNNEL", "")
+        # Never printed: it is the key Increase signs this run's webhooks with.
+        webhook_secret = secrets.token_urlsafe(36) if tunnel_binary else None
+        with sandbox_stack(key, account_id, webhook_secret) as (processes, database):
             try:
                 processes.start_api()
-                processes.start_worker()
-                scenario(processes, database, increase)
+                if tunnel_binary and webhook_secret is not None:
+                    run_by_webhook(processes, database, increase, tunnel_binary, webhook_secret)
+                else:
+                    processes.start_worker()
+                    scenario(processes, database, increase)
             except (
                 AssertionError,
                 DemoError,

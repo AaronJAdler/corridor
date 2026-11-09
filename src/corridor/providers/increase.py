@@ -713,6 +713,7 @@ class IncreaseBank:
 
             def the_one(document: _AccountsDocument) -> str:
                 if document.next_cursor is not None:
+                    log.warning("increase.account_not_chosen", open_accounts="more than a page")
                     raise self._misconfigured(_WHICH_ACCOUNT.format(count="more than a page of"))
                 open_accounts = [
                     account
@@ -720,6 +721,9 @@ class IncreaseBank:
                     if account.status == "open" and account.currency == USD
                 ]
                 if len(open_accounts) != 1:
+                    # The count, so that the log says why: a key that reaches no account is
+                    # a new sandbox, and one that reaches several needs to be told which.
+                    log.warning("increase.account_not_chosen", open_accounts=len(open_accounts))
                     raise self._misconfigured(_WHICH_ACCOUNT.format(count=len(open_accounts)))
                 return open_accounts[0].id
 
