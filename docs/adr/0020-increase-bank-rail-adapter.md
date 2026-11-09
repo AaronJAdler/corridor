@@ -247,6 +247,11 @@ read in CI.
   returned by `.../return`, then the ledger verifier and reconciliation
   ([sandbox](https://increase.com/documentation/sandbox); paths from
   `resources/simulations/`). It prints what the sandbox answered for each reading below.
+- **Confirmed by the sandbox run of 2026-11-07:** a simulated inbound ACH credit arrives
+  `accepted`; a settled transfer keeps the status `submitted` with `settlement` filled in, as
+  read above; a returned transfer reads `returned`. A new sandbox has no account, so the
+  sandbox run opens one when the key reaches none. The deposit, the settled and the returned
+  withdrawal, the ledger verifier and reconciliation all passed.
 - **Not yet confirmed by the sandbox:** the signing key's encoding, the shape of each object as
   served, whether a settled transfer's `settlement` is filled in the sandbox without a
   simulation, and whether a sandbox inbound transfer arrives `accepted` or `pending`.
